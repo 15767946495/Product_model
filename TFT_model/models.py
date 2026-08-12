@@ -11,7 +11,7 @@ from copy import deepcopy
 import math
 from typing import Any, Dict, List, Tuple, Optional
 
-MODEL_CONTRACT_VERSION = 4
+MODEL_CONTRACT_VERSION = 5
 
 
 class GatedLinearUnit(nn.Module):
@@ -631,14 +631,14 @@ class TFTEncoderForYieldPrediction(nn.Module):
             dropout=dropout,
         )
 
-        # 2. 每列 1 维动态特征 -> hidden(内容投影,作为网格自注意力的 token)
+        # 2. 每列 1 维动态特征 -> hidden，供网格内 VSN 选择
         self.per_feature_linear = nn.ModuleDict(
             {name: nn.Linear(1, hidden_size) for name in self.dynamic_feature_names}
         )
 
-        # 3. 时序变量选择网络（VSN）— 仅含动态特征（已移除 month 特征）
+        # 3. 每个网格独立执行 VSN，静态 c_s 作为变量选择上下文
         vsn_inputs = {name: hidden_size for name in self.dynamic_feature_names}
-        self.temporal_vsn = VariableSelectionNetwork(
+        self.grid_vsn = VariableSelectionNetwork(
             input_sizes=vsn_inputs,
             hidden_size=hidden_size,
             dropout=dropout,
@@ -724,30 +724,33 @@ class TFTEncoderForYieldPrediction(nn.Module):
         c_s, c_e, c_c, c_h = self.soil_static_encoder(soil_feats)
         c_s_expanded = c_s.unsqueeze(1).repeat(1, max_seq_len, 1)
 
-        # 逐特征网格聚合:内容投影(气象值本身)
-        #   attention:坐标位置编码 → 网格维 CLS 自注意力(保留空间结构)
-        #   mean     :掩码加权平均 → 县均值时序(消融对照,不使用坐标)
-        grouped_encoded = {}
-        if self.spatial_mode == "attention":
-            for j, name in enumerate(self.dynamic_feature_names):
-                xf = grid_feats[:, :, :, j:j + 1]                    # (B,G,T,1)
-                tok = self.per_feature_linear[name](xf)              # (B,G,T,H) 内容投影
-                mf = self.spatial_agg(tok, grid_coords, grid_mask)   # (B,T,H) Q/K/V=内容+位置,坐标仅位置编码
-                grouped_encoded[name] = mf
-        else:  # mean
-            denom = grid_mask.sum(dim=1, keepdim=True).clamp(min=1.0)     # (B,1) 有效网格数
-            mask_w = grid_mask[:, :, None, None].to(grid_feats.dtype)     # (B,G,1,1)
-            for j, name in enumerate(self.dynamic_feature_names):
-                xf = grid_feats[:, :, :, j:j + 1]                          # (B,G,T,1)
-                tok = self.per_feature_linear[name](xf)                    # (B,G,T,H)
-                mf = (tok * mask_w).sum(dim=1) / denom.unsqueeze(-1)       # (B,T,H)
-                grouped_encoded[name] = mf
-
-        temporal_feat, _ = self.temporal_vsn(
-            x=grouped_encoded,
-            seq_lens=seq_lens,
-            context=c_s_expanded,
+        # 每个网格独立做静态条件 VSN，生成一个完整气象 token
+        G = grid_feats.shape[1]
+        grid_inputs = {
+            name: self.per_feature_linear[name](grid_feats[..., j:j + 1]).reshape(
+                B * G, T, self.hidden_size
+            )
+            for j, name in enumerate(self.dynamic_feature_names)
+        }
+        grid_seq_lens = seq_lens.repeat_interleave(G)
+        grid_context = c_s.unsqueeze(1).expand(B, G, self.hidden_size)
+        grid_context = grid_context.reshape(B * G, self.hidden_size)
+        grid_context = grid_context.unsqueeze(1).expand(B * G, T, self.hidden_size)
+        grid_token, grid_vsn_weights = self.grid_vsn(
+            grid_inputs, grid_seq_lens, context=grid_context
         )
+        grid_token = grid_token.reshape(B, G, T, self.hidden_size)
+        grid_token = grid_token * grid_mask[:, :, None, None].to(grid_token.dtype)
+
+        # mean 与 attention 共用完全相同的 grid token，只改变空间聚合器
+        if self.spatial_mode == "attention":
+            temporal_feat, spatial_weights = self.spatial_agg.forward_weights(
+                grid_token, grid_coords, grid_mask
+            )
+        else:
+            denom = grid_mask.sum(dim=1, keepdim=True).clamp(min=1.0)
+            temporal_feat = grid_token.sum(dim=1) / denom.unsqueeze(-1)
+            spatial_weights = None
 
         # ========== 4. LSTM 编码器 ==========
         lstm_feat_raw, _, _, _ = self.lstm_encoder(
@@ -773,6 +776,7 @@ class TFTEncoderForYieldPrediction(nn.Module):
 
         grad_tensors = {
             "static_feat": c_s,
+            "grid_vsn_weights": grid_vsn_weights,
             "temporal_feat": temporal_feat,
             "cat_feat": cat_feat,
             "lstm_feat_raw": lstm_feat_raw,
@@ -785,6 +789,8 @@ class TFTEncoderForYieldPrediction(nn.Module):
         aux_dict: Dict[str, Any] = {
             "grad_tensors": grad_tensors,
             "pred_all": pred_all,
+            "grid_vsn_weights": grid_vsn_weights,
+            "spatial_weights": spatial_weights,
         }
 
         return pred_all, attn_weights_out, aux_dict

@@ -7,7 +7,7 @@
   2) python infer.py  --output_dir <combo_dir> --val_year <V>
 组合编号: 0=mean, 1=additive。
 空间注意力逐时间步执行，CLS 与网格 token 均使用 WeatherFormer 四槽时空加性编码。
-输出目录前缀带 "weatherformer2"，与旧实验隔离。
+输出目录前缀带 "gridvsn2"，与旧实验隔离。
 
 已训练完成的组(目录里已有 best_model.pth)默认跳过,加 --force 重训。
 
@@ -218,7 +218,7 @@ def main():
             validate_parallel_args(args.constructed, args.parallel, visible_devices, 0)
         except ValueError as exc:
             parser.error(str(exc))
-    tag = f"weatherformer2_val{args.val_year.replace(',', '_')}_hs{args.hidden_size}_h{args.num_heads}_lstm{args.num_lstm_layers}_c15"
+    tag = f"gridvsn2_val{args.val_year.replace(',', '_')}_hs{args.hidden_size}_h{args.num_heads}_lstm{args.num_lstm_layers}_c15"
     base = _THIS_DIR / "train_output" / tag
     base.mkdir(parents=True, exist_ok=True)
 
