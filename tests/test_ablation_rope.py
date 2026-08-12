@@ -33,25 +33,24 @@ class ParallelValidationTests(unittest.TestCase):
             )
 
     def test_parallel_requires_one_gpu_per_combo(self):
-        with self.assertRaisesRegex(ValueError, "5"):
+        with self.assertRaisesRegex(ValueError, "2"):
             ABLATION_ROPE.validate_parallel_args(
                 constructed=True,
                 parallel=True,
-                visible_devices=["2", "3", "4", "5"],
-                combo_count=5,
+                visible_devices=["2"],
+                combo_count=2,
             )
 
     def test_parallel_rejects_duplicate_combos(self):
         with self.assertRaisesRegex(ValueError, "duplicate"):
             ABLATION_ROPE.validate_unique_combos([0, 1, 1])
 
-    def test_constructed_combos_are_three_spatial_variants(self):
+    def test_constructed_combos_are_mean_and_additive(self):
         self.assertEqual(
-            [ABLATION_ROPE.constructed_combo(i) for i in range(3)],
+            [ABLATION_ROPE.constructed_combo(i) for i in range(2)],
             [
-                {"use_constructed": True, "spatial_mode": "mean", "spatial_encoding": "none"},
-                {"use_constructed": True, "spatial_mode": "attention", "spatial_encoding": "additive"},
-                {"use_constructed": True, "spatial_mode": "attention", "spatial_encoding": "rope"},
+                {"use_constructed": True, "spatial_mode": "mean"},
+                {"use_constructed": True, "spatial_mode": "attention"},
             ],
         )
 

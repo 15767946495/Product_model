@@ -11,44 +11,7 @@ from copy import deepcopy
 import math
 from typing import Any, Dict, List, Tuple, Optional
 
-MODEL_CONTRACT_VERSION = 3
-
-def _rotate_half_pairwise(x: torch.Tensor) -> torch.Tensor:
-    """相邻对旋转:每对 (2m,2m+1) -> (-x_{2m+1}, x_{2m})；奇数尾部维度保持不变。
-
-    RoPE 用 `x*cos + rotate_half(x)*sin` 实现按对 2D 旋转，
-    要求 cos/sin 中同一对的偶数/奇数维取相同角度。
-    """
-    d = x.shape[-1]
-    if d < 2:
-        return x
-    pairs = x[..., : d - (d % 2)].reshape(*x.shape[:-1], -1, 2)
-    flipped = torch.stack([-pairs[..., 1], pairs[..., 0]], dim=-1)
-    flat = flipped.reshape(*x.shape[:-1], -1)
-    if d % 2 == 1:
-        flat = torch.cat([flat, x[..., -1:]], dim=-1)
-    return flat
-
-
-def _apply_rotary(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
-    """RoPE 旋转: x' = x*cos + rotate_half(x)*sin；cos/sin 与 x 形状一致(逐维)。"""
-    return x * cos + _rotate_half_pairwise(x) * sin
-
-
-def _grid_axis_boundaries(d: int) -> List[Tuple[int, int]]:
-    """把 hidden_size 均匀切成 2 段轴区间(按 dim 计, 偶数)。
-
-    轴 = [lat, lng]，每轴占连续 dim 段且段长为偶数(RoPE 相邻对不跨轴)。
-    总对数 d//2 尽量均分到 2 轴,余数给前几轴。要求 d 为偶数。
-    """
-    n_pairs = d // 2
-    q, r = n_pairs // 2, n_pairs % 2
-    axis_pairs = [q + (1 if i < r else 0) for i in range(2)]
-    bounds, acc = [], 0
-    for p in axis_pairs:
-        bounds.append((acc, acc + 2 * p))
-        acc += 2 * p
-    return bounds
+MODEL_CONTRACT_VERSION = 4
 
 
 class GatedLinearUnit(nn.Module):
@@ -551,21 +514,17 @@ class LSTMDecoder(nn.Module):
 
 
 class SpatialAttentionAggregator(nn.Module):
-    """Per-feature spatial pooling with a query-only county CLS token."""
+    """Per-feature WeatherFormer pooling with a query-only county CLS token."""
 
     def __init__(
         self,
         hidden_size: int,
         dropout: float = 0.1,
-        spatial_encoding: str = "additive",
     ):
         super().__init__()
         self.hidden_size = int(hidden_size)
-        if spatial_encoding not in {"additive", "rope"}:
-            raise ValueError("spatial_encoding must be 'additive' or 'rope'")
         if hidden_size % 4 != 0:
-            raise ValueError("空间位置编码要求 hidden_size 能被 4 整除")
-        self.spatial_encoding = spatial_encoding
+            raise ValueError("WeatherFormer position encoding requires hidden_size divisible by 4")
         self.cls_token = nn.Parameter(torch.zeros(self.hidden_size))
         self.W_q = nn.Linear(self.hidden_size, self.hidden_size)
         self.W_k = nn.Linear(self.hidden_size, self.hidden_size)
@@ -582,45 +541,31 @@ class SpatialAttentionAggregator(nn.Module):
             if m.bias is not None:
                 nn.init.zeros_(m.bias)
 
-    def _spatial_pe(self, coords: torch.Tensor) -> torch.Tensor:
-        """Spatial-only additive sinusoidal encoding, shape (B,G,H)."""
+    def _st_pe(self, coords: torch.Tensor, t_idx: torch.Tensor) -> torch.Tensor:
+        """WeatherFormer four-slot encoding, shape (B,G,T,H)."""
         d = self.hidden_size
         nf = d // 4
         i = torch.arange(nf, device=coords.device, dtype=coords.dtype)
         freq = 10000.0 ** (-4.0 * i / d)
-        lat = coords[..., 0:1] * (math.pi / 180.0)
-        lng = coords[..., 1:2] * (math.pi / 180.0)
-        pe = torch.zeros(*coords.shape[:-1], d, device=coords.device, dtype=coords.dtype)
-        pe[..., 0::4] = torch.sin(lat * freq)
-        pe[..., 1::4] = torch.cos(lat * freq)
-        pe[..., 2::4] = torch.sin(lng * freq)
-        pe[..., 3::4] = torch.cos(lng * freq)
+        t = t_idx.to(device=coords.device, dtype=coords.dtype).view(1, 1, -1, 1)
+        lat = (coords[..., 0:1] * (math.pi / 180.0)).unsqueeze(2)
+        lon = (coords[..., 1:2] * (math.pi / 180.0)).unsqueeze(2)
+        pe = torch.zeros(
+            *coords.shape[:-1], t_idx.numel(), d,
+            device=coords.device, dtype=coords.dtype,
+        )
+        pe[..., 0::4] = torch.sin(t * freq)
+        pe[..., 1::4] = torch.cos(t * freq)
+        pe[..., 2::4] = torch.sin(lat * freq)
+        pe[..., 3::4] = torch.cos(lon * freq)
         return pe
 
-    def _grid_rope_cos_sin(
-        self, coords: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """2D RoPE cos/sin for grid keys, shape (B,1,G,H)."""
-        d = self.hidden_size
-        B, G, _ = coords.shape
-        dev, dtype = coords.device, coords.dtype
-        bounds = _grid_axis_boundaries(d)                              # [lat, lng]
-        freq_dim = torch.zeros(d, device=dev, dtype=dtype)
-        for lo, hi in bounds:                                          # 每轴完整频率阶梯
-            n_pairs = (hi - lo) // 2
-            m = torch.arange(max(n_pairs, 1), device=dev, dtype=dtype)
-            f = 10000.0 ** (-2.0 * m / max(n_pairs, 1))
-            freq_dim[lo:hi] = f.repeat_interleave(2)
-        # 每 dim 属于哪一坐标: 0=lat, 1=lng → (2,d) 系数矩阵
-        coord_mult = torch.zeros(d, device=dev, dtype=dtype)
-        for axis, (lo, hi) in enumerate(bounds):
-            coord_mult[lo:hi] = float(axis)
-        coeff = torch.zeros(2, d, device=dev, dtype=dtype)
-        for cval in range(2):
-            coeff[cval] = torch.where(coord_mult == cval, freq_dim, torch.zeros_like(freq_dim))
-        pos2 = coords * (math.pi / 180.0)
-        theta = torch.einsum("bga,ad->bgd", pos2, coeff)
-        return torch.cos(theta).unsqueeze(1), torch.sin(theta).unsqueeze(1)
+    @staticmethod
+    def _cls_coords(coords: torch.Tensor, grid_mask: torch.Tensor) -> torch.Tensor:
+        """Return the masked mean grid center for each county, shape (B,2)."""
+        valid = grid_mask.to(dtype=coords.dtype).unsqueeze(-1)
+        denom = valid.sum(dim=1).clamp_min(1.0)
+        return (coords * valid).sum(dim=1) / denom
 
     def forward(
         self,
@@ -641,19 +586,15 @@ class SpatialAttentionAggregator(nn.Module):
         # tokens: (B, G, T, H) 该特征每网格的 d 维内容投影
         # coords: (B, G, 2), grid_mask: (B, G) bool
         B, _, T, H = tokens.shape
+        t_idx = torch.arange(T, device=tokens.device, dtype=torch.long)
+        cls_coords = self._cls_coords(coords, grid_mask)
+        pe_grid = self._st_pe(coords, t_idx).transpose(1, 2)  # (B,T,G,H)
+        pe_cls = self._st_pe(cls_coords.unsqueeze(1), t_idx).squeeze(1)  # (B,T,H)
         cls = self.cls_token.view(1, 1, H).expand(B, T, H)
-        q = self.W_q(cls).unsqueeze(2)                   # (B,T,1,H)
-        if self.spatial_encoding == "rope":
-            x = tokens.transpose(1, 2)                  # (B,T,G,H)
-            k = self.W_k(x)
-            v = self.W_v(x)
-            cos, sin = self._grid_rope_cos_sin(coords)
-            k = _apply_rotary(k, cos, sin)
-        else:
-            pe = self._spatial_pe(coords).unsqueeze(2)   # (B,G,1,H)
-            x = (tokens + pe).transpose(1, 2)            # (B,T,G,H)
-            k = self.W_k(x)
-            v = self.W_v(x)
+        q = self.W_q(cls + pe_cls).unsqueeze(2)          # (B,T,1,H)
+        x = tokens.transpose(1, 2)                       # (B,T,G,H)
+        k = self.W_k(x + pe_grid)
+        v = self.W_v(x)
         scores = torch.matmul(q, k.transpose(-2, -1)).squeeze(2) / self.scale
         key_valid = grid_mask.unsqueeze(1)                       # (B,1,G)
         scores = scores.masked_fill(~key_valid, float("-inf"))
@@ -676,14 +617,12 @@ class TFTEncoderForYieldPrediction(nn.Module):
         output_size = 1,
         num_heads: int = 3,
         spatial_mode: str = "attention",
-        spatial_encoding: str = "additive",
     ):
         super().__init__()
         self.hidden_size = hidden_size
         self.num_heads = num_heads
         self.dynamic_feature_names = list(dynamic_feature_names)
         self.spatial_mode = spatial_mode
-        self.spatial_encoding = spatial_encoding
 
         # 1. 静态：县级连续土壤(Linear 映射,不分桶)+ 上下文 GRN
         self.soil_static_encoder = SoilStaticEncoder(
@@ -751,12 +690,8 @@ class TFTEncoderForYieldPrediction(nn.Module):
         # 网格级:逐特征网格自注意力(内容驱动,Q/K/V=内容+位置,坐标仅位置编码,对齐 MMST-ViT S-MHA)
         # spatial_mode="mean" 为消融对照:退化为掩码加权平均(直接网格均值),不创建 spatial_agg
         if spatial_mode == "attention":
-            self.spatial_agg = SpatialAttentionAggregator(
-                hidden_size, dropout, spatial_encoding=spatial_encoding
-            )
+            self.spatial_agg = SpatialAttentionAggregator(hidden_size, dropout)
         elif spatial_mode == "mean":
-            if spatial_encoding != "none":
-                raise ValueError("spatial_mode='mean' requires spatial_encoding='none'")
             self.spatial_agg = None
         else:
             raise ValueError(f"未知 spatial_mode: {spatial_mode}，可选 'attention' / 'mean'")

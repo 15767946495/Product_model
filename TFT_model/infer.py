@@ -178,17 +178,13 @@ def infer():
             f"checkpoint contract mismatch: expected {MODEL_CONTRACT_VERSION}, "
             f"got {hp.get('model_contract_version')}"
         )
-    if "spatial_encoding" not in hp:
-        raise ValueError("legacy checkpoint without spatial_encoding is unsupported")
     hidden_size = int(hp["hidden_size"])
     num_heads = int(hp["num_heads"])
     num_lstm_layers = int(hp["num_lstm_layers"])
     dropout = float(hp["dropout"])
     spatial_mode = str(hp["spatial_mode"])
-    spatial_encoding = str(hp["spatial_encoding"])
     print(f"    超参: hidden_size={hidden_size}, num_heads={num_heads}, "
-          f"num_lstm_layers={num_lstm_layers}, dropout={dropout}, spatial_mode={spatial_mode}, "
-          f"spatial_encoding={spatial_encoding}")
+          f"num_lstm_layers={num_lstm_layers}, dropout={dropout}, spatial_mode={spatial_mode}")
     model = TFTEncoderForYieldPrediction(
         soil_dim=SOIL_DIM,
         dynamic_feature_names=dynamic_feature_names,
@@ -198,7 +194,6 @@ def infer():
         output_size=1,
         num_heads=num_heads,
         spatial_mode=spatial_mode,
-        spatial_encoding=spatial_encoding,
     )
     model.load_state_dict(torch.load(ckpt_path, map_location=device))
     model = model.to(device)

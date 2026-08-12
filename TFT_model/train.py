@@ -492,12 +492,6 @@ def main():
     parser.add_argument("--use_constructed", action="store_true",
                         help="追加全部农学构造特征(CumGDD/KDD/CumPRCP/CumDeficit,15 维动态输入)"
                              ";与 --use_gdd 互斥,开启时以本开关为准")
-    parser.add_argument(
-        "--spatial_encoding",
-        choices=["none", "additive", "rope"],
-        default="additive",
-        help="网格位置编码:none(仅 mean)/additive(纯空间正余弦)/rope(纯空间2D RoPE)",
-    )
     args = parser.parse_args()
 
     # 解析验证年份
@@ -621,14 +615,13 @@ def main():
         output_size=1,
         num_heads=args.num_heads,
         spatial_mode=args.spatial_mode,
-        spatial_encoding=args.spatial_encoding,
     )
 
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"  参数总量: {total_params:,}, 可训练: {trainable_params:,}")
     print(f"  消融开关: use_constructed={args.use_constructed}  use_gdd={args.use_gdd}  "
-          f"spatial_encoding={args.spatial_encoding}")
+          f"spatial_mode={args.spatial_mode}")
 
     # 保存模型超参
     hparams = {
@@ -643,7 +636,6 @@ def main():
         "spatial_mode": args.spatial_mode,
         "use_gdd": bool(args.use_gdd),
         "use_constructed": bool(args.use_constructed),
-        "spatial_encoding": args.spatial_encoding,
     }
     with open(os.path.join(output_dir, "model_hparams.json"), "w", encoding="utf-8") as f:
         json.dump(hparams, f, ensure_ascii=False, indent=2)

@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-三组空间消融: mean / additive / rope，农学构造特征固定开启。
+两组空间消融: mean / additive，农学构造特征固定开启。
 
 每组:
   1) python train.py --output_dir <combo_dir> --val_year <V> <开关> ...
   2) python infer.py  --output_dir <combo_dir> --val_year <V>
-组合编号: 0=mean, 1=additive, 2=rope。
-空间注意力逐时间步执行，additive 和 rope 均只编码网格中心经纬度，不编码时间。
-输出目录前缀带 "spatial3"，与旧实验隔离。
+组合编号: 0=mean, 1=additive。
+空间注意力逐时间步执行，CLS 与网格 token 均使用 WeatherFormer 四槽时空加性编码。
+输出目录前缀带 "weatherformer2"，与旧实验隔离。
 
 已训练完成的组(目录里已有 best_model.pth)默认跳过,加 --force 重训。
 
 用法:
-  python ablation_rope.py --constructed            # 3 组: mean/additive/rope
+  python ablation_rope.py --constructed            # 2 组: mean/additive
   python ablation_rope.py --constructed --val_year 2022 --force
-  python ablation_rope.py --constructed --combo 0 2
+  python ablation_rope.py --constructed --combo 0 1
   python ablation_rope.py --constructed --infer-only
 """
 
@@ -32,9 +32,8 @@ _THIS_DIR = Path(__file__).resolve().parent
 
 def constructed_combo(i: int) -> dict:
     combos = [
-        {"use_constructed": True, "spatial_mode": "mean", "spatial_encoding": "none"},
-        {"use_constructed": True, "spatial_mode": "attention", "spatial_encoding": "additive"},
-        {"use_constructed": True, "spatial_mode": "attention", "spatial_encoding": "rope"},
+        {"use_constructed": True, "spatial_mode": "mean"},
+        {"use_constructed": True, "spatial_mode": "attention"},
     ]
     return combos[i]
 
@@ -112,7 +111,7 @@ def run_combo(
     ckpt = combo_dir / "best_model.pth"
     train_log = combo_dir / "train.log"
 
-    print(f"\n{'='*64}\n  {cn}: {feat_col} 固定 spatial_encoding={f['spatial_encoding']}"
+    print(f"\n{'='*64}\n  {cn}: {feat_col} 固定 WeatherFormer 时空加性编码"
           f"\n{'='*64}", flush=True)
 
     if gpu_id is not None:
@@ -136,7 +135,6 @@ def run_combo(
         if args.constructed:
             cmd.append("--use_constructed")
         cmd += ["--spatial_mode", f.get("spatial_mode", "attention")]
-        cmd += ["--spatial_encoding", f["spatial_encoding"]]
         if args.use_crucial:
             cmd.append("--use_crucial")
         print(f"[训练] {' '.join(cmd)} GPU={gpu_id or 'default'}", flush=True)
@@ -163,7 +161,7 @@ def run_combo(
     return cn, {
         "use_constructed": f.get("use_constructed", False),
         "spatial_mode": f.get("spatial_mode", "attention"),
-        "spatial_encoding": f["spatial_encoding"],
+        "encoding": "none" if f["spatial_mode"] == "mean" else "additive",
         "best_train_val_rmse": parse_train_best_rmse(train_log),
         "last_rmse": last.get("rmse"),
         "last_r2": last.get("r2"),
@@ -173,11 +171,11 @@ def run_combo(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="空间消融: 网格均值 vs 纯空间加性编码 vs 纯空间2D RoPE")
+    parser = argparse.ArgumentParser(description="空间消融: 网格均值 vs WeatherFormer 时空加性编码")
     parser.add_argument("--val_year", type=str, default="2021",
                         help="验证/测试年,与 train.py/infer.py 一致(默认 2021,即网格搜索最优配置的年)")
     parser.add_argument("--constructed", action="store_true",
-                        help="3 组空间消融，农学构造特征(15维)固定开启")
+                        help="2 组空间消融，农学构造特征(15维)固定开启")
     parser.add_argument("--hidden_size", type=int, default=36)
     parser.add_argument("--num_heads", type=int, default=1)
     parser.add_argument("--num_lstm_layers", type=int, default=1)
@@ -188,7 +186,7 @@ def main():
     parser.add_argument("--lr", type=float, default=5e-4)
     parser.add_argument("--use_crucial", action="store_true")
     parser.add_argument("--combo", type=int, nargs="*", default=None,
-                        help="只跑指定组合编号(默认全部,范围0-2)")
+                        help="只跑指定组合编号(默认全部,范围0-1)")
     parser.add_argument("--force", action="store_true", help="已训练完成的组也重训")
     parser.add_argument("--infer-only", action="store_true",
                         help="不训练,只对已有 checkpoint 跑推理")
@@ -197,9 +195,9 @@ def main():
     args = parser.parse_args()
 
     if not args.constructed:
-        parser.error("当前脚本仅支持 --constructed 三组空间消融")
-    combo_fn, max_combo, feat_col = constructed_combo, 2, "构造"
-    combo_name = lambda f: f["spatial_encoding"] if f["spatial_mode"] == "attention" else "mean"
+        parser.error("当前脚本仅支持 --constructed 两组空间消融")
+    combo_fn, max_combo, feat_col = constructed_combo, 1, "构造"
+    combo_name = lambda f: "mean" if f["spatial_mode"] == "mean" else "additive"
 
     combos = args.combo if args.combo is not None else list(range(max_combo + 1))
     valid_combos = []
@@ -220,7 +218,7 @@ def main():
             validate_parallel_args(args.constructed, args.parallel, visible_devices, 0)
         except ValueError as exc:
             parser.error(str(exc))
-    tag = f"spatial3_val{args.val_year.replace(',', '_')}_hs{args.hidden_size}_h{args.num_heads}_lstm{args.num_lstm_layers}_c15"
+    tag = f"weatherformer2_val{args.val_year.replace(',', '_')}_hs{args.hidden_size}_h{args.num_heads}_lstm{args.num_lstm_layers}_c15"
     base = _THIS_DIR / "train_output" / tag
     base.mkdir(parents=True, exist_ok=True)
 
@@ -277,7 +275,7 @@ def main():
         r = results.get(cn, {})
         sm = f.get("spatial_mode", "attention")[:3]
         g = "on" if (f.get("use_constructed", False) or f.get("use_gdd", False)) else "-"
-        encoding = f["spatial_encoding"]
+        encoding = "none" if f["spatial_mode"] == "mean" else "additive"
         t_rmse = r.get("best_train_val_rmse")
         i_rmse, i_r2, i_corr = r.get("last_rmse"), r.get("last_r2"), r.get("last_corr")
         fmt = lambda v: f"{v:.4f}" if v is not None else "  N/A"
