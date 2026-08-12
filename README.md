@@ -43,7 +43,24 @@ pip install -r requirements.txt
 | `BaseLine_Model/output/` | 基线模型输出数据 | ~930MB |
 
 这些文件因超出 Git 与 GitHub 的存储限制（单文件 >100MB 会被 GitHub 拒绝），改为**外置存放**。
-> 下载地址：*（待补充 — 数据已上传至 网盘/HuggingFace 后在此填写链接）*
+
+> **下载地址：[ModelScope 数据集 wbsyz1/CropDataSet](https://www.modelscope.cn/datasets/wbsyz1/CropDataSet)**
+
+数据以两个压缩包（tar.gz，内部保留原始目录结构）提供：
+
+| 包 | 内容 | 大小 |
+|----|------|------|
+| `cropnet_weather_data.tar.gz` | WRF-HRRR 网格气象（2017–2022） | 约 5.8GB（原始 28GB） |
+| `cropnet_aux_data.tar.gz` | USDA 数据、土壤、train_dataset、基线输出 | 约 1.8GB |
+
+**解压方式**（在项目根目录执行，解压后即还原 `DataSrc/` 等原始结构）：
+
+```bash
+tar -xzf cropnet_weather_data.tar.gz
+tar -xzf cropnet_aux_data.tar.gz
+```
+
+SHA256 校验值见数据集仓库的 `SHA256SUMS` 文件。
 
 ### 数据再生成
 
