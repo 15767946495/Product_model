@@ -11,6 +11,7 @@ from copy import deepcopy
 import math
 from typing import Any, Dict, List, Tuple, Optional
 
+MODEL_CONTRACT_VERSION = 3
 
 def _rotate_half_pairwise(x: torch.Tensor) -> torch.Tensor:
     """相邻对旋转:每对 (2m,2m+1) -> (-x_{2m+1}, x_{2m})；奇数尾部维度保持不变。
@@ -228,7 +229,6 @@ class CausalScaledDotProductAttention(nn.Module):
         num_heads: int = 2,
         dropout: float = 0.1,
         mask_bias: float = -1e6,
-        use_rope: bool = False,
     ):
         super().__init__()
         self.hidden_size = int(hidden_size)
@@ -237,10 +237,7 @@ class CausalScaledDotProductAttention(nn.Module):
             raise ValueError(
                 f"hidden_size ({self.hidden_size}) 须能被 num_heads ({self.num_heads}) 整除"
             )
-        if use_rope and (self.hidden_size // self.num_heads) % 2 != 0:
-            raise ValueError("use_rope 时 head_dim 须为偶数(按对旋转)")
         self.head_dim = self.hidden_size // self.num_heads
-        self.use_rope = use_rope
         self.mask_bias = mask_bias
         self.W_q = nn.Linear(self.hidden_size, self.hidden_size)
         self.W_k = nn.Linear(self.hidden_size, self.hidden_size)
@@ -267,21 +264,6 @@ class CausalScaledDotProductAttention(nn.Module):
         B, T, _ = x.shape
         return x.view(B, T, self.num_heads, self.head_dim).transpose(1, 2)
 
-    def _time_rope_cos_sin(self, t: int, device: torch.device) -> Tuple[torch.Tensor, torch.Tensor]:
-        """一维时间 RoPE 的 cos/sin:(T, head_dim)。
-
-        θ_m(t) = t · 10000^(-2m/head_dim), m=0..head_dim/2-1;
-        同一对 (2m,2m+1) 用相同角度(逐维重复)。仅作用于 Q/K,V 不旋转。
-        """
-        hd = self.head_dim
-        m = torch.arange(hd // 2, device=device, dtype=torch.float32)
-        freq = 10000.0 ** (-2.0 * m / hd)                  # (hd/2,)
-        tt = torch.arange(t, device=device, dtype=torch.float32).unsqueeze(1)  # (T,1)
-        theta = tt * freq.unsqueeze(0)                     # (T, hd/2)
-        cos = torch.cos(theta).repeat_interleave(2, dim=-1)   # (T, hd)
-        sin = torch.sin(theta).repeat_interleave(2, dim=-1)
-        return cos, sin
-
     def forward(
         self,
         x: torch.Tensor,
@@ -294,13 +276,6 @@ class CausalScaledDotProductAttention(nn.Module):
         v = self.W_v(x)  # (B, T, head_dim)
         q = self._split_heads(self.W_q(x))
         k = self._split_heads(self.W_k(x))
-        if self.use_rope:
-            # 时间 RoPE: A_{t,s} = q_tᵀ R(θ_s-θ_t) k_s / √d —— 相对时间入分,绝对季节留给特征
-            cos, sin = self._time_rope_cos_sin(T, q.device)
-            cos = cos.unsqueeze(0).unsqueeze(0)   # (1,1,T,hd)
-            sin = sin.unsqueeze(0).unsqueeze(0)
-            q = _apply_rotary(q, cos, sin)
-            k = _apply_rotary(k, cos, sin)
         attn_scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(
             float(self.head_dim)
         )
@@ -576,26 +551,21 @@ class LSTMDecoder(nn.Module):
 
 
 class SpatialAttentionAggregator(nn.Module):
-    """对单个气象特征 (B,G,T,H) 在网格维做 CLS 自注意力 → (B,T,H)。
+    """Per-feature spatial pooling with a query-only county CLS token."""
 
-    对齐 MMST-ViT 的 Spatial Transformer(S-MHA,式3/式4):
-      - 每个网格的气象值经 per_feature_linear 内容投影成 d 维 token;
-      - 位置编码二选一:
-          use_rope=True : 2D RoPE(lat, lng),仅旋转 Q/K,每坐标一对(sin,cos),
-                          CLS token 位置=0(空间中性),加性位置偏置不再叠加。
-                          不含时间轴:网格注意力逐时间步做,同一时刻所有网格共享同一 t,
-                          时间在这里只能当绝对信号(弱),季节进程交给时序分支(time RoPE);
-          use_rope=False: 加性正余弦时空位置编码(逐位对齐 WeatherFormer 3.2.3,
-                          时间/纬度/经度共享同一频率阶梯),叠加到 token(旧版)。
-      - 前置可学习 CLS,按 grid_mask 屏蔽填充网格,取 CLS 输出为该特征一条县时序。
-    """
-
-    def __init__(self, hidden_size: int, dropout: float = 0.1, use_rope: bool = False):
+    def __init__(
+        self,
+        hidden_size: int,
+        dropout: float = 0.1,
+        spatial_encoding: str = "additive",
+    ):
         super().__init__()
         self.hidden_size = int(hidden_size)
-        if use_rope and hidden_size % 2 != 0:
-            raise ValueError("use_rope 时 hidden_size 须为偶数(RoPE 按对旋转)")
-        self.use_rope = use_rope
+        if spatial_encoding not in {"additive", "rope"}:
+            raise ValueError("spatial_encoding must be 'additive' or 'rope'")
+        if hidden_size % 4 != 0:
+            raise ValueError("空间位置编码要求 hidden_size 能被 4 整除")
+        self.spatial_encoding = spatial_encoding
         self.cls_token = nn.Parameter(torch.zeros(self.hidden_size))
         self.W_q = nn.Linear(self.hidden_size, self.hidden_size)
         self.W_k = nn.Linear(self.hidden_size, self.hidden_size)
@@ -606,52 +576,31 @@ class SpatialAttentionAggregator(nn.Module):
         self._init_weights()
 
     def _init_weights(self):
+        nn.init.normal_(self.cls_token, mean=0.0, std=0.02)
         for m in (self.W_q, self.W_k, self.W_v):
             nn.init.xavier_uniform_(m.weight)
             if m.bias is not None:
                 nn.init.zeros_(m.bias)
 
-    def _st_pe(self, coords: torch.Tensor, t_idx: torch.Tensor) -> torch.Tensor:
-        """正余弦时空位置编码(逐位对齐 WeatherFormer 3.2.3,固定无学习参数)。
-
-        PE(4i)   = sin(t · 10000^(-4i/d))               时间
-        PE(4i+1) = cos(t · 10000^(-4i/d))               时间
-        PE(4i+2) = sin(π·lat/180 · 10000^(-4i/d))       纬度
-        PE(4i+3) = cos(π·lng/180 · 10000^(-4i/d))       经度
-        时间/纬度/经度共享同一频率阶梯 10000^(-4i/d),π/180 把度转弧度。
-        要求 hidden_size 被 4 整除。coords: (B,G,2); t_idx: (T,); 返回 (B,G,T,d)。
-        """
+    def _spatial_pe(self, coords: torch.Tensor) -> torch.Tensor:
+        """Spatial-only additive sinusoidal encoding, shape (B,G,H)."""
         d = self.hidden_size
-        assert d % 4 == 0, "hidden_size 须能被 4 整除(4 项时空编码)"
         nf = d // 4
         i = torch.arange(nf, device=coords.device, dtype=coords.dtype)
-        freq = 10000.0 ** (-4.0 * i / d)                  # (d/4,)
-        t = t_idx.to(coords.device, coords.dtype).unsqueeze(-1)   # (T,1)
-        lat = coords[..., 0:1] * (math.pi / 180.0)        # (B,G,1)
-        lng = coords[..., 1:2] * (math.pi / 180.0)        # (B,G,1)
-        T = t.shape[0]
-        pe = torch.zeros(*coords.shape[:-1], T, d, device=coords.device, dtype=coords.dtype)
-        pe[..., 0::4] = torch.sin(t * freq).unsqueeze(0).unsqueeze(0)       # 时间
-        pe[..., 1::4] = torch.cos(t * freq).unsqueeze(0).unsqueeze(0)
-        pe[..., 2::4] = torch.sin(lat * freq).unsqueeze(2)                   # 纬度
-        pe[..., 3::4] = torch.cos(lng * freq).unsqueeze(2)                   # 经度
+        freq = 10000.0 ** (-4.0 * i / d)
+        lat = coords[..., 0:1] * (math.pi / 180.0)
+        lng = coords[..., 1:2] * (math.pi / 180.0)
+        pe = torch.zeros(*coords.shape[:-1], d, device=coords.device, dtype=coords.dtype)
+        pe[..., 0::4] = torch.sin(lat * freq)
+        pe[..., 1::4] = torch.cos(lat * freq)
+        pe[..., 2::4] = torch.sin(lng * freq)
+        pe[..., 3::4] = torch.cos(lng * freq)
         return pe
 
     def _grid_rope_cos_sin(
         self, coords: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """2D RoPE 的 cos/sin:(B, 1, G+1, H),对任意 t 相同(时间不参与)。
-
-        2 轴各占连续 dim 段(偶数): [lat | lng],每坐标一对(sin,cos),地位相同:
-          - 每轴**独立完整频率阶梯**(10000^(-2m/n_axis)),首频=1,
-            lat/lng 数据范围小(如玉米带 24-49°N → 弧度 < π/2),单轴就足够唯一区分,
-            不需要 WeatherFormer 那种"时间占 2 槽、空间各半槽"的不对称编码;
-          - 不含时间轴:网格注意力逐时间步做,同一时刻所有网格共享同一个 t,
-            时间在这里无法当相对轴(网格↔网格相对时间恒为 0),只能当绝对信号且偏弱,
-            季节进程交给时序分支(LSTM + time RoPE)编码;
-          - CLS token 位置=0(空间中性),加性位置偏置不再叠加。
-        返回逐维 cos/sin,可直接用于 x*cos + rotate_half(x)*sin(沿 T 广播)。
-        """
+        """2D RoPE cos/sin for grid keys, shape (B,1,G,H)."""
         d = self.hidden_size
         B, G, _ = coords.shape
         dev, dtype = coords.device, coords.dtype
@@ -669,14 +618,8 @@ class SpatialAttentionAggregator(nn.Module):
         coeff = torch.zeros(2, d, device=dev, dtype=dtype)
         for cval in range(2):
             coeff[cval] = torch.where(coord_mult == cval, freq_dim, torch.zeros_like(freq_dim))
-        # 位置: 网格 token = (lat, lng); CLS token = 全 0(空间中性)
-        lat_rad = coords[..., 0] * (math.pi / 180.0)                   # (B,G)
-        lng_rad = coords[..., 1] * (math.pi / 180.0)                   # (B,G)
-        lat_b = torch.cat([torch.zeros(B, 1, device=dev, dtype=dtype), lat_rad], dim=1)  # (B,G+1)
-        lng_b = torch.cat([torch.zeros(B, 1, device=dev, dtype=dtype), lng_rad], dim=1)  # (B,G+1)
-        pos2 = torch.stack([lat_b, lng_b], dim=-1)                     # (B,G+1,2)
-        theta = torch.einsum("bga,ad->bgd", pos2, coeff)               # (B,G+1,d)
-        # 时间维=1,沿 T 广播: q/k 是 (B,T,G+1,H)
+        pos2 = coords * (math.pi / 180.0)
+        theta = torch.einsum("bga,ad->bgd", pos2, coeff)
         return torch.cos(theta).unsqueeze(1), torch.sin(theta).unsqueeze(1)
 
     def forward(
@@ -694,54 +637,30 @@ class SpatialAttentionAggregator(nn.Module):
         coords: torch.Tensor,
         grid_mask: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """同 forward,但额外返回 CLS 注意力权重 w:(B, T, G+1, G+1)。
-
-        w[b,t,i,j] = 时刻 t 查询 token i 对 key token j 的注意力;
-        CLS 是 token 0,故 CLS 对各网格的注意力为 w[:, :, 0, 1:]。
-        """
+        """Return county features and CLS-to-grid weights shaped (B,T,G)."""
         # tokens: (B, G, T, H) 该特征每网格的 d 维内容投影
         # coords: (B, G, 2), grid_mask: (B, G) bool
         B, _, T, H = tokens.shape
-        t_idx = torch.arange(T, device=tokens.device, dtype=torch.long)
-        cls = self.cls_token.view(1, 1, 1, H).expand(B, 1, T, H)
-        if self.use_rope:
-            # 2D RoPE(lat/lng): 位置只进 Q/K(旋转),不加到 token。CLS 位置=0(空间中性)。
-            x = torch.cat([cls, tokens], dim=1)          # (B, G+1, T, H)
-            valid = torch.cat([
-                torch.ones(B, 1, device=grid_mask.device, dtype=torch.bool),
-                grid_mask,
-            ], dim=1)                                    # (B, G+1)
-            x = x.transpose(1, 2)                        # (B, T, G+1, H)
-            q = self.W_q(x)
+        cls = self.cls_token.view(1, 1, H).expand(B, T, H)
+        q = self.W_q(cls).unsqueeze(2)                   # (B,T,1,H)
+        if self.spatial_encoding == "rope":
+            x = tokens.transpose(1, 2)                  # (B,T,G,H)
             k = self.W_k(x)
             v = self.W_v(x)
-            cos, sin = self._grid_rope_cos_sin(coords)   # (B,1,G+1,H),沿 T 广播
-            q = _apply_rotary(q, cos, sin)
+            cos, sin = self._grid_rope_cos_sin(coords)
             k = _apply_rotary(k, cos, sin)
         else:
-            # 旧版加性路径: 内容 + 时空位置编码 → 权重随网格位置与季节(步)变化。
-            # 注意:时间偏置若只加在分数上(逐时间步常数)对 softmax 不变,必须加到 token。
-            pe = self._st_pe(coords, t_idx)              # (B, G, T, H) 时空正余弦位置编码
-            x = tokens + pe                              # (B,G,T,H) 加性
-            x = torch.cat([cls, x], dim=1)               # (B, G+1, T, H)
-            valid = torch.cat([
-                torch.ones(B, 1, device=grid_mask.device, dtype=torch.bool),
-                grid_mask,
-            ], dim=1)                                    # (B, G+1)
-            x = x.transpose(1, 2)                        # (B, T, G+1, H)
-            q = self.W_q(x)
+            pe = self._spatial_pe(coords).unsqueeze(2)   # (B,G,1,H)
+            x = (tokens + pe).transpose(1, 2)            # (B,T,G,H)
             k = self.W_k(x)
             v = self.W_v(x)
-        scores = torch.matmul(q, k.transpose(-2, -1)) / self.scale   # (B,T,G+1,G+1)
-        # 按 key 维(dim3)屏蔽填充网格;valid 需放到第 3 维(unsqueeze(2)),
-        # 若误放到查询维会整行 -inf → softmax NaN、且有效查询未屏蔽填充 key。
-        key_valid = valid.unsqueeze(1).unsqueeze(2)              # (B,1,1,G+1)
+        scores = torch.matmul(q, k.transpose(-2, -1)).squeeze(2) / self.scale
+        key_valid = grid_mask.unsqueeze(1)                       # (B,1,G)
         scores = scores.masked_fill(~key_valid, float("-inf"))
-        w = torch.softmax(scores, dim=-1)
+        w = torch.softmax(scores, dim=-1)                         # (B,T,G)
         w = self.dropout(w)
-        w = w * key_valid.to(w.dtype)                            # 填充网格权重置 0
-        out = torch.matmul(w, v)                         # (B, T, G+1, H)
-        cls_out = out[:, :, 0]                           # (B, T, H)
+        w = w * key_valid.to(w.dtype)
+        cls_out = torch.matmul(w.unsqueeze(2), v).squeeze(2)
         return self.norm(cls_out), w
 
 
@@ -757,16 +676,14 @@ class TFTEncoderForYieldPrediction(nn.Module):
         output_size = 1,
         num_heads: int = 3,
         spatial_mode: str = "attention",
-        use_grid_rope: bool = False,
-        use_time_rope: bool = False,
+        spatial_encoding: str = "additive",
     ):
         super().__init__()
         self.hidden_size = hidden_size
         self.num_heads = num_heads
         self.dynamic_feature_names = list(dynamic_feature_names)
         self.spatial_mode = spatial_mode
-        self.use_grid_rope = use_grid_rope
-        self.use_time_rope = use_time_rope
+        self.spatial_encoding = spatial_encoding
 
         # 1. 静态：县级连续土壤(Linear 映射,不分桶)+ 上下文 GRN
         self.soil_static_encoder = SoilStaticEncoder(
@@ -808,12 +725,11 @@ class TFTEncoderForYieldPrediction(nn.Module):
             dropout=dropout,
         )
 
-        # 5. 多头纯因果自注意力(可选项: Q/K 一维时间 RoPE)
+        # 5. 多头纯因果自注意力
         self.attention = CausalScaledDotProductAttention(
             hidden_size=hidden_size,
             num_heads=num_heads,
             dropout=dropout,
-            use_rope=use_time_rope,
         )
 
         # 6. 产量预测头
@@ -835,8 +751,12 @@ class TFTEncoderForYieldPrediction(nn.Module):
         # 网格级:逐特征网格自注意力(内容驱动,Q/K/V=内容+位置,坐标仅位置编码,对齐 MMST-ViT S-MHA)
         # spatial_mode="mean" 为消融对照:退化为掩码加权平均(直接网格均值),不创建 spatial_agg
         if spatial_mode == "attention":
-            self.spatial_agg = SpatialAttentionAggregator(hidden_size, dropout, use_rope=use_grid_rope)
+            self.spatial_agg = SpatialAttentionAggregator(
+                hidden_size, dropout, spatial_encoding=spatial_encoding
+            )
         elif spatial_mode == "mean":
+            if spatial_encoding != "none":
+                raise ValueError("spatial_mode='mean' requires spatial_encoding='none'")
             self.spatial_agg = None
         else:
             raise ValueError(f"未知 spatial_mode: {spatial_mode}，可选 'attention' / 'mean'")

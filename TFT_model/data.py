@@ -809,7 +809,10 @@ def create_dataloader(
 # ============================================================
 def load_grid_cache(path: str = DEFAULT_GRID_CACHE) -> Dict:
     """加载 grid_cache.pt,返回 {"version", "feat_names", "entries"}。"""
-    return torch.load(path, map_location="cpu")
+    payload = torch.load(path, map_location="cpu")
+    if payload.get("version") != 3 or payload.get("coord_type") != "grid_center":
+        raise ValueError("grid_cache must use version 3 with coord_type='grid_center'")
+    return payload
 
 
 def compute_grid_global_stats(

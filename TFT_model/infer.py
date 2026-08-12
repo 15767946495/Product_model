@@ -32,7 +32,7 @@ _THIS_DIR = Path(__file__).resolve().parent
 if str(_THIS_DIR) not in sys.path:
     sys.path.insert(0, str(_THIS_DIR))
 
-from models import TFTEncoderForYieldPrediction
+from models import MODEL_CONTRACT_VERSION, TFTEncoderForYieldPrediction
 from data import (
     load_jsonl,
     load_grid_cache,
@@ -169,23 +169,26 @@ def infer():
     # 优先读训练时保存的超参,保证 hidden_size/num_heads 与 checkpoint 一致
     # (否则用 num_heads 不同的 checkpoint 会 state_dict 尺寸不匹配而崩)
     hparams_path = os.path.join(output_dir, "model_hparams.json")
-    if os.path.exists(hparams_path):
-        with open(hparams_path, "r", encoding="utf-8") as f:
-            hp = json.load(f)
-        hidden_size = int(hp.get("hidden_size", 32))
-        num_heads = int(hp.get("num_heads", 4))
-        num_lstm_layers = int(hp.get("num_lstm_layers", 1))
-        dropout = float(hp.get("dropout", 0.2))
-        spatial_mode = str(hp.get("spatial_mode", "attention"))
-        use_grid_rope = bool(hp.get("grid_rope", False))
-        use_time_rope = bool(hp.get("time_rope", False))
-    else:
-        hidden_size, num_heads, num_lstm_layers, dropout = 32, 4, 1, 0.2
-        spatial_mode = "attention"
-        use_grid_rope, use_time_rope = False, False
+    if not os.path.exists(hparams_path):
+        raise ValueError("model_hparams.json is required; legacy checkpoints are unsupported")
+    with open(hparams_path, "r", encoding="utf-8") as f:
+        hp = json.load(f)
+    if hp.get("model_contract_version") != MODEL_CONTRACT_VERSION:
+        raise ValueError(
+            f"checkpoint contract mismatch: expected {MODEL_CONTRACT_VERSION}, "
+            f"got {hp.get('model_contract_version')}"
+        )
+    if "spatial_encoding" not in hp:
+        raise ValueError("legacy checkpoint without spatial_encoding is unsupported")
+    hidden_size = int(hp["hidden_size"])
+    num_heads = int(hp["num_heads"])
+    num_lstm_layers = int(hp["num_lstm_layers"])
+    dropout = float(hp["dropout"])
+    spatial_mode = str(hp["spatial_mode"])
+    spatial_encoding = str(hp["spatial_encoding"])
     print(f"    超参: hidden_size={hidden_size}, num_heads={num_heads}, "
           f"num_lstm_layers={num_lstm_layers}, dropout={dropout}, spatial_mode={spatial_mode}, "
-          f"grid_rope={use_grid_rope}, time_rope={use_time_rope}")
+          f"spatial_encoding={spatial_encoding}")
     model = TFTEncoderForYieldPrediction(
         soil_dim=SOIL_DIM,
         dynamic_feature_names=dynamic_feature_names,
@@ -195,8 +198,7 @@ def infer():
         output_size=1,
         num_heads=num_heads,
         spatial_mode=spatial_mode,
-        use_grid_rope=use_grid_rope,
-        use_time_rope=use_time_rope,
+        spatial_encoding=spatial_encoding,
     )
     model.load_state_dict(torch.load(ckpt_path, map_location=device))
     model = model.to(device)

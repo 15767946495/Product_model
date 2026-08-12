@@ -1,42 +1,25 @@
 #!/usr/bin/env python3
 """
-8 组合消融: use_gdd × grid_rope × time_rope (每个开关开/关, 2^3 = 8 组)。
+三组空间消融: mean / additive / rope，农学构造特征固定开启。
 
 每组:
   1) python train.py --output_dir <combo_dir> --val_year <V> <开关> ...
   2) python infer.py  --output_dir <combo_dir> --val_year <V>
-infer.py 会从 model_hparams.json 自动读回三个开关(旧 checkpoint 无键默认 False)。
-
-组合编号(位图): i 的 bit2=use_gdd, bit1=grid_rope, bit0=time_rope
-  g0r0t0  基线(现有无月份模型 + 加性位置编码)
-  g0r0t1  仅时间 RoPE
-  g0r1t0  仅网格 2D RoPE(lat/lng,CLS 空间中性,不含时间)
-  g0r1t1  RoPE 全开(无 GDD)
-  g1r0t0  仅 GDD 通道
-  g1r0t1  GDD + 时间 RoPE
-  g1r1t0  GDD + 网格 2D RoPE
-  g1r1t1  GDD + RoPE 全开
-
-注:网格 RoPE 已从 3D(time,lat,lng)改为 2D(lat/lng),去掉时间轴
-(逐时间步网格注意力里时间只能当弱绝对信号,季节交给时序分支)。
-输出目录前缀带 "ablation2d",与旧的 ablation_val* 目录隔离(旧 checkpoint 作废)。
+组合编号: 0=mean, 1=additive, 2=rope。
+空间注意力逐时间步执行，additive 和 rope 均只编码网格中心经纬度，不编码时间。
+输出目录前缀带 "spatial3"，与旧实验隔离。
 
 已训练完成的组(目录里已有 best_model.pth)默认跳过,加 --force 重训。
 
---constructed 模式: 5 组联合消融(1 组网格均值 TFT 基线 + 4 组网格注意力
-grid_rope × time_rope), 农学构造特征(11+4=15 维, --use_constructed)固定开启;
-目录名 mean 与 r{grid}t{time}(grid_rope=False 时网格注意力用加性正余弦位置编码)。
-不带该开关时保持旧 8 组合位图(bit2=use_gdd)。
-
 用法:
-  python ablation_rope.py                          # 默认 hs16_h1_lstm1, val 2021(8 组合旧口径)
-  python ablation_rope.py --constructed            # 5 组: mean 基线 + r0t0/r0t1/r1t0/r1t1
-  python ablation_rope.py --val_year 2022 --force  # 换验证年并重训
-  python ablation_rope.py --combo 0 7              # 只跑 0 和 7 两组
-  python ablation_rope.py --infer-only             # 不训练,只对已有组跑推理
+  python ablation_rope.py --constructed            # 3 组: mean/additive/rope
+  python ablation_rope.py --constructed --val_year 2022 --force
+  python ablation_rope.py --constructed --combo 0 2
+  python ablation_rope.py --constructed --infer-only
 """
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import os
 import re
@@ -47,18 +30,18 @@ from pathlib import Path
 _THIS_DIR = Path(__file__).resolve().parent
 
 
-def combo_to_flags(i: int) -> dict:
-    """i (0-7) -> {use_gdd, grid_rope, time_rope}。"""
-    return {
-        "use_gdd": bool((i >> 2) & 1),
-        "grid_rope": bool((i >> 1) & 1),
-        "time_rope": bool(i & 1),
-    }
+def constructed_combo(i: int) -> dict:
+    combos = [
+        {"use_constructed": True, "spatial_mode": "mean", "spatial_encoding": "none"},
+        {"use_constructed": True, "spatial_mode": "attention", "spatial_encoding": "additive"},
+        {"use_constructed": True, "spatial_mode": "attention", "spatial_encoding": "rope"},
+    ]
+    return combos[i]
 
 
-def run(cmd: list, log_path: Path) -> int:
+def run(cmd: list, log_path: Path, env=None) -> int:
     """运行子进程,stdout/stderr 存日志,返回退出码。"""
-    env = dict(os.environ)
+    env = dict(env or os.environ)
     env["PYTHONIOENCODING"] = "utf-8"
     with open(log_path, "w", encoding="utf-8") as f:
         proc = subprocess.run(
@@ -84,142 +67,207 @@ def read_infer_results(combo_dir: Path):
         return json.load(f)
 
 
+def parse_visible_devices(value: str) -> list[str]:
+    devices = [item.strip() for item in value.split(",")]
+    if not devices or any(not item for item in devices):
+        raise ValueError("CUDA_VISIBLE_DEVICES must contain valid GPU ids")
+    return devices
+
+
+def validate_parallel_args(
+    constructed: bool,
+    parallel: bool,
+    visible_devices: list[str],
+    combo_count: int,
+) -> None:
+    if not parallel:
+        return
+    if not constructed:
+        raise ValueError("--parallel requires --constructed")
+    if len(visible_devices) < combo_count:
+        raise ValueError(
+            f"--parallel requires at least {combo_count} visible GPU(s), "
+            f"but got {len(visible_devices)}"
+        )
+
+
+def validate_unique_combos(combos: list[int]) -> None:
+    if len(combos) != len(set(combos)):
+        raise ValueError("--parallel does not allow duplicate combo ids")
+
+
+def run_combo(
+    i: int,
+    gpu_id: str | None,
+    combo_fn,
+    combo_name,
+    args,
+    base: Path,
+    feat_col: str,
+):
+    f = combo_fn(i)
+    cn = combo_name(f)
+    combo_dir = base / cn
+    combo_dir.mkdir(parents=True, exist_ok=True)
+    ckpt = combo_dir / "best_model.pth"
+    train_log = combo_dir / "train.log"
+
+    print(f"\n{'='*64}\n  {cn}: {feat_col} 固定 spatial_encoding={f['spatial_encoding']}"
+          f"\n{'='*64}", flush=True)
+
+    if gpu_id is not None:
+        worker_env = dict(os.environ)
+        worker_env["CUDA_VISIBLE_DEVICES"] = gpu_id
+    else:
+        worker_env = None
+
+    if not args.infer_only and (args.force or not ckpt.exists()):
+        cmd = [sys.executable, "train.py",
+               "--val_year", args.val_year,
+               "--hidden_size", str(args.hidden_size),
+               "--num_heads", str(args.num_heads),
+               "--num_lstm_layers", str(args.num_lstm_layers),
+               "--dropout", str(args.dropout),
+               "--epochs", str(args.epochs),
+               "--early_stop_patience", str(args.early_stop_patience),
+               "--batch_size", str(args.batch_size),
+               "--lr", str(args.lr),
+               "--output_dir", str(combo_dir)]
+        if args.constructed:
+            cmd.append("--use_constructed")
+        cmd += ["--spatial_mode", f.get("spatial_mode", "attention")]
+        cmd += ["--spatial_encoding", f["spatial_encoding"]]
+        if args.use_crucial:
+            cmd.append("--use_crucial")
+        print(f"[训练] {' '.join(cmd)} GPU={gpu_id or 'default'}", flush=True)
+        rc = run(cmd, train_log, env=worker_env)
+        if rc != 0:
+            print(f"  !! 训练失败 (exit={rc}),日志见 {train_log.name}", flush=True)
+            return cn, {"train_failed": True}
+    else:
+        print(f"[跳过训练] {'已存在 best_model.pth' if ckpt.exists() else '--infer-only 模式'}", flush=True)
+
+    if not ckpt.exists():
+        print("  !! 无 checkpoint,无法推理", flush=True)
+        return cn, {"no_checkpoint": True}
+    cmd = [sys.executable, "infer.py", "--val_year", args.val_year,
+           "--output_dir", str(combo_dir)]
+    print(f"[推理] {' '.join(cmd)} GPU={gpu_id or 'default'}", flush=True)
+    rc = run(cmd, combo_dir / "infer.log", env=worker_env)
+    if rc != 0:
+        print(f"  !! 推理失败 (exit={rc})", flush=True)
+        return cn, {"infer_failed": True}
+
+    infer_res = read_infer_results(combo_dir)
+    last = infer_res.get("last_step_metrics", {}) if infer_res else {}
+    return cn, {
+        "use_constructed": f.get("use_constructed", False),
+        "spatial_mode": f.get("spatial_mode", "attention"),
+        "spatial_encoding": f["spatial_encoding"],
+        "best_train_val_rmse": parse_train_best_rmse(train_log),
+        "last_rmse": last.get("rmse"),
+        "last_r2": last.get("r2"),
+        "last_corr": last.get("corr"),
+        "n": last.get("n_samples"),
+    }
+
+
 def main():
-    parser = argparse.ArgumentParser(description="联合消融: 网格均值 TFT 基线 vs 网格注意力(加性正余弦/2D RoPE) × 时间 RoPE")
+    parser = argparse.ArgumentParser(description="空间消融: 网格均值 vs 纯空间加性编码 vs 纯空间2D RoPE")
     parser.add_argument("--val_year", type=str, default="2021",
                         help="验证/测试年,与 train.py/infer.py 一致(默认 2021,即网格搜索最优配置的年)")
     parser.add_argument("--constructed", action="store_true",
-                        help="5 组联合消融(1 组网格均值基线 mean + 4 组网格注意力 r0t0/r0t1/r1t0/r1t1), "
-                             "农学构造特征(15 维)固定开启(--use_constructed); 否则旧 8 组合(bit2=use_gdd)")
+                        help="3 组空间消融，农学构造特征(15维)固定开启")
     parser.add_argument("--hidden_size", type=int, default=36)
     parser.add_argument("--num_heads", type=int, default=1)
     parser.add_argument("--num_lstm_layers", type=int, default=1)
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--epochs", type=int, default=500)
-    parser.add_argument("--early_stop_patience", type=int, default=5)
+    parser.add_argument("--early_stop_patience", type=int, default=10)
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--lr", type=float, default=5e-4)
     parser.add_argument("--use_crucial", action="store_true")
     parser.add_argument("--combo", type=int, nargs="*", default=None,
-                        help="只跑指定组合编号(默认全部;构造模式 0-4,旧模式 0-7)")
+                        help="只跑指定组合编号(默认全部,范围0-2)")
     parser.add_argument("--force", action="store_true", help="已训练完成的组也重训")
     parser.add_argument("--infer-only", action="store_true",
                         help="不训练,只对已有 checkpoint 跑推理")
+    parser.add_argument("--parallel", action="store_true",
+                        help="仅 --constructed: 每个组合使用一张可见 GPU 并行运行")
     args = parser.parse_args()
 
-    if args.constructed:
-        # 5 组联合消融: 1 组网格均值 TFT 基线(spatial_mode=mean, 不加任何位置编码)
-        # + 4 组网格注意力(网格位置编码: grid_rope=False->加性正余弦 / True->2D RoPE;
-        #                    时间 RoPE 开关)。构造特征(15 维)固定开启。
-        def combo_fn(i):
-            if i == 0:
-                return {"use_constructed": True, "spatial_mode": "mean",
-                        "grid_rope": False, "time_rope": False}
-            return {"use_constructed": True, "spatial_mode": "attention",
-                    "grid_rope": bool(((i - 1) >> 1) & 1),
-                    "time_rope": bool((i - 1) & 1)}
-        max_combo, feat_col = 4, "构造"
-
-        def combo_name(f):
-            if f["spatial_mode"] == "mean":
-                return "mean"
-            return f"r{int(f['grid_rope'])}t{int(f['time_rope'])}"
-    else:
-        combo_fn, max_combo, feat_col = combo_to_flags, 7, "GDD"
-        combo_name = lambda f: f"g{int(f['use_gdd'])}r{int(f['grid_rope'])}t{int(f['time_rope'])}"
+    if not args.constructed:
+        parser.error("当前脚本仅支持 --constructed 三组空间消融")
+    combo_fn, max_combo, feat_col = constructed_combo, 2, "构造"
+    combo_name = lambda f: f["spatial_encoding"] if f["spatial_mode"] == "attention" else "mean"
 
     combos = args.combo if args.combo is not None else list(range(max_combo + 1))
-    suffix = "_c15" if args.constructed else ""
-    tag = f"ablation2d_val{args.val_year.replace(',', '_')}_hs{args.hidden_size}_h{args.num_heads}_lstm{args.num_lstm_layers}{suffix}"
-    base = _THIS_DIR / "train_output" / tag
-    base.mkdir(parents=True, exist_ok=True)
-
-    results = {}
+    valid_combos = []
     for i in combos:
         if not 0 <= i <= max_combo:
             print(f"[跳过] 非法组合编号 {i} (需 0-{max_combo})")
             continue
-        f = combo_fn(i)
-        cn = combo_name(f)
-        combo_dir = base / cn
-        combo_dir.mkdir(parents=True, exist_ok=True)
-        ckpt = combo_dir / "best_model.pth"
-        train_log = combo_dir / "train.log"
+        valid_combos.append(i)
 
-        print(f"\n{'='*64}\n  {cn}: {feat_col} 固定 grid_rope={f['grid_rope']} "
-              f"time_rope={f['time_rope']}\n{'='*64}")
+    visible_devices = []
+    if args.parallel:
+        visible_value = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+        if not visible_value:
+            parser.error("--parallel requires CUDA_VISIBLE_DEVICES, e.g. 2,3,4,5,6")
+        try:
+            validate_unique_combos(valid_combos)
+            visible_devices = parse_visible_devices(visible_value)
+            validate_parallel_args(args.constructed, args.parallel, visible_devices, 0)
+        except ValueError as exc:
+            parser.error(str(exc))
+    tag = f"spatial3_val{args.val_year.replace(',', '_')}_hs{args.hidden_size}_h{args.num_heads}_lstm{args.num_lstm_layers}_c15"
+    base = _THIS_DIR / "train_output" / tag
+    base.mkdir(parents=True, exist_ok=True)
 
-        # ---------- 训练 ----------
-        if not args.infer_only and (args.force or not ckpt.exists()):
-            cmd = [sys.executable, "train.py",
-                   "--val_year", args.val_year,
-                   "--hidden_size", str(args.hidden_size),
-                   "--num_heads", str(args.num_heads),
-                   "--num_lstm_layers", str(args.num_lstm_layers),
-                   "--dropout", str(args.dropout),
-                   "--epochs", str(args.epochs),
-                   "--early_stop_patience", str(args.early_stop_patience),
-                   "--batch_size", str(args.batch_size),
-                   "--lr", str(args.lr),
-                   "--output_dir", str(combo_dir)]
-            if args.constructed:
-                cmd.append("--use_constructed")
-            elif f["use_gdd"]:
-                cmd.append("--use_gdd")
-            cmd += ["--spatial_mode", f.get("spatial_mode", "attention")]
-            if f["grid_rope"]:
-                cmd.append("--grid_rope")
-            if f["time_rope"]:
-                cmd.append("--time_rope")
-            if args.use_crucial:
-                cmd.append("--use_crucial")
-            print(f"[训练] {' '.join(cmd)}")
-            rc = run(cmd, train_log)
-            if rc != 0:
-                print(f"  !! 训练失败 (exit={rc}),日志见 {train_log.name}")
-                results[cn] = {"train_failed": True}
-                continue
-        else:
-            print(f"[跳过训练] {'已存在 best_model.pth' if ckpt.exists() else '--infer-only 模式'}")
+    results = {}
+    pending_combos = valid_combos
 
-        # ---------- 推理 ----------
-        if not ckpt.exists():
-            print(f"  !! 无 checkpoint,无法推理")
-            results[cn] = {"no_checkpoint": True}
-            continue
-        cmd = [sys.executable, "infer.py",
-               "--val_year", args.val_year,
-               "--output_dir", str(combo_dir)]
-        print(f"[推理] {' '.join(cmd)}")
-        rc = run(cmd, combo_dir / "infer.log")
-        if rc != 0:
-            print(f"  !! 推理失败 (exit={rc})")
-            results[cn] = {"infer_failed": True}
-            continue
+    if args.parallel:
+        try:
+            validate_parallel_args(
+                args.constructed, args.parallel, visible_devices, len(pending_combos)
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
 
-        infer_res = read_infer_results(combo_dir)
-        last = infer_res.get("last_step_metrics", {}) if infer_res else {}
-        results[cn] = {
-            "use_constructed": f.get("use_constructed", False),
-            "use_gdd": f.get("use_gdd", False),
-            "spatial_mode": f.get("spatial_mode", "attention"),
-            "grid_rope": f["grid_rope"],
-            "time_rope": f["time_rope"],
-            "best_train_val_rmse": parse_train_best_rmse(train_log),
-            "last_rmse": last.get("rmse"),
-            "last_r2": last.get("r2"),
-            "last_corr": last.get("corr"),
-            "n": last.get("n_samples"),
-        }
-        print(f"  best_val_rmse={results[cn]['best_train_val_rmse']}  "
-              f"test_rmse={last.get('rmse')}  r2={last.get('r2')}  corr={last.get('corr')}")
+    if args.parallel and pending_combos:
+        assignments = list(zip(pending_combos, visible_devices))
+        print("[并行 GPU 映射] " + ", ".join(
+            f"{combo_name(combo_fn(i))}->GPU {gpu_id}" for i, gpu_id in assignments
+        ))
+        with ThreadPoolExecutor(max_workers=len(assignments)) as executor:
+            futures = {
+                executor.submit(
+                    run_combo, i, gpu_id, combo_fn, combo_name, args, base, feat_col
+                ): combo_name(combo_fn(i))
+                for i, gpu_id in assignments
+            }
+            for future in as_completed(futures):
+                cn = futures[future]
+                try:
+                    result_name, result = future.result()
+                    results[result_name] = result
+                except Exception as exc:
+                    print(f"  !! {cn} worker 异常: {exc}", flush=True)
+                    results[cn] = {"worker_failed": True, "error": str(exc)}
+    else:
+        for i in pending_combos:
+            cn, result = run_combo(
+                i, None, combo_fn, combo_name, args, base, feat_col
+            )
+            results[cn] = result
 
     # ---------- 汇总 ----------
     out = base / "ablation_results.json"
     with open(out, "w", encoding="utf-8") as f:
         json.dump(results, f, ensure_ascii=False, indent=2)
     print(f"\n{'='*70}\n  汇总 ({tag})  验证年={args.val_year}\n{'='*70}")
-    print(f"  {'combo':<8} {'mode':<6} {feat_col:<5} {'gRoPE':<6} {'tRoPE':<6} {'train RMSE':>11} "
+    print(f"  {'combo':<10} {'mode':<6} {feat_col:<5} {'encoding':<10} {'train RMSE':>11} "
           f"{'test RMSE':>10} {'R2':>8} {'Corr':>7}")
     for i in combos:
         if not 0 <= i <= max_combo:
@@ -229,12 +277,11 @@ def main():
         r = results.get(cn, {})
         sm = f.get("spatial_mode", "attention")[:3]
         g = "on" if (f.get("use_constructed", False) or f.get("use_gdd", False)) else "-"
-        gr = "on" if f["grid_rope"] else "-"
-        tr = "on" if f["time_rope"] else "-"
+        encoding = f["spatial_encoding"]
         t_rmse = r.get("best_train_val_rmse")
         i_rmse, i_r2, i_corr = r.get("last_rmse"), r.get("last_r2"), r.get("last_corr")
         fmt = lambda v: f"{v:.4f}" if v is not None else "  N/A"
-        print(f"  {cn:<8} {sm:<6} {g:<5} {gr:<6} {tr:<6} {fmt(t_rmse):>11} {fmt(i_rmse):>10} "
+        print(f"  {cn:<10} {sm:<6} {g:<5} {encoding:<10} {fmt(t_rmse):>11} {fmt(i_rmse):>10} "
               f"{fmt(i_r2):>8} {fmt(i_corr):>7}")
     print(f"\n结果已保存: {out}")
 

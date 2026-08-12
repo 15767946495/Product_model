@@ -167,6 +167,7 @@ def run_mode(mode_cfg: dict, data: dict, device: str, dry_run: bool) -> dict:
 
     # 模型超参（infer.py 读取，含 spatial_mode）
     hparams = {
+        "model_contract_version": 3,
         "hidden_size": HIDDEN_SIZE,
         "num_heads": NUM_HEADS,
         "num_lstm_layers": NUM_LSTM_LAYERS,
@@ -175,6 +176,7 @@ def run_mode(mode_cfg: dict, data: dict, device: str, dry_run: bool) -> dict:
         "soil_dim": SOIL_DIM,
         "loss": "mse",
         "spatial_mode": spatial_mode,
+        "spatial_encoding": "none" if spatial_mode == "mean" else "additive",
     }
     with open(out_dir / "model_hparams.json", "w", encoding="utf-8") as f:
         json.dump(hparams, f, ensure_ascii=False, indent=2)
@@ -192,6 +194,7 @@ def run_mode(mode_cfg: dict, data: dict, device: str, dry_run: bool) -> dict:
         output_size=1,
         num_heads=NUM_HEADS,
         spatial_mode=spatial_mode,
+        spatial_encoding="none" if spatial_mode == "mean" else "additive",
     )
     print(f"    模型参数: {sum(p.numel() for p in model.parameters()):,}")
 

@@ -7,7 +7,7 @@
     供模型做「逐特征网格注意力合并」后,再进入时序 VSN 特征筛选。
 
 输出:
-  - train_dataset/grid_cache.pt   (~1.3GB): {"version":2, "feat_names": WRF_COLS,
+  - train_dataset/grid_cache.pt   (~1.3GB): {"version":3, "feat_names": WRF_COLS,
       "entries": [ None | {"feats":(G,T,F) f32, "coords":(G,2) f32, "month":(T,) long, "l_enc":int} ]}
     entries[i] 与 dataset.jsonl 第 i 行按索引对齐(顺序即缓存索引)。
   - train_dataset/grid_cache_meta.json: 版本、G 分布、与 jsonl l_enc 不一致数等。
@@ -33,6 +33,13 @@ META_PATH = os.path.join(SCRIPT_DIR, "grid_cache_meta.json")
 def _median(xs):
     s = sorted(xs)
     return s[len(s) // 2]
+
+
+def center_coords(row):
+    """Return the center latitude/longitude from grid corner coordinates."""
+    lat = (float(row["Lat (llcrnr)"]) + float(row["Lat (urcrnr)"])) / 2.0
+    lon = (float(row["Lon (llcrnr)"]) + float(row["Lon (urcrnr)"])) / 2.0
+    return lat, lon
 
 
 def build_entry(county_df, feats):
@@ -73,7 +80,7 @@ def build_entry(county_df, feats):
         vals = grid_tables[g].loc[common].values.astype(np.float32)  # (T,F)
         feats_arr[gi] = vals
         row0 = cdf[cdf["Grid Index"] == g].iloc[0]
-        coords[gi] = [float(row0["Lat (llcrnr)"]), float(row0["Lon (llcrnr)"])]
+        coords[gi] = center_coords(row0)
 
     month = np.array([d.month for d in common], dtype=np.int64)
     return {
@@ -141,12 +148,18 @@ def process():
     print(f"  T: min={min(ts)} median={_median(ts)} max={max(ts)}")
     print(f"  与 jsonl l_enc 不一致条数: {mismatch}")
 
-    payload = {"version": 2, "feat_names": list(WRF_COLS), "entries": entries}
+    payload = {
+        "version": 3,
+        "coord_type": "grid_center",
+        "feat_names": list(WRF_COLS),
+        "entries": entries,
+    }
     torch.save(payload, OUT_PATH)
     print(f"  已保存: {OUT_PATH} ({round(os.path.getsize(OUT_PATH)/1e9, 2)} GB)")
 
     meta = {
-        "version": 2,
+        "version": 3,
+        "coord_type": "grid_center",
         "n_lines": len(meta_lines),
         "n_ok": n_ok,
         "feat_names": list(WRF_COLS),
