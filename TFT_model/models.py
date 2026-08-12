@@ -1,0 +1,935 @@
+"""
+解耦 TFT：产量支路与 alpha 支路独立参数，推理时再融合。
+
+- TFTYieldModel：原 TFT 去掉 official_mape_head，输出 final_pred
+"""
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from copy import deepcopy
+import math
+from typing import Any, Dict, List, Tuple, Optional
+
+
+def _rotate_half_pairwise(x: torch.Tensor) -> torch.Tensor:
+    """相邻对旋转:每对 (2m,2m+1) -> (-x_{2m+1}, x_{2m})；奇数尾部维度保持不变。
+
+    RoPE 用 `x*cos + rotate_half(x)*sin` 实现按对 2D 旋转，
+    要求 cos/sin 中同一对的偶数/奇数维取相同角度。
+    """
+    d = x.shape[-1]
+    if d < 2:
+        return x
+    pairs = x[..., : d - (d % 2)].reshape(*x.shape[:-1], -1, 2)
+    flipped = torch.stack([-pairs[..., 1], pairs[..., 0]], dim=-1)
+    flat = flipped.reshape(*x.shape[:-1], -1)
+    if d % 2 == 1:
+        flat = torch.cat([flat, x[..., -1:]], dim=-1)
+    return flat
+
+
+def _apply_rotary(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+    """RoPE 旋转: x' = x*cos + rotate_half(x)*sin；cos/sin 与 x 形状一致(逐维)。"""
+    return x * cos + _rotate_half_pairwise(x) * sin
+
+
+def _grid_axis_boundaries(d: int) -> List[Tuple[int, int]]:
+    """把 hidden_size 均匀切成 2 段轴区间(按 dim 计, 偶数)。
+
+    轴 = [lat, lng]，每轴占连续 dim 段且段长为偶数(RoPE 相邻对不跨轴)。
+    总对数 d//2 尽量均分到 2 轴,余数给前几轴。要求 d 为偶数。
+    """
+    n_pairs = d // 2
+    q, r = n_pairs // 2, n_pairs % 2
+    axis_pairs = [q + (1 if i < r else 0) for i in range(2)]
+    bounds, acc = [], 0
+    for p in axis_pairs:
+        bounds.append((acc, acc + 2 * p))
+        acc += 2 * p
+    return bounds
+
+
+class GatedLinearUnit(nn.Module):
+    """门控线性单元"""
+    def __init__(self, input_size: int, hidden_size: int = None, dropout: float = 0.3):
+        super().__init__()
+        self.dropout = nn.Dropout(dropout) if dropout is not None else None
+        self.hidden_size = hidden_size or input_size
+        self.fc = nn.Linear(input_size, self.hidden_size * 2)
+        self.init_weights()
+
+    def init_weights(self):
+        for n, p in self.named_parameters():
+            if "bias" in n:
+                torch.nn.init.zeros_(p)
+            elif "fc" in n:
+                torch.nn.init.xavier_uniform_(p)
+
+    def forward(self, x):
+        if self.dropout is not None:
+            x = self.dropout(x)
+        x = self.fc(x)
+        x = F.glu(x, dim=-1)
+        return x
+
+
+class GateAddNorm(nn.Module):
+    """主路 x 先经 GLU，再与 skip 残差相加后 LayerNorm（非单纯 x+skip）。"""
+    def __init__(
+        self,
+        input_size: int,
+        skip_size: int = None,
+        dropout: float = 0.3,
+    ):
+        super().__init__()
+        self.input_size = input_size
+        self.skip_size = skip_size or input_size
+
+        if self.input_size != self.skip_size:
+            self.resample = nn.Linear(self.skip_size, self.input_size)
+        self.glu = GatedLinearUnit(
+            input_size=self.input_size,
+            hidden_size=self.input_size,
+            dropout=dropout,
+        )
+        self.norm = nn.LayerNorm(self.input_size)
+
+    def forward(self, x: torch.Tensor, skip: torch.Tensor):
+        gated = self.glu(x)
+        if self.input_size != self.skip_size:
+            skip = self.resample(skip)
+        return self.norm(gated + skip)
+
+
+class GatedResidualNetwork(nn.Module):
+    def __init__(
+        self,
+        input_size: int,
+        hidden_size: int,
+        output_size: int,
+        dropout: float = 0.1,
+        context_size: int = None,
+        residual: bool = True,
+    ):
+        super().__init__()
+        self.input_size = input_size
+        self.output_size = output_size
+        self.context_size = context_size
+        self.hidden_size = hidden_size
+        self.dropout = dropout
+        self.residual = residual
+
+        # 主路径
+        self.fc1 = nn.Linear(self.input_size, self.hidden_size)
+        self.elu = nn.ELU()
+        if self.context_size is not None:
+            self.context = nn.Linear(self.context_size, self.hidden_size, bias=False)
+        self.fc2 = nn.Linear(self.hidden_size, self.output_size)
+
+        self.glu = GatedLinearUnit(
+            input_size=self.output_size,
+            hidden_size=self.output_size,
+            dropout=dropout
+        )
+        # 层归一化前置，稳定梯度
+        self.norm = nn.LayerNorm(self.output_size)
+        # 维度适配
+        if self.input_size != self.output_size:
+            self.skip_proj = nn.Linear(input_size, output_size)
+        else:
+            self.skip_proj = nn.Identity()
+
+        self.init_weights()
+
+    def init_weights(self):
+        for n, p in self.named_parameters():
+            if "bias" in n:
+                nn.init.zeros_(p)
+            elif "fc" in n or "context" in n:
+                nn.init.xavier_uniform_(p, gain=1.0)
+
+    def forward(self, x, context=None):
+        # 残差分支
+        skip = self.skip_proj(x)
+        # 主路径
+        x = self.fc1(x)
+        if context is not None:
+            x = x + self.context(context)
+        x = self.elu(x)
+        x = self.fc2(x)
+        x = self.glu(x)
+        x = self.norm(x + skip)
+        return x
+
+
+class VariableSelectionNetwork(nn.Module):
+    def __init__(
+        self,
+        input_sizes: Dict[str, int],
+        hidden_size: int,
+        dropout: float = 0.1,
+        context_size: int = None,
+    ):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.input_sizes = input_sizes
+        self.dropout = dropout
+        self.context_size = context_size
+        self.num_inputs = len(input_sizes)
+        self.var_names = list(input_sizes.keys())
+
+        self.total_input_size = sum(input_sizes.values())
+        self.flattened_grn = GatedResidualNetwork(
+            self.total_input_size, self.hidden_size,
+            self.num_inputs, self.dropout, self.context_size
+        )
+
+        self.softmax = nn.Softmax(dim=-1)
+
+        self.single_var_grns = nn.ModuleDict()
+        for name, size in input_sizes.items():
+            self.single_var_grns[name] = GatedResidualNetwork(
+                size, self.hidden_size, self.hidden_size, self.dropout
+            )
+
+    def forward(
+        self,
+        x: Dict[str, torch.Tensor],
+        seq_lens: torch.Tensor,
+        context: torch.Tensor = None,
+    ):
+        var_outputs = []
+        weight_inputs = []
+        for name in self.var_names:
+            tensor = x[name]
+            encoded = self.single_var_grns[name](tensor)
+            var_outputs.append(encoded)
+            weight_inputs.append(tensor)
+        var_outputs = torch.stack(var_outputs, dim=-1)
+        flat_embedding = torch.cat(weight_inputs, dim=-1)
+        sparse_weights_logits = self.flattened_grn(flat_embedding, context)
+        sparse_weights = self.softmax(sparse_weights_logits)
+        max_seq_len = sparse_weights.size(1)
+        positions = torch.arange(0, max_seq_len, device=sparse_weights.device).unsqueeze(0)
+        time_step_mask = (positions < seq_lens.unsqueeze(1)).float()
+        sparse_weights = sparse_weights * time_step_mask.unsqueeze(-1)
+        sparse_weights = sparse_weights.unsqueeze(-2)
+        outputs = (var_outputs * sparse_weights).sum(dim=-1)
+        return outputs, sparse_weights
+
+
+class CausalScaledDotProductAttention(nn.Module):
+    """多头因果缩放点积注意力：Q/K 多头；共享 V 经 W_v 映射到 head_dim，与 (B,T,T) 平均权重相乘得 head_dim 上下文，W_o 再映回 hidden_size。"""
+
+    def __init__(
+        self,
+        hidden_size: int,
+        num_heads: int = 2,
+        dropout: float = 0.1,
+        mask_bias: float = -1e6,
+        use_rope: bool = False,
+    ):
+        super().__init__()
+        self.hidden_size = int(hidden_size)
+        self.num_heads = int(num_heads)
+        if self.hidden_size % self.num_heads != 0:
+            raise ValueError(
+                f"hidden_size ({self.hidden_size}) 须能被 num_heads ({self.num_heads}) 整除"
+            )
+        if use_rope and (self.hidden_size // self.num_heads) % 2 != 0:
+            raise ValueError("use_rope 时 head_dim 须为偶数(按对旋转)")
+        self.head_dim = self.hidden_size // self.num_heads
+        self.use_rope = use_rope
+        self.mask_bias = mask_bias
+        self.W_q = nn.Linear(self.hidden_size, self.hidden_size)
+        self.W_k = nn.Linear(self.hidden_size, self.hidden_size)
+        self.W_v = nn.Linear(self.hidden_size, self.head_dim)
+        self.W_o = nn.Linear(self.head_dim, self.hidden_size)
+        self.dropout = nn.Dropout(dropout)
+        self.softmax = nn.Softmax(dim=-1)
+        self._init_weights()
+
+    def _init_weights(self):
+        for m in (self.W_q, self.W_k, self.W_v, self.W_o):
+            nn.init.xavier_uniform_(m.weight, gain=1.0)
+            if m.bias is not None:
+                nn.init.zeros_(m.bias)
+
+    def _causal_mask(self, t: int, device: torch.device) -> torch.Tensor:
+        """(t, t) bool，True 表示该 (i,j) 应被屏蔽（不可 attend）。"""
+        j_idx = torch.arange(t, device=device).unsqueeze(0)
+        i_idx = torch.arange(t, device=device).unsqueeze(1)
+        return j_idx > i_idx
+
+    def _split_heads(self, x: torch.Tensor) -> torch.Tensor:
+        # (B, T, hidden) -> (B, num_heads, T, head_dim)
+        B, T, _ = x.shape
+        return x.view(B, T, self.num_heads, self.head_dim).transpose(1, 2)
+
+    def _time_rope_cos_sin(self, t: int, device: torch.device) -> Tuple[torch.Tensor, torch.Tensor]:
+        """一维时间 RoPE 的 cos/sin:(T, head_dim)。
+
+        θ_m(t) = t · 10000^(-2m/head_dim), m=0..head_dim/2-1;
+        同一对 (2m,2m+1) 用相同角度(逐维重复)。仅作用于 Q/K,V 不旋转。
+        """
+        hd = self.head_dim
+        m = torch.arange(hd // 2, device=device, dtype=torch.float32)
+        freq = 10000.0 ** (-2.0 * m / hd)                  # (hd/2,)
+        tt = torch.arange(t, device=device, dtype=torch.float32).unsqueeze(1)  # (T,1)
+        theta = tt * freq.unsqueeze(0)                     # (T, hd/2)
+        cos = torch.cos(theta).repeat_interleave(2, dim=-1)   # (T, hd)
+        sin = torch.sin(theta).repeat_interleave(2, dim=-1)
+        return cos, sin
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
+        pad_mask: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        # x: (batch, seq_len, hidden_size)
+        # 返回 attn_avg: (batch, seq_len, seq_len)，各头 softmax 权重在头维上平均
+        B, T, _ = x.shape
+        v = self.W_v(x)  # (B, T, head_dim)
+        q = self._split_heads(self.W_q(x))
+        k = self._split_heads(self.W_k(x))
+        if self.use_rope:
+            # 时间 RoPE: A_{t,s} = q_tᵀ R(θ_s-θ_t) k_s / √d —— 相对时间入分,绝对季节留给特征
+            cos, sin = self._time_rope_cos_sin(T, q.device)
+            cos = cos.unsqueeze(0).unsqueeze(0)   # (1,1,T,hd)
+            sin = sin.unsqueeze(0).unsqueeze(0)
+            q = _apply_rotary(q, cos, sin)
+            k = _apply_rotary(k, cos, sin)
+        attn_scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(
+            float(self.head_dim)
+        )
+
+        causal = self._causal_mask(T, attn_scores.device)
+        attn_scores = attn_scores.masked_fill(
+            causal.view(1, 1, T, T), self.mask_bias
+        )
+
+        if pad_mask is not None:
+            valid = pad_mask.to(device=attn_scores.device, dtype=torch.bool)
+            attn_scores = attn_scores.masked_fill(
+                ~valid.view(B, 1, T, 1), self.mask_bias
+            )
+            attn_scores = attn_scores.masked_fill(
+                ~valid.view(B, 1, 1, T), self.mask_bias
+            )
+            attn_weights = self.softmax(attn_scores)
+            attn_weights = attn_weights * valid.view(B, 1, T, 1).float()
+        elif mask is not None:
+            positions = torch.arange(0, T, device=mask.device, dtype=torch.int32).unsqueeze(0)
+            seq_mask = positions < mask.unsqueeze(1)
+            attn_scores = attn_scores.masked_fill(
+                ~seq_mask.view(B, 1, 1, T), self.mask_bias
+            )
+            attn_weights = self.softmax(attn_scores)
+            attn_weights = attn_weights * seq_mask.view(B, 1, T, 1).float()
+        else:
+            attn_weights = self.softmax(attn_scores)
+
+        attn_weights = self.dropout(attn_weights)
+        # (B,H,T,T) 在头维上平均 -> (B,T,T)，再与共享 v 相乘
+        attn_avg = attn_weights.mean(dim=1)
+        ctx = torch.matmul(attn_avg, v)  # (B, T, head_dim)
+        out = self.W_o(ctx)
+        return out, attn_avg
+
+
+class SoilStaticEncoder(nn.Module):
+    """县级连续土壤特征(7 维,不分桶)→ Linear 映射 → 四路 GRN 上下文(c_s,c_e,c_c,c_h)。
+
+    土壤为静态特征,仅作为上下文注入时序 VSN / LSTM / 注意力,
+    不参与网格注意力计算。
+    """
+
+    def __init__(
+        self,
+        soil_dim: int,
+        hidden_size: int,
+        dropout: float,
+    ):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.linear = nn.Linear(soil_dim, hidden_size)
+        self.grn_cs = GatedResidualNetwork(
+            hidden_size, hidden_size, hidden_size, dropout
+        )
+        self.grn_ce = GatedResidualNetwork(
+            hidden_size, hidden_size, hidden_size, dropout
+        )
+        self.grn_cc = GatedResidualNetwork(
+            hidden_size, hidden_size, hidden_size, dropout
+        )
+        self.grn_ch = GatedResidualNetwork(
+            hidden_size, hidden_size, hidden_size, dropout
+        )
+
+    def forward(
+        self, soil_feats: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        # soil_feats: (B, soil_dim) 已 z-score 标准化
+        h = F.elu(self.linear(soil_feats))               # (B, H)
+        c_s = self.grn_cs(h)
+        c_e = self.grn_ce(h)
+        c_c = self.grn_cc(h)
+        c_h = self.grn_ch(h)
+        return c_s, c_e, c_c, c_h
+
+
+class LSTMEncoder(nn.Module):
+    """TFT的LSTM编码器（适配变长时序输入）"""
+    def __init__(
+        self,
+        input_size: int,       # 动态时序特征维度（d_dynamic）
+        hidden_size: int,      # LSTM隐藏层维度
+        num_layers: int = 1,
+        dropout: float = 0.3,
+        bidirectional: bool = False,
+        have_context: bool = True
+    ):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+        self.bidirectional = bidirectional
+        self.have_context = have_context
+        self.num_directions = 2 if bidirectional else 1
+
+        # LSTM层（支持变长序列）
+        self.lstm = nn.LSTM(
+            input_size=input_size,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            batch_first=True,
+            dropout=dropout if num_layers > 1 else 0,
+            bidirectional=bidirectional,
+        )
+        # LSTM 输出 + 原始输入：GateAddNorm 内已对主路做 GLU 再残差
+        self.gate_add_norm = GateAddNorm(
+            input_size=hidden_size * self.num_directions,
+            skip_size=input_size,
+            dropout=dropout,
+        )
+
+        self.output_dropout = nn.Dropout(dropout)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        seq_lens: torch.Tensor,
+        c_c: torch.Tensor = None,
+        c_h: torch.Tensor = None,
+    ):
+        """
+        Args:
+            x: (batch_size, max_seq_len, input_size) 动态时序特征（补零后的变长序列）
+            seq_lens: (batch_size,) 每个样本的实际时序长度（必传）
+        Returns:
+            lstm_feat: (batch_size, max_seq_len, hidden_size * num_directions) LSTM编码特征
+            last_hidden: (batch_size, hidden_size * num_directions) 最后时间步特征（经 GateAddNorm）
+            enc_h_last: (batch_size, hidden_size) GateAddNorm 之前、末层 LSTM 输出在「有效序列最后一步」的 hidden（供解码器初态）
+            enc_c_last: (batch_size, hidden_size) 同上时刻的 cell；逐步 c 未展开时 pack 路径用 c_n[-1] 反序（与末个有效步一致）
+        """
+        B = x.shape[0]
+        h0 = c_h.unsqueeze(0).repeat(self.num_layers * self.num_directions, 1, 1)
+        c0 = c_c.unsqueeze(0).repeat(self.num_layers * self.num_directions, 1, 1)
+
+        seq_lens_cpu = seq_lens.cpu().tolist()
+        seq_lens_sorted, idx = torch.sort(
+            torch.tensor(seq_lens_cpu, device=x.device), descending=True
+        )
+        idx = idx.long()
+        x_sorted = x[idx]
+        h0 = h0[:, idx, :]
+        c0 = c0[:, idx, :]
+
+        x_packed = nn.utils.rnn.pack_padded_sequence(
+            x_sorted,
+            seq_lens_sorted.cpu().tolist(),
+            batch_first=True,
+            enforce_sorted=True,
+        )
+        lstm_out_packed, (h_n, c_n) = self.lstm(x_packed, (h0, c0))
+        lstm_out, _ = nn.utils.rnn.pad_packed_sequence(
+            lstm_out_packed, batch_first=True, total_length=x.size(1)
+        )
+
+        idx_rev = torch.argsort(idx)
+        lstm_out_orig = lstm_out[idx_rev]
+        dev_e = lstm_out_orig.device
+        batch_idx_e = torch.arange(B, device=dev_e)
+        last_idx_e = (seq_lens.to(device=dev_e) - 1).clamp(min=0).long()
+        enc_h_last = lstm_out_orig[batch_idx_e, last_idx_e, :]
+        enc_c_last = c_n[-1][idx_rev]
+
+        x_orig = x_sorted[idx_rev]
+        lstm_feat = self.gate_add_norm(lstm_out_orig, x_orig)
+        Bsz, Tlen, _ = lstm_feat.shape
+        t_ar = torch.arange(
+            Tlen, device=lstm_feat.device, dtype=torch.long
+        ).unsqueeze(0).expand(Bsz, Tlen)
+        sl_orig = seq_lens.to(device=lstm_feat.device).unsqueeze(1)
+        ok_t = t_ar < sl_orig
+        lstm_feat = lstm_feat * ok_t.unsqueeze(-1).to(dtype=lstm_feat.dtype)
+
+        batch_idx = torch.arange(B, device=lstm_feat.device)
+        last_idx = (seq_lens.to(device=lstm_feat.device) - 1).clamp(min=0).long()
+        last_hidden = lstm_feat[batch_idx, last_idx, :]
+
+        return lstm_feat, last_hidden, enc_h_last, enc_c_last
+
+
+class LSTMDecoder(nn.Module):
+    """TFT 解码器：初态仅底层接入编码器末步 h、c，输入为 official 支路经 GRN 后的序列。"""
+
+    def __init__(
+        self,
+        input_size: int,
+        hidden_size: int,
+        num_layers: int = 1,
+        dropout: float = 0.3,
+        bidirectional: bool = False,
+    ):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+        self.bidirectional = bidirectional
+        self.num_directions = 2 if bidirectional else 1
+
+        self.lstm = nn.LSTM(
+            input_size=input_size,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            batch_first=True,
+            dropout=dropout if num_layers > 1 else 0,
+            bidirectional=bidirectional,
+        )
+        self.gate_add_norm = GateAddNorm(
+            input_size=hidden_size * self.num_directions,
+            skip_size=input_size,
+            dropout=dropout,
+        )
+        self.output_dropout = nn.Dropout(dropout)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        seq_lens: torch.Tensor,
+        h_init: torch.Tensor,
+        c_init: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Args:
+            x: (B, T, input_size)
+            seq_lens: (B,) 解码支路有效长度（必传）
+            h_init, c_init: (B, hidden_size) 编码器末层末步，写入 LSTM 第 0 层初态
+        """
+        B = x.shape[0]
+        device = x.device
+        dtype = x.dtype
+        nh = self.num_layers * self.num_directions
+        h0 = torch.zeros(nh, B, self.hidden_size, device=device, dtype=dtype)
+        c0 = torch.zeros(nh, B, self.hidden_size, device=device, dtype=dtype)
+        h0[0] = h_init
+        c0[0] = c_init
+
+        seq_lens_cpu = seq_lens.cpu().tolist()
+        seq_lens_sorted, idx = torch.sort(
+            torch.tensor(seq_lens_cpu, device=x.device), descending=True
+        )
+        idx = idx.long()
+        x_sorted = x[idx]
+        h0 = h0[:, idx, :]
+        c0 = c0[:, idx, :]
+        x_packed = nn.utils.rnn.pack_padded_sequence(
+            x_sorted,
+            seq_lens_sorted.cpu().tolist(),
+            batch_first=True,
+            enforce_sorted=True,
+        )
+        lstm_out_packed, _ = self.lstm(x_packed, (h0, c0))
+        lstm_out, _ = nn.utils.rnn.pad_packed_sequence(
+            lstm_out_packed, batch_first=True, total_length=x.size(1)
+        )
+
+        idx_rev = torch.argsort(idx)
+        lstm_out_orig = lstm_out[idx_rev]
+        x_orig = x_sorted[idx_rev]
+        lstm_feat = self.gate_add_norm(lstm_out_orig, x_orig)
+        Bsz_d, Tlen_d, _ = lstm_feat.shape
+        t_ar_d = torch.arange(
+            Tlen_d, device=lstm_feat.device, dtype=torch.long
+        ).unsqueeze(0).expand(Bsz_d, Tlen_d)
+        sl_orig_d = seq_lens.to(device=lstm_feat.device).unsqueeze(1)
+        ok_td = t_ar_d < sl_orig_d
+        lstm_feat = lstm_feat * ok_td.unsqueeze(-1).to(dtype=lstm_feat.dtype)
+
+        Bsz = lstm_feat.shape[0]
+        batch_idx = torch.arange(Bsz, device=lstm_feat.device)
+        last_idx = (seq_lens.to(device=lstm_feat.device) - 1).clamp(min=0).long()
+        last_hidden = lstm_feat[batch_idx, last_idx, :]
+
+        return lstm_feat, last_hidden
+
+
+class SpatialAttentionAggregator(nn.Module):
+    """对单个气象特征 (B,G,T,H) 在网格维做 CLS 自注意力 → (B,T,H)。
+
+    对齐 MMST-ViT 的 Spatial Transformer(S-MHA,式3/式4):
+      - 每个网格的气象值经 per_feature_linear 内容投影成 d 维 token;
+      - 位置编码二选一:
+          use_rope=True : 2D RoPE(lat, lng),仅旋转 Q/K,每坐标一对(sin,cos),
+                          CLS token 位置=0(空间中性),加性位置偏置不再叠加。
+                          不含时间轴:网格注意力逐时间步做,同一时刻所有网格共享同一 t,
+                          时间在这里只能当绝对信号(弱),季节进程交给时序分支(time RoPE);
+          use_rope=False: 加性正余弦时空位置编码(逐位对齐 WeatherFormer 3.2.3,
+                          时间/纬度/经度共享同一频率阶梯),叠加到 token(旧版)。
+      - 前置可学习 CLS,按 grid_mask 屏蔽填充网格,取 CLS 输出为该特征一条县时序。
+    """
+
+    def __init__(self, hidden_size: int, dropout: float = 0.1, use_rope: bool = False):
+        super().__init__()
+        self.hidden_size = int(hidden_size)
+        if use_rope and hidden_size % 2 != 0:
+            raise ValueError("use_rope 时 hidden_size 须为偶数(RoPE 按对旋转)")
+        self.use_rope = use_rope
+        self.cls_token = nn.Parameter(torch.zeros(self.hidden_size))
+        self.W_q = nn.Linear(self.hidden_size, self.hidden_size)
+        self.W_k = nn.Linear(self.hidden_size, self.hidden_size)
+        self.W_v = nn.Linear(self.hidden_size, self.hidden_size)
+        self.norm = nn.LayerNorm(self.hidden_size)
+        self.scale = math.sqrt(float(self.hidden_size))
+        self.dropout = nn.Dropout(dropout)
+        self._init_weights()
+
+    def _init_weights(self):
+        for m in (self.W_q, self.W_k, self.W_v):
+            nn.init.xavier_uniform_(m.weight)
+            if m.bias is not None:
+                nn.init.zeros_(m.bias)
+
+    def _st_pe(self, coords: torch.Tensor, t_idx: torch.Tensor) -> torch.Tensor:
+        """正余弦时空位置编码(逐位对齐 WeatherFormer 3.2.3,固定无学习参数)。
+
+        PE(4i)   = sin(t · 10000^(-4i/d))               时间
+        PE(4i+1) = cos(t · 10000^(-4i/d))               时间
+        PE(4i+2) = sin(π·lat/180 · 10000^(-4i/d))       纬度
+        PE(4i+3) = cos(π·lng/180 · 10000^(-4i/d))       经度
+        时间/纬度/经度共享同一频率阶梯 10000^(-4i/d),π/180 把度转弧度。
+        要求 hidden_size 被 4 整除。coords: (B,G,2); t_idx: (T,); 返回 (B,G,T,d)。
+        """
+        d = self.hidden_size
+        assert d % 4 == 0, "hidden_size 须能被 4 整除(4 项时空编码)"
+        nf = d // 4
+        i = torch.arange(nf, device=coords.device, dtype=coords.dtype)
+        freq = 10000.0 ** (-4.0 * i / d)                  # (d/4,)
+        t = t_idx.to(coords.device, coords.dtype).unsqueeze(-1)   # (T,1)
+        lat = coords[..., 0:1] * (math.pi / 180.0)        # (B,G,1)
+        lng = coords[..., 1:2] * (math.pi / 180.0)        # (B,G,1)
+        T = t.shape[0]
+        pe = torch.zeros(*coords.shape[:-1], T, d, device=coords.device, dtype=coords.dtype)
+        pe[..., 0::4] = torch.sin(t * freq).unsqueeze(0).unsqueeze(0)       # 时间
+        pe[..., 1::4] = torch.cos(t * freq).unsqueeze(0).unsqueeze(0)
+        pe[..., 2::4] = torch.sin(lat * freq).unsqueeze(2)                   # 纬度
+        pe[..., 3::4] = torch.cos(lng * freq).unsqueeze(2)                   # 经度
+        return pe
+
+    def _grid_rope_cos_sin(
+        self, coords: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """2D RoPE 的 cos/sin:(B, 1, G+1, H),对任意 t 相同(时间不参与)。
+
+        2 轴各占连续 dim 段(偶数): [lat | lng],每坐标一对(sin,cos),地位相同:
+          - 每轴**独立完整频率阶梯**(10000^(-2m/n_axis)),首频=1,
+            lat/lng 数据范围小(如玉米带 24-49°N → 弧度 < π/2),单轴就足够唯一区分,
+            不需要 WeatherFormer 那种"时间占 2 槽、空间各半槽"的不对称编码;
+          - 不含时间轴:网格注意力逐时间步做,同一时刻所有网格共享同一个 t,
+            时间在这里无法当相对轴(网格↔网格相对时间恒为 0),只能当绝对信号且偏弱,
+            季节进程交给时序分支(LSTM + time RoPE)编码;
+          - CLS token 位置=0(空间中性),加性位置偏置不再叠加。
+        返回逐维 cos/sin,可直接用于 x*cos + rotate_half(x)*sin(沿 T 广播)。
+        """
+        d = self.hidden_size
+        B, G, _ = coords.shape
+        dev, dtype = coords.device, coords.dtype
+        bounds = _grid_axis_boundaries(d)                              # [lat, lng]
+        freq_dim = torch.zeros(d, device=dev, dtype=dtype)
+        for lo, hi in bounds:                                          # 每轴完整频率阶梯
+            n_pairs = (hi - lo) // 2
+            m = torch.arange(max(n_pairs, 1), device=dev, dtype=dtype)
+            f = 10000.0 ** (-2.0 * m / max(n_pairs, 1))
+            freq_dim[lo:hi] = f.repeat_interleave(2)
+        # 每 dim 属于哪一坐标: 0=lat, 1=lng → (2,d) 系数矩阵
+        coord_mult = torch.zeros(d, device=dev, dtype=dtype)
+        for axis, (lo, hi) in enumerate(bounds):
+            coord_mult[lo:hi] = float(axis)
+        coeff = torch.zeros(2, d, device=dev, dtype=dtype)
+        for cval in range(2):
+            coeff[cval] = torch.where(coord_mult == cval, freq_dim, torch.zeros_like(freq_dim))
+        # 位置: 网格 token = (lat, lng); CLS token = 全 0(空间中性)
+        lat_rad = coords[..., 0] * (math.pi / 180.0)                   # (B,G)
+        lng_rad = coords[..., 1] * (math.pi / 180.0)                   # (B,G)
+        lat_b = torch.cat([torch.zeros(B, 1, device=dev, dtype=dtype), lat_rad], dim=1)  # (B,G+1)
+        lng_b = torch.cat([torch.zeros(B, 1, device=dev, dtype=dtype), lng_rad], dim=1)  # (B,G+1)
+        pos2 = torch.stack([lat_b, lng_b], dim=-1)                     # (B,G+1,2)
+        theta = torch.einsum("bga,ad->bgd", pos2, coeff)               # (B,G+1,d)
+        # 时间维=1,沿 T 广播: q/k 是 (B,T,G+1,H)
+        return torch.cos(theta).unsqueeze(1), torch.sin(theta).unsqueeze(1)
+
+    def forward(
+        self,
+        tokens: torch.Tensor,
+        coords: torch.Tensor,
+        grid_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        out, _ = self.forward_weights(tokens, coords, grid_mask)
+        return out
+
+    def forward_weights(
+        self,
+        tokens: torch.Tensor,
+        coords: torch.Tensor,
+        grid_mask: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """同 forward,但额外返回 CLS 注意力权重 w:(B, T, G+1, G+1)。
+
+        w[b,t,i,j] = 时刻 t 查询 token i 对 key token j 的注意力;
+        CLS 是 token 0,故 CLS 对各网格的注意力为 w[:, :, 0, 1:]。
+        """
+        # tokens: (B, G, T, H) 该特征每网格的 d 维内容投影
+        # coords: (B, G, 2), grid_mask: (B, G) bool
+        B, _, T, H = tokens.shape
+        t_idx = torch.arange(T, device=tokens.device, dtype=torch.long)
+        cls = self.cls_token.view(1, 1, 1, H).expand(B, 1, T, H)
+        if self.use_rope:
+            # 2D RoPE(lat/lng): 位置只进 Q/K(旋转),不加到 token。CLS 位置=0(空间中性)。
+            x = torch.cat([cls, tokens], dim=1)          # (B, G+1, T, H)
+            valid = torch.cat([
+                torch.ones(B, 1, device=grid_mask.device, dtype=torch.bool),
+                grid_mask,
+            ], dim=1)                                    # (B, G+1)
+            x = x.transpose(1, 2)                        # (B, T, G+1, H)
+            q = self.W_q(x)
+            k = self.W_k(x)
+            v = self.W_v(x)
+            cos, sin = self._grid_rope_cos_sin(coords)   # (B,1,G+1,H),沿 T 广播
+            q = _apply_rotary(q, cos, sin)
+            k = _apply_rotary(k, cos, sin)
+        else:
+            # 旧版加性路径: 内容 + 时空位置编码 → 权重随网格位置与季节(步)变化。
+            # 注意:时间偏置若只加在分数上(逐时间步常数)对 softmax 不变,必须加到 token。
+            pe = self._st_pe(coords, t_idx)              # (B, G, T, H) 时空正余弦位置编码
+            x = tokens + pe                              # (B,G,T,H) 加性
+            x = torch.cat([cls, x], dim=1)               # (B, G+1, T, H)
+            valid = torch.cat([
+                torch.ones(B, 1, device=grid_mask.device, dtype=torch.bool),
+                grid_mask,
+            ], dim=1)                                    # (B, G+1)
+            x = x.transpose(1, 2)                        # (B, T, G+1, H)
+            q = self.W_q(x)
+            k = self.W_k(x)
+            v = self.W_v(x)
+        scores = torch.matmul(q, k.transpose(-2, -1)) / self.scale   # (B,T,G+1,G+1)
+        # 按 key 维(dim3)屏蔽填充网格;valid 需放到第 3 维(unsqueeze(2)),
+        # 若误放到查询维会整行 -inf → softmax NaN、且有效查询未屏蔽填充 key。
+        key_valid = valid.unsqueeze(1).unsqueeze(2)              # (B,1,1,G+1)
+        scores = scores.masked_fill(~key_valid, float("-inf"))
+        w = torch.softmax(scores, dim=-1)
+        w = self.dropout(w)
+        w = w * key_valid.to(w.dtype)                            # 填充网格权重置 0
+        out = torch.matmul(w, v)                         # (B, T, G+1, H)
+        cls_out = out[:, :, 0]                           # (B, T, H)
+        return self.norm(cls_out), w
+
+
+class TFTEncoderForYieldPrediction(nn.Module):
+    """TFT 编码器 + 产量预测头：无解码器，直接 LSTM → 注意力 → 预测头。"""
+    def __init__(
+        self,
+        soil_dim: int,
+        dynamic_feature_names: List[str],
+        hidden_size: int,
+        num_lstm_layers: int = 1,
+        dropout: float = 0.3,
+        output_size = 1,
+        num_heads: int = 3,
+        spatial_mode: str = "attention",
+        use_grid_rope: bool = False,
+        use_time_rope: bool = False,
+    ):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.num_heads = num_heads
+        self.dynamic_feature_names = list(dynamic_feature_names)
+        self.spatial_mode = spatial_mode
+        self.use_grid_rope = use_grid_rope
+        self.use_time_rope = use_time_rope
+
+        # 1. 静态：县级连续土壤(Linear 映射,不分桶)+ 上下文 GRN
+        self.soil_static_encoder = SoilStaticEncoder(
+            soil_dim=soil_dim,
+            hidden_size=hidden_size,
+            dropout=dropout,
+        )
+
+        # 2. 每列 1 维动态特征 -> hidden(内容投影,作为网格自注意力的 token)
+        self.per_feature_linear = nn.ModuleDict(
+            {name: nn.Linear(1, hidden_size) for name in self.dynamic_feature_names}
+        )
+
+        # 3. 时序变量选择网络（VSN）— 仅含动态特征（已移除 month 特征）
+        vsn_inputs = {name: hidden_size for name in self.dynamic_feature_names}
+        self.temporal_vsn = VariableSelectionNetwork(
+            input_sizes=vsn_inputs,
+            hidden_size=hidden_size,
+            dropout=dropout,
+            context_size=hidden_size,
+        )
+
+        # 4. LSTM 编码器（仅编码器，无解码器）
+        self.lstm_encoder = LSTMEncoder(
+            input_size=hidden_size,
+            hidden_size=hidden_size,
+            num_layers=num_lstm_layers,
+            dropout=dropout,
+            bidirectional=False,
+            have_context=True,
+        )
+
+        # LSTM 输出经 GRN 准备 → 因果注意力
+        self.cat_attn_prep_grn = GatedResidualNetwork(
+            input_size=hidden_size,
+            hidden_size=hidden_size,
+            output_size=hidden_size,
+            context_size=hidden_size,
+            dropout=dropout,
+        )
+
+        # 5. 多头纯因果自注意力(可选项: Q/K 一维时间 RoPE)
+        self.attention = CausalScaledDotProductAttention(
+            hidden_size=hidden_size,
+            num_heads=num_heads,
+            dropout=dropout,
+            use_rope=use_time_rope,
+        )
+
+        # 6. 产量预测头
+        self.pred_grn = GatedResidualNetwork(
+            input_size=hidden_size,
+            hidden_size=hidden_size,
+            output_size=hidden_size,
+            context_size=None,
+            dropout=dropout,
+        )
+        self.pred_head = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size),
+            nn.Dropout(dropout),
+            nn.ELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_size, output_size),
+        )
+
+        # 网格级:逐特征网格自注意力(内容驱动,Q/K/V=内容+位置,坐标仅位置编码,对齐 MMST-ViT S-MHA)
+        # spatial_mode="mean" 为消融对照:退化为掩码加权平均(直接网格均值),不创建 spatial_agg
+        if spatial_mode == "attention":
+            self.spatial_agg = SpatialAttentionAggregator(hidden_size, dropout, use_rope=use_grid_rope)
+        elif spatial_mode == "mean":
+            self.spatial_agg = None
+        else:
+            raise ValueError(f"未知 spatial_mode: {spatial_mode}，可选 'attention' / 'mean'")
+
+    def forward(
+        self,
+        grid_feats: torch.Tensor,
+        grid_coords: torch.Tensor,
+        grid_mask: torch.Tensor,
+        soil_feats: torch.Tensor,
+        seq_lens: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, Any]]:
+        """
+        Args:
+            grid_feats: (B, G, T, F) 每县 G 个 9×9km 网格的标准化气象
+            grid_coords: (B, G, 2) 每网格 [lat, lon]
+            grid_mask: (B, G) bool 有效网格
+            soil_feats: (B, soil_dim) 县级连续土壤静态特征(已标准化,不进网格注意力)
+            seq_lens: (batch_size,) 有效时序长度
+
+        Returns:
+            pred_all: (B, T, 1) 逐时间步产量预测
+            attn_weights_out: (B, T, T) 注意力权重
+            aux_dict: 含 grad_tensors、pred_all
+        """
+        B, _, T, _ = grid_feats.shape
+        max_seq_len = int(T)
+        device = grid_feats.device
+
+        c_s, c_e, c_c, c_h = self.soil_static_encoder(soil_feats)
+        c_s_expanded = c_s.unsqueeze(1).repeat(1, max_seq_len, 1)
+
+        # 逐特征网格聚合:内容投影(气象值本身)
+        #   attention:坐标位置编码 → 网格维 CLS 自注意力(保留空间结构)
+        #   mean     :掩码加权平均 → 县均值时序(消融对照,不使用坐标)
+        grouped_encoded = {}
+        if self.spatial_mode == "attention":
+            for j, name in enumerate(self.dynamic_feature_names):
+                xf = grid_feats[:, :, :, j:j + 1]                    # (B,G,T,1)
+                tok = self.per_feature_linear[name](xf)              # (B,G,T,H) 内容投影
+                mf = self.spatial_agg(tok, grid_coords, grid_mask)   # (B,T,H) Q/K/V=内容+位置,坐标仅位置编码
+                grouped_encoded[name] = mf
+        else:  # mean
+            denom = grid_mask.sum(dim=1, keepdim=True).clamp(min=1.0)     # (B,1) 有效网格数
+            mask_w = grid_mask[:, :, None, None].to(grid_feats.dtype)     # (B,G,1,1)
+            for j, name in enumerate(self.dynamic_feature_names):
+                xf = grid_feats[:, :, :, j:j + 1]                          # (B,G,T,1)
+                tok = self.per_feature_linear[name](xf)                    # (B,G,T,H)
+                mf = (tok * mask_w).sum(dim=1) / denom.unsqueeze(-1)       # (B,T,H)
+                grouped_encoded[name] = mf
+
+        temporal_feat, _ = self.temporal_vsn(
+            x=grouped_encoded,
+            seq_lens=seq_lens,
+            context=c_s_expanded,
+        )
+
+        # ========== 4. LSTM 编码器 ==========
+        lstm_feat_raw, _, _, _ = self.lstm_encoder(
+            temporal_feat, seq_lens=seq_lens, c_c=c_c, c_h=c_h
+        )
+
+        # ========== 5. GRN 准备 + 因果注意力（仅编码器序列）==========
+        Te = int(lstm_feat_raw.size(1))
+        pad_mask = torch.arange(Te, device=device).unsqueeze(0) < seq_lens.unsqueeze(1)
+        pm_f = pad_mask.unsqueeze(-1).to(dtype=lstm_feat_raw.dtype)
+        c_e_expanded = c_e.unsqueeze(1).repeat(1, Te, 1) * pm_f
+        cat_feat = self.cat_attn_prep_grn(lstm_feat_raw, context=c_e_expanded)
+        cat_feat = cat_feat * pm_f
+
+        attn_feat, attn_weights_out = self.attention(
+            x=cat_feat,
+            pad_mask=pad_mask,
+        )
+
+        # ========== 6. 产量预测头（逐时间步）==========
+        # 每个时间步的注意力向量都经过 GRN + pred_head → (B, T, 1)
+        pred_all = self.pred_head(self.pred_grn(attn_feat))  # (B, T, 1)
+
+        grad_tensors = {
+            "static_feat": c_s,
+            "temporal_feat": temporal_feat,
+            "cat_feat": cat_feat,
+            "lstm_feat_raw": lstm_feat_raw,
+            "pred_all": pred_all,
+        }
+        for tensor in grad_tensors.values():
+            if isinstance(tensor, torch.Tensor) and tensor.requires_grad:
+                tensor.retain_grad()
+
+        aux_dict: Dict[str, Any] = {
+            "grad_tensors": grad_tensors,
+            "pred_all": pred_all,
+        }
+
+        return pred_all, attn_weights_out, aux_dict

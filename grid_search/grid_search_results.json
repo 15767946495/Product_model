@@ -1,0 +1,183 @@
+{
+  "search_space": {
+    "hidden_sizes": [
+      36,
+      64
+    ],
+    "num_heads": [
+      1,
+      2
+    ],
+    "num_lstm_layers": [
+      1,
+      2
+    ],
+    "dropout": 0.2,
+    "epochs": 500,
+    "lr": 0.0005,
+    "weight_decay": 0.0005
+  },
+  "total_combinations": 8,
+  "success_count": 4,
+  "failed_count": 4,
+  "results": [
+    {
+      "hidden_size": 36,
+      "num_heads": 1,
+      "num_lstm_layers": 1,
+      "dropout": 0.2,
+      "run_tag": "grid_hs36_h1_lstm1",
+      "artifact_dir": "/mnt/c/Users/colde/Desktop/model_crucial/cropnet_model/TFT_model/train_output/val_2021_grid_hs36_h1_lstm1",
+      "loss": "mse",
+      "status": "success",
+      "train_elapsed_sec": 6106.6,
+      "infer_status": "success",
+      "best_val_rmse": 19.857259,
+      "best_val_r2": 0.394342,
+      "best_val_corr": 0.720947,
+      "last_step_n": 583,
+      "elapsed_sec": 6175.1
+    },
+    {
+      "hidden_size": 36,
+      "num_heads": 1,
+      "num_lstm_layers": 2,
+      "dropout": 0.2,
+      "run_tag": "grid_hs36_h1_lstm2",
+      "artifact_dir": "/mnt/c/Users/colde/Desktop/model_crucial/cropnet_model/TFT_model/train_output/val_2021_grid_hs36_h1_lstm2",
+      "loss": "mse",
+      "status": "success",
+      "train_elapsed_sec": 19423.7,
+      "infer_status": "success",
+      "best_val_rmse": 17.055278,
+      "best_val_r2": 0.553207,
+      "best_val_corr": 0.761485,
+      "last_step_n": 583,
+      "elapsed_sec": 19489.1
+    },
+    {
+      "hidden_size": 36,
+      "num_heads": 2,
+      "num_lstm_layers": 1,
+      "dropout": 0.2,
+      "run_tag": "grid_hs36_h2_lstm1",
+      "artifact_dir": "/mnt/c/Users/colde/Desktop/model_crucial/cropnet_model/TFT_model/train_output/val_2021_grid_hs36_h2_lstm1",
+      "loss": "mse",
+      "status": "success",
+      "train_elapsed_sec": 9493.2,
+      "infer_status": "success",
+      "best_val_rmse": 18.287083,
+      "best_val_r2": 0.486338,
+      "best_val_corr": 0.723965,
+      "last_step_n": 583,
+      "elapsed_sec": 9560.5
+    },
+    {
+      "hidden_size": 36,
+      "num_heads": 2,
+      "num_lstm_layers": 2,
+      "dropout": 0.2,
+      "run_tag": "grid_hs36_h2_lstm2",
+      "artifact_dir": "/mnt/c/Users/colde/Desktop/model_crucial/cropnet_model/TFT_model/train_output/val_2021_grid_hs36_h2_lstm2",
+      "loss": "mse",
+      "status": "success",
+      "train_elapsed_sec": 5968.1,
+      "infer_status": "success",
+      "best_val_rmse": 17.643115,
+      "best_val_r2": 0.521877,
+      "best_val_corr": 0.744434,
+      "last_step_n": 583,
+      "elapsed_sec": 6030.7
+    },
+    {
+      "hidden_size": 64,
+      "num_heads": 1,
+      "num_lstm_layers": 1,
+      "dropout": 0.2,
+      "run_tag": "grid_hs64_h1_lstm1",
+      "artifact_dir": "/mnt/c/Users/colde/Desktop/model_crucial/cropnet_model/TFT_model/train_output/val_2021_grid_hs64_h1_lstm1",
+      "loss": "mse",
+      "status": "failed",
+      "elapsed_sec": 309.0,
+      "error": "Command '['/home/colde/miniconda3/envs/product/bin/python', '/mnt/c/Users/colde/Desktop/model_crucial/cropnet_model/TFT_model/train.py', '--val_year', '2021', '--epochs', '500', '--lr', '0.0005', '--hidden_size', '64', '--num_heads', '1', '--num_lstm_layers', '1', '--dropout', '0.2', '--batch_size', '8', '--weight_decay', '0.0005', '--output_dir', '/mnt/c/Users/colde/Desktop/model_crucial/cropnet_model/TFT_model/train_output/val_2021_grid_hs64_h1_lstm1']' returned non-zero exit status 1."
+    },
+    {
+      "hidden_size": 64,
+      "num_heads": 1,
+      "num_lstm_layers": 2,
+      "dropout": 0.2,
+      "run_tag": "grid_hs64_h1_lstm2",
+      "artifact_dir": "/mnt/c/Users/colde/Desktop/model_crucial/cropnet_model/TFT_model/train_output/val_2021_grid_hs64_h1_lstm2",
+      "loss": "mse",
+      "status": "failed",
+      "elapsed_sec": 238.4,
+      "error": "Command '['/home/colde/miniconda3/envs/product/bin/python', '/mnt/c/Users/colde/Desktop/model_crucial/cropnet_model/TFT_model/train.py', '--val_year', '2021', '--epochs', '500', '--lr', '0.0005', '--hidden_size', '64', '--num_heads', '1', '--num_lstm_layers', '2', '--dropout', '0.2', '--batch_size', '8', '--weight_decay', '0.0005', '--output_dir', '/mnt/c/Users/colde/Desktop/model_crucial/cropnet_model/TFT_model/train_output/val_2021_grid_hs64_h1_lstm2']' returned non-zero exit status 1."
+    },
+    {
+      "hidden_size": 64,
+      "num_heads": 2,
+      "num_lstm_layers": 1,
+      "dropout": 0.2,
+      "run_tag": "grid_hs64_h2_lstm1",
+      "artifact_dir": "/mnt/c/Users/colde/Desktop/model_crucial/cropnet_model/TFT_model/train_output/val_2021_grid_hs64_h2_lstm1",
+      "loss": "mse",
+      "status": "failed",
+      "elapsed_sec": 125.1,
+      "error": "Command '['/home/colde/miniconda3/envs/product/bin/python', '/mnt/c/Users/colde/Desktop/model_crucial/cropnet_model/TFT_model/train.py', '--val_year', '2021', '--epochs', '500', '--lr', '0.0005', '--hidden_size', '64', '--num_heads', '2', '--num_lstm_layers', '1', '--dropout', '0.2', '--batch_size', '8', '--weight_decay', '0.0005', '--output_dir', '/mnt/c/Users/colde/Desktop/model_crucial/cropnet_model/TFT_model/train_output/val_2021_grid_hs64_h2_lstm1']' returned non-zero exit status 1."
+    },
+    {
+      "hidden_size": 64,
+      "num_heads": 2,
+      "num_lstm_layers": 2,
+      "dropout": 0.2,
+      "run_tag": "grid_hs64_h2_lstm2",
+      "artifact_dir": "/mnt/c/Users/colde/Desktop/model_crucial/cropnet_model/TFT_model/train_output/val_2021_grid_hs64_h2_lstm2",
+      "loss": "mse",
+      "status": "failed",
+      "elapsed_sec": 279.9,
+      "error": "Command '['/home/colde/miniconda3/envs/product/bin/python', '/mnt/c/Users/colde/Desktop/model_crucial/cropnet_model/TFT_model/train.py', '--val_year', '2021', '--epochs', '500', '--lr', '0.0005', '--hidden_size', '64', '--num_heads', '2', '--num_lstm_layers', '2', '--dropout', '0.2', '--batch_size', '8', '--weight_decay', '0.0005', '--output_dir', '/mnt/c/Users/colde/Desktop/model_crucial/cropnet_model/TFT_model/train_output/val_2021_grid_hs64_h2_lstm2']' returned non-zero exit status 1."
+    }
+  ],
+  "top5": [
+    {
+      "rank": 1,
+      "hidden_size": 36,
+      "num_heads": 1,
+      "num_lstm_layers": 2,
+      "rmse": 17.055278,
+      "r2": 0.553207,
+      "corr": 0.761485,
+      "run_tag": "grid_hs36_h1_lstm2"
+    },
+    {
+      "rank": 2,
+      "hidden_size": 36,
+      "num_heads": 2,
+      "num_lstm_layers": 2,
+      "rmse": 17.643115,
+      "r2": 0.521877,
+      "corr": 0.744434,
+      "run_tag": "grid_hs36_h2_lstm2"
+    },
+    {
+      "rank": 3,
+      "hidden_size": 36,
+      "num_heads": 2,
+      "num_lstm_layers": 1,
+      "rmse": 18.287083,
+      "r2": 0.486338,
+      "corr": 0.723965,
+      "run_tag": "grid_hs36_h2_lstm1"
+    },
+    {
+      "rank": 4,
+      "hidden_size": 36,
+      "num_heads": 1,
+      "num_lstm_layers": 1,
+      "rmse": 19.857259,
+      "r2": 0.394342,
+      "corr": 0.720947,
+      "run_tag": "grid_hs36_h1_lstm1"
+    }
+  ]
+}

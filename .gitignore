@@ -1,0 +1,17 @@
+# Python 缓存
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+.eggs/
+*.egg
+
+# 数据（外置，不进入 git，详见 README）
+DataSrc/
+train_dataset/dataset.jsonl
+train_dataset/grid_cache.pt
+train_dataset/grid_cache_meta.json
+BaseLine_Model/output/
+
+# 本地工具配置
+.claude/settings.local.json

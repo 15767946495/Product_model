@@ -1,0 +1,1763 @@
+
+
+===== PAGE 1 =====
+
+CURRICULAR AND CYCLICAL LOSS
+FOR TIME SERIES LEARNING STRATEGY
+Chenxi Sun
+Key Laboratory of Machine Perception
+(Ministry of Education), Peking University
+Beijing, China
+National Key Laboratory of General Artificial Intelligence
+Beijing, China
+School of Artificial Intelligence,
+Peking University
+Beijing, China
+sun_chenxi@pku.edu.cn
+Hongyan Li*
+Key Laboratory of Machine Perception
+(Ministry of Education), Peking University
+Beijing, China
+National Key Laboratory of General Artificial Intelligence
+Beijing, China
+School of Artificial Intelligence,
+Peking University
+Beijing, China
+Moxian Song
+Key Laboratory of Machine Perception
+(Ministry of Education), Peking University
+Beijing, China
+School of Artificial Intelligence,
+Peking University
+Beijing, China
+Derun Cai
+Key Laboratory of Machine Perception
+(Ministry of Education), Peking University
+Beijing, China
+School of Artificial Intelligence,
+Peking University
+Beijing, China
+Shenda Hong*
+National Institute of Health Data Science,
+Peking University
+Beijing, China
+Institute of Medical Technology,
+Health Science Center of Peking University
+Beijing, China
+ABSTRACT
+Time series widely exists in real-world applications and many deep learning models have performed
+well on it. Current research has shown the importance of learning strategy for models, suggesting that
+the benefit is the order and size of learning samples. However, no effective strategy has been proposed
+for time series due to its abstract and dynamic construction. Meanwhile, the existing one-shot tasks
+and continuous tasks for time series necessitate distinct learning processes and mechanisms. No
+all-purpose approach has been suggested. In this work, we propose a novel Curricular and CyclicaL
+loss (CRUCIAL) to learn time series for the first time. It is model- and task-agnostic and can be
+plugged on top of the original loss with no extra procedure. CRUCIAL has two characteristics: It
+can arrange an easy-to-hard learning order by dynamically determining the sample contribution and
+modulating the loss amplitude; It can manage a cyclically changed dataset and achieve an adaptive
+cycle by correlating the loss distribution and the selection probability. We prove that compared with
+monotonous size, cyclical size can reduce expected error. Experiments on 3 kinds of tasks and 5
+real-world datasets show the benefits of CRUCIAL for most deep learning models when learning time
+series.
+arXiv:2312.15853v1  [cs.LG]  26 Dec 2023
+
+
+===== PAGE 2 =====
+
+CCL
+Figure 1: Observations When Deep Learning Models Learning Time Series
+Keywords Time Series Learning Strategy, Curriculum Learning, Cyclical Loss, Continuous Classification.
+1
+Introduction
+At present, deep learning models have achieved good results in time series data, which has diverse sequence and shape
+features [1, 2] and widely exists in real-world applications such as medical and meteorological [3]. Many studies have
+shown that a meaningful learning mechanism can improve the model accuracy and generalization power [4, 5]. For
+example, an easy-to-hard curriculum can get better results than random shuffling on image data [6].
+However, the time series is too abstract to define its difficulty for curriculum in advance [7]. As shown in Figure 1 (a), a
+non-stationary time series could be a hard sample or easy sample under different noise and irregularity ratios [8, 9].
+Defining the learning order of time series data requires an extra program. It is often a separate process, does not adapt
+to models, and requires additional cost. At present, the learning mechanism for deep learning models is often defined as
+specific to datasets and tasks. A general, task-agnostic, and easy-to-use method is unaddressed.
+Meanwhile, the size of the dataset learned by the model in each iteration will also affect its performance [10, 11].
+Existing practices use the whole or increasing dataset at every epoch, but non-monotonic dataset is useful for learning
+time series. For example, many time-sensitive applications need continuous results rather than a single-shot result. In
+the intensive care unit, status perception is needed at any time to rescue lives [12]. But most detected vital signs change
+dynamically, leading to the evolved data distribution. This results in intertwined problems of forgetting and overfitting
+[13]. As shown in Figure 1 (b), when learning the data at t, the model could forget or over-fit the data at t −1. In this
+scenario, learning samples selectively with the dynamic dataset size is potential [14]. However, continual learning
+technology has not yet been targeted to time series data.
+To address the above difficulties, we made some attempts and got two observations as below, which help us make a
+conclusion that a well-designed loss function could be a simple but effective solution.
+• The loss function can discriminate samples naturally. Easy samples and hard samples behave differently
+in terms of their respective loss. A large loss will update the model more through backpropagation. Such
+discrimination makes the loss possible to represent difficulty.
+• The loss distribution can be changed regularly. As shown in Figure 1 (c), if losses are normally distributed,
+they will gradually become half-normally distributed with uniform sampling; If the losses are half-normally
+distributed, they will gradually become normally distributed with exponential sampling. We tested cyclical
+sampling and get the changing loss distribution.
+Based on the observations, we design a loss to imitate the easy-to-hard process without the extra procedure such
+as representing the abstract time series and train the model using an adaptive cyclical dataset size to enhance its
+performance.
+2
+
+
+===== PAGE 3 =====
+
+CCL
+Figure 2: Mechanism of CRUCIAL
+Thus, we propose a novel CuRricUlar and CyclIcAL loss (CRUCIAL) for deep learning models to learn time series data.
+It follows confidence-aware losses [15, 16, 17, 18, 19] which can jointly learn model parameters and sample weights
+in a unified form. CRUCIAL schedules the learning order based on the easy-to-hard principle. It automatically and
+gradually upweights the contribution of the sample with large loss by modulating the loss amplitude; CRUCIAL updates
+the model by the dynamic training set having a cyclically changed size. We prove that the expected error between the
+optimal gradient and the updated gradient by using the cyclical size is smaller than that by using monotonous size.
+CRUCIAL is a generic representation, we give its two specific versions CRUCIAL(SIN) and CRUCIAL(ADP).
+CRUCIAL is a task-agnostic loss aiming at time series data for the first time. As shown in Figure 2 left, it can be
+plugged on top of the original loss without extra procedure. Experiments on five real-world datasets with regression and
+classification tasks show its benefits.
+2
+Related Work
+2.1
+Schedule of Learning Order
+Making deep learning models to learn data in a meaningful order can get better results than random shuffling [20].
+A sub-discipline, curriculum learning [10], is inspired by the human learning process, naturally learning easier
+knowledge before more complex ones [21]. But many methods determine the order before learning, leading to potential
+inconsistencies between the fixed curriculum and the model being learned [19]. Self-paced learning [22, 23] remedy
+this through the dynamic curriculum. But they either introduce additional parameters or rely on extra procedures like
+reinforcement learning. And most curricula are customized for image data, while few are for abstract time series data.
+The existing strategies can be summarized as:
+• Random learning order. It is the classical strategy, where samples are randomly sorted;
+• Orderly learning order. For example, the easy-to-hard order in curriculum learning.
+2.2
+Arrangement of Dataset Size
+Resizing the dataset is important and useful in both curriculum learning and continual learning [11].
+Classical methods train deep learning models in many epochs with several batches of dataset [24]. Each epoch includes
+all data samples and the size is fixed among batches [25]. In curriculum learning, however, assigning the same number
+of samples may result in fluctuations in difficulty within a batch or not enough difference between different batches.
+Thus, current studies propose that the increasing size is helpful [26, 10]. However, for the abstract time series, like
+distinguishing the sample’s difficulty, the principle of increasing size is also hard to define [27].
+Besides, it seems that the simple increment can not meet the dynamic learning task. The problem of multi-distribution
+usually occurs in continual learning [11]. This sub-discipline aims to address the issue of static models incapable of
+adapting their behavior for new knowledge, i.e., catastrophic forgetting, by reviewing old samples [14]. However, in its
+setting, the model learns a new task at every moment. The old task and new task are clear so that the multi-distribution
+is fixed. But the dynamic time series has data correlation over time, which easily further causes the overfitting problem.
+The existing strategies can be summarized as:
+• Full dataset. It uses all samples according to determined batch size with gradient descent;
+• Increasing size dataset. This strategy uses more and more samples to train the model;
+3
+
+
+===== PAGE 4 =====
+
+CCL
+• Dynamic size dataset. The size changes and are not monotonous. e.g., reviewing important samples.
+As analyzed above, we summarize the related mechanisms into 2 categories, where each category has 2 or 3 subcategories.
+They finally can be combined into 6 approaches: Random & full; Random & increasing; Random & dynamic; Orderly
+& full, Orderly & increasing; Orderly & dynamic.
+However, these approaches always require important changes in the learning procedure, like multi-stage learning, extra
+learnable parameters, and extra procedures. Besides, the curriculum oriented to the characteristics of time series data
+has not been proposed. Thus, in this work, we propose a simple version, just using a loss with no additional process to
+achieve automatic sample perception.
+3
+Methods
+In this section, we will first define the relevant concepts to show that the effectiveness of CRUCIAL lies in two prominent
+characteristics of easy-to-hard order and cyclical size (Section 3.1), then give the expression of CRUCIAL and its two
+versions CRUCIAL(SIN) and CRUCIAL(ADP) (Section 3.2), finally introduce its two mechanisms by proving its
+five properties (Section 3.3).
+3.1
+Problem Formulation
+Definition 1 (Process of Learning Time Series). A dataset S = {Xi}N
+i=1 contains N time series. Each time series
+X = {xt}T
+t=1 consists of T observations sorted by time.
+- For one-shot task, the model f first learns the full-length samples X1:T or subsequences X1:t, t < T with
+labels Y ∈Y, where Y can be a set of class, value or other ground truth. Then, it is optimized by minimizing
+loss 1
+N
+PN
+i=1 L(f(Xi), Yi). Finally, it can give the one-shot result about the predicted label.
+- For continuous task, the model f first learns the current time series, then learns the time series with new
+observations, and continues over time. As time series varies among time, they forms T different distributions
+D = {Dt}T
+t=1, Dt = {Xi,1:t}N
+i=1. When the model learns Dt, its performance on all observed data cannot
+degrade: 1
+t
+Pt
+i=1 L(f t, Di) ≤
+1
+t−1
+Pt−1
+i=1 L(f t−1, Di).
+Multivariate time series can be described by changing xt to xd
+t , where d represents the d-th dimension.
+Definition 2 (Difficulty of Time Series Sample). The difficulty of the sample is defined by the performance of the model
+to this sample. The definition from easy to hard can be continuous, like a range from 0 to 1, where 0 represents the
+easiest and 1 represents the hardest. In this work, we give a clear division: For a time series Xi, if its loss li is less than
+a threshold ϵ, it will be an easy sample; Otherwise, it will be a hard sample. i.e., if li < ϵ, then Xi is easy; if li ≥ϵ,
+then Xi is hard.
+Definition 3 (Confidence-aware Loss). The confidence-aware loss has the form of Formula 1, where κ is the confidence
+coefficient of loss l, indicating the uncertainty of the current result. It has the natural advantage that the influence of
+samples on the model can be perceived or adjusted through the confidence coefficient.
+L = κ · l
+(1)
+Definition 4 (Curricular and Cyclical Loss CRUCIAL). Based on the form of confidence-aware loss in Definition 3,
+CRUCIAL has two additional points: arranging an easy-to-hard learning order of samples and scheduling a cyclical
+size of the dataset. These two properties should be realized from coefficient constraint κ by modulating the loss
+amplitude.
+3.2
+Expression of CRUCIAL
+3.2.1
+General expression
+Based on Definition 4, we expect to dynamically control the loss confidence of samples, making the model learn
+different samples at different stages. i.e., the loss should provide an easy-to-hard order and a cyclical size.
+To this end, we first establish the general expression of CRUCIAL in Equation 2. κ and ϵ are responsible for making the
+loss curricular and cyclical respectively.
+L = κ · φD(l, ϵ) + φC(κ),
+ϵ = φS(ε)
+(2)
+4
+
+
+===== PAGE 5 =====
+
+CCL
+Table 1: Notations
+Notation
+Description
+Xi, xi,t, Yi
+A time series, its value at time t, and its label
+S, D
+Dataset and its distribution
+f, w
+Deep learning model and its parameters
+L
+Overall loss of a task
+li
+Original loss when learning sample Xi
+Li
+New loss of Xi after using CRUCIAL
+κ
+Confidence coefficient to modulate l
+λ
+Regularization coefficient to constrain κ
+ϵ
+Threshold to distinguish difficulty of l
+ε
+Indication of current training status
+φC
+Constraint function about κ
+φD
+Differentiation function about ϵ
+φS
+State function about ε
+N(µl, σ2
+l )
+Distribution of loss l (mean and variance)
+About curriculum, after being operated by the constraint function φC with the parameter λ, the confidence coefficient κ
+can modulate the loss amplitudes for different samples, which are distinguished by the differentiation function φD with
+the threshold ϵ.
+About cycle, the threshold ϵ is changed periodically according to the current training state ε of the model and represented
+by the state function φS about ε, and finally controls the size of the current dataset.
+Thus, to get the curricular and cyclical outcome, the key is to design three functions in CRUCIAL:
+• Constraint function φC;
+• Differentiation function φD;
+• State function φS.
+In this work, through designing these three equations, we propose a loss version having the manual cycle
+CRUCIAL(ADP) (Section 3.2.2) and a loss version having the adaptive cycle CRUCIAL(SIN) (Section 3.2.3).
+3.2.2
+Manual cycle CRUCIAL(SIN)
+Intuitively, we can manually control the cycle of CRUCIAL loss. Thus, three key functions are expressed as:
+φC(κ) = λ · (log κ)2, λ = −log F
+φD(l, ϵ) = l −ϵ
+φS(ε) =2ε −µl, ε = 1
+2F · µl
+(3)
+To achieve the cyclical size, we define ε and λ by the periodic function F, and make ϵ in the same rhythm with ε based
+on the base threshold µl, where µl is the average of all losses. F is optional and can be
+F = sin2 (ωt + T ), t ∈N
+(4)
+Thus, the specific representation of CRUCIAL(SIN) is:
+Li,t = CRUCIAL(SIN)(li,t)
+=
+κi,t · (li,t −ϵt) + λt · (log κi,t)2 li,t ≥εt
+0
+li,t < εt
+(5)
+5
+
+
+===== PAGE 6 =====
+
+CCL
+Figure 3: Properties of CRUCIAL
+3.2.3
+Adaptive cycle CRUCIAL(ADP)
+CRUCIAL(SIN) still requires defining periodic hyper-parameters, making it difficult to match datasets and models
+empirically. Thus, we propose an adaptive version CRUCIAL(SIN). Three key functions loss are expressed as:
+φC(κ) = λ·(log κ)2
+φD(l, ϵ) =l −ϵ
+φS(ε) = ε · µl, ε = SK =
+PN
+i (li −µl)3
+Nσ3
+l
+(6)
+• Constraint function φC. To define the confidence coefficient κ, we utilize a regularization term λ(log κ)2. In
+this way, we can use the method of closed-form formula [19] to obtain the final value κ∗= arg minκ L(l, κ),
+where we directly use their converged value at the limit, which only depends on the input loss l, without
+requiring additional parameters or inducing a convergence delay. Finally, κi,t = e−1
+2 W max(−2
+e ,
+li,t−ϵt
+λ
+) in
+Equation 8.
+• Differentiation function φD. To distinguish samples as described in Definition 2, we directly adopt the
+difference between the sample loss and the threshold. For example, the current sample Xi is an easy sample
+when the difference between its loss li and the average of all losses µl is negative.
+• State function φS. To realize the adaptive cycle, we determine the samples selected in the current round t
+according to the current model state ε. ε is reflected in the loss distribution of all samples N(µt, σ2
+lt). Based on
+the observation in Figure 1 and proof in Section 3.3, this distribution changes between the normal distribution
+and the half-normal distribution. Thus, we use the skewness coefficient SK in Equation 9 to quantify.
+Thus, the specific representation of CRUCIAL(ADP) is:
+Li,t = CRUCIAL(ADP)(li,t)
+= κi,t · (li,t −ϵt) + λ · (log κi,t)2
+(7)
+where κi,t = e−1
+2 W max(−2
+e ,
+li,t−ϵt
+λ
+)
+(8)
+and ϵt =
+PN
+i (li,t−1 −µlt−1)3 · µlt−1
+Nσ3
+lt−1
+(9)
+Note that the expression of κ applies to both CRUCIAL(SIN) and CRUCIAL(ADP), where W(∗) is the Lambert W
+function for the solution to y = xex. Refer to Appendix A for the deduction.
+6
+
+
+===== PAGE 7 =====
+
+CCL
+Figure 4: Cycle of CRUCIAL(ADP)
+3.3
+Property of CRUCIAL
+3.3.1
+Basic properties
+CRUCIAL loss function satisfy three basic properties for generality [19].
+Property 1 (Translation-invariance). ∀C, ∃C′|L(l + C, κ) = L(l, κ) + C′. C, C′ are constant.
+Property 2 (Homogeneity). ∃λ, λ′|∀C > 0, Lλ′(C · l, κ) = C · Lλ(l, κ). C is a constant.
+Property 3 (Generalization). ∃κ|L(l, κ) = l + C. C is a constant.
+With Property 1, if we add a constant to the input, it should have no effect on the loss’s gradient; With Property 2, we
+can accordingly rescale λ to handle input losses of any amplitude; With Property 3, it can amount to the input loss for a
+particular confidence. Refer to Appendix B for proofs.
+3.3.2
+Characteristic properties
+After satisfying the basic properties, CRUCIAL satisfies two additional characteristics defined in Definition 4. The
+curricular learning order is achieved by Property 4 and the cyclical dataset size is achieved by Property 5. They are the
+main points of our method.
+Property 4 (Differentiated Scaling). ∀li, lj, li < ϵ, lj > ϵ| Li
+li−ϵ >
+Lj
+lj−ϵ
+In CRUCIAL, ϵ is a threshold that ideally separates easy samples from hard samples based on their respective loss. For
+the selected samples, CRUCIAL will change their losses to varying degrees: taking ϵ as the boundary, the losses of hard
+7
+
+
+===== PAGE 8 =====
+
+CCL
+samples (l > ϵ) will be scaled down, and the that of easy samples (l < ϵ) will be expanded as shown in Figure 3 (a), i.e.,
+it amplifies the contribution of easy samples than hard ones. The model is affected by samples with higher gradients.
+Which means that the simple samples participate more in the early training than the hard samples.
+With the increase of epochs and the convergence of the model, the hard samples become easier, thus the model is
+affected more by them. It is consistent with the easy-to-hard learning order of curriculum learning. As shown in Figure
+3 (b), we plot the typical losses incurred by an easy and a hard sample at the top. We show their respective confidence
+when learned via back-propagation using our loss at the bottom. This process induces a significant delay between the
+moment a hard sample becomes easy. In the context of confidence-aware loss, the confidence log κ of the hard sample
+lags behind that of the easy sample.
+Property 5 (Cyclical Sampling with Less Total Error). ∃ε, ∀C|εt ≈εt+p, PN
+i=1 Lε(li) < PN
+i=1 LC(li), p is the
+period and C is the constant threshold.
+This property shows that the cyclical size of dataset can make the model achieve better performance. We will prove it
+according to the following Theorem 1, 2, and 3.
+The non-monotonic dataset size is needed due to the intertwined problem of forgetting and overfitting when continuously
+learning time series over time, where the model learns subsets St = {Xi,1:t}N
+i=1 one by one from S. Due to uncertain
+similarity and difference between adjacent X1:t and X1:t−1, we arrange the size from the non-full/partial dataset,
+specifically. We prove that in the learning process, the expected error between the updated gradient and optimal gradient
+by using the alternate data size is smaller than that by using monotonous ones. The process is Theorem 1 + Theorem 2
+→Theorem 3.
+A deep learning model f with parameters w try to minimize the loss li of each input sample Xi throughout training L =
+1
+N
+PN
+i=1 li. The optimization process can be performed with the gradient descent algorithm wt+1 = wt −η∇wL(wt).
+But in practice, the optimization is performed based on data batch, like (momentum) stochastic gradient descent
+algorithm [25], wt+1 = wt −γ∇wli(wt).
+Based on them, the expected value of mean squared error between updating the model using partial samples and all
+samples is E[∆(wt)] = E[(∇wli(wt) −∇wL(wt))2] = E[(∇w(li(wt) −L(wt)))2]. Thus, at the training time t, the
+main factor leading to the difference between updating wt to wt+1 and to optimal wt+1 is reflected in the mean squared
+error between the loss li and the global loss L.
+E = E[(li(wt) −L(wt))2]
+(10)
+During the process of updating model parameters, we focus on two conditions defined below. CONDITION U: If training
+samples are randomly selected from a uniform distribution, the i-th sample will be selected with the mean probability
+1
+N ; CONDITION P: If training samples are selected differently, the model training process will be the exponential
+distributed stochastic gradient descent. For example, in CRUCIAL(ADP), samples whose li < ϵ are more likely to be
+selected as their loss amplitudes are maintained but that of samples whose li > ϵ are modulated smaller. As the losses
+are uniformly distributed, the probability is exponentially distributed with p(li) = Λe−Λli. Λ is the rate parameter. The
+i-th sample will be selected with the exponential probability.
+CONDITION U: Select samples randomly ⇒
+Xi is selected with probability 1
+N
+CONDITION P: Select samples based on loss li ⇒
+Xi is selected with probability
+Λe−Λli
+PN
+i=1 Λe−Λli
+Based on above two conditions, we propose three theorems. CRUCIAL satisfies Theorem 1 naturally, and satisfies
+the condition σ < π
+Λ in Theorem 2 when we set λ < 0.01 in the constraint function φC. Theorem 1 and 2 are the
+foundation of Theorem 3. Refer to Appendix B for their detailed proofs.
+Theorem 1. At learning time t, if the loss values are normal distributed N(µ, σ2), the expected error of U will be
+lower than that of P:
+li(wt) ∼N(µ, σ2) =⇒EU < EP
+(11)
+Theorem 2. At learning time t, if the loss values are half-normal distributed N(µ + σ
+q
+2
+π, σ2(1 −2
+π)), the expected
+error of P will be lower than that of U under the condition of σ < π
+Λ:
+li(wt) ∼N(µ + σ
+r
+2
+π , σ2(1 −2
+π )) ∧σ < π
+Λ =⇒EP < EU
+(12)
+8
+
+
+===== PAGE 9 =====
+
+CCL
+Table 2: Task 1 Regression Results (MSE↓) of Three Base Models with Different Strategies and Losses
+1 is random order, 2 is easy-to-hard order; I is random data size, II is curriculum data size.
+Model
+1&II
+2&I
+2&II
+Original
+WeightLoss
+SuperLoss
+CRUCIAL(SIN)
+CRUCIAL(ADP)
+SILSO
+LSTM
+2.61±0.59
+2.57±0.73
+2.84±0.69
+2.95±0.74
+2.73±0.81
+2.56±0.69
+2.39±0.78
+2.32±0.79
+CNN
+2.93±0.55
+2.98±0.71
+3.23±0.44
+3.57±0.64
+2.88±0.56
+2.79±0.41
+2.60±0.43
+2.55±0.61
+Transformer
+3.09±0.95
+2.97±1.01
+3.35±0.78
+3.60±0.82
+2.97±0.96
+2.94±0.75
+2.85±0.84
+2.89±0.91
+USHCN
+LSTM
+0.69±0.20
+0.66±0.12
+0.73±0.15
+0.75±0.32
+0.74±0.33
+0.68±0.25
+0.64±0.19
+0.63±0.17
+CNN
+0.75±0.24
+0.69±0.14
+0.77±0.21
+0.75±0.33
+0.74±0.31
+0.70±0.27
+0.66±0.21
+0.62±0.20
+Transformer
+0.79±0.55
+0.79±0.36
+0.83±0.65
+0.79±0.69
+0.77±0.52
+0.74±0.40
+0.70±0.39
+0.69±0.42
+Table 3: Task 2 Classification Accuracy (AUC-ROC↑) of Different Strategies
+All strategies and losses are based on LSTM model; Task for COVID-19* is early 3 days classification; Task for
+SEPSIS* is early 6 hours classification; Others are classical classification tasks with full-length data.
+1&II
+2&I
+2&II
+Original
+WeightLoss
+SuperLoss
+CRUCIAL(SIN)
+CRUCIAL(ADP)
+UCR-EQ
+0.935±0.004
+0.937±0.004
+0.936±0.007
+0.934±0.005
+0.938±0.004
+0.939±0.004
+0.942±0.003
+0.941±0.004
+USHCN
+0.930±0.010
+0.945±0.010
+0.932±0.010
+0.925±0.013
+0.930±0.014
+0.934±0.012
+0.937±0.013
+0.939±0.017
+COVID-19
+0.991±0.005
+0.992±0.004
+0.987±0.005
+0.988±0.003
+0.990±0.004
+0.993±0.002
+0.996±0.001
+0.994±0.003
+COVID-19*
+0.963±0.005
+0.960±0.007
+0.960±0.006
+0.950±0.008
+0.962±0.007
+0.965±0.009
+0.968±0.010
+0.969±0.010
+SEPSIS
+0.899±0.011
+0.901±0.010
+0.885±0.009
+0.886±0.010
+0.900±0.011
+0.915±0.010
+0.928±0.011
+0.929±0.012
+SEPSIS*
+0.859±0.012
+0.867±0.012
+0.865±0.012
+0.855±0.017
+0.863±0.012
+0.868±0.017
+0.871±0.012
+0.873±0.014
+Based on the fact in Figure 1 (c), demonstrating that if losses come from the normal distribution, they will gradually
+become half-normal distributed with uniform sampling, and if the losses come from the half-normal distribution, they
+will gradually become normally distributed with exponential sampling [28], Theorem 1 and 2 can appear alternately,
+implementing a cyclical process.
+Thus, we come to the conclusion in Theorem 3: If we train the model cyclically using a uniform sampled dataset and an
+exponential sampled dataset, the loss will be lower than that using a single dataset.
+Theorem 3. The expected error of classical loss becomes lower with the constraint of CRUCIAL.
+ECRUCIAL < E
+(13)
+In CRUCIAL(ADP), the selection of samples is based on the modulated loss L of each sample. Where the threshold ϵ
+controls which sample losses will be modulated and is determined by the skewness coefficient SK. SK is the the driving
+factor of the whole cycle in Figure 4 (a):
+Input full dataset into initialized model →• The loss set is like normal distribution →Smaller SK →More loss
+amplitudes are decreased so as not to affect the model →Condition P →Smaller/partial dataset →The loss set is like
+half-normal distribution →Larger SK →More loss amplitudes are maintained to affect the model →Condition U →
+Full dataset →• The loss set is like normal distribution (• indicates the beginning and the end of the cycle).
+This cycle process presented after using CRUCIAL(ADP) is spontaneous, self-consistent, and adaptive. It does not
+need to be driven by the additional periodic function.
+4
+Experiments
+The experiments show that our method can be used for different tasks and models (Section 4.1). It outperforms baselines
+(Section 4.2), and has some unique properties and characteristics (Section 4.3).
+4.1
+Tasks, Datasets, and Baselines
+Task 1 (Regression). Regression tasks require to forecast the future value after learning the existing full-length or
+partial-length time series. We use SILSO dataset [29] to one-step-ahead forecast the monthly sunspot and use USHCN
+dataset [30] to predict New York temperature. We straightforwardly plug CRUCIAL on top of the Mean-Square-Error
+(MSE) loss. The loss at e-th epoch becomes:
+Ltask1 = 1
+N
+N
+X
+i=1
+(κi,e(lmse
+i,e
+−ϵe) + λ(log κi,e)2)
+(14)
+9
+
+
+===== PAGE 10 =====
+
+CCL
+Task 2 (Single-shot Classification). Classical classification tasks require to classify time series after learning the
+full-length data. We use the UCR-EQ dataset [31] to predict the earthquakes; Early classification tasks classify time
+series after learning the subsequences in the early stage. We use SEPSIS dataset [32] to 6-hour early diagnosis. We
+plug CRUCIAL on top of the Cross-Entropy (CE) loss lce
+i . Then, the task loss at e-th epoch becomes:
+Ltask2 = 1
+N
+N
+X
+i=1
+(κi,e(lce
+i,e −ϵe) + λ(log κi,e)2)
+(15)
+Task 3 (Continuous Classification). Continuous classification tasks require to classify time series at every time although
+the class of a time series is usually labeled at the final time. We use the COVID-19 dataset [33] to predict mortality at
+every time point in time series [34] and use the SEPSIS dataset [32] to diagnosis sepsis at every time point. We also
+plug CRUCIAL on top of the Cross-Entropy (CE) loss. But not at epoch e, the task loss at t-th time point in the time
+series becomes:
+Ltask3 = 1
+N
+N
+X
+i=1
+(κi,t(lce
+i −ϵt) + λ(log κi)2)
+(16)
+The regression accuracy in Task 1 is evaluated by Mean Square Error (MSE); The classification accuracy in Task 2,
+3 is evaluated by Area Under Curve of Receiver Operating Characteristic (AUC-ROC). For continuous tasks in Task
+3, performances of solving forgetting and overfitting problems are evaluated by backward transfer BWT and forward
+transfer FWT, which evaluate the influence that learning current data has on the old/future data. R ∈R|D|×|D| is an
+accuracy matrix, Ri,j is the accuracy on Dj after learning Di. b is the accuracy with random initialization.
+BWT =
+|D|−1
+X
+i=1
+R|D|,i −Ri,i
+|D| −1
+(17)
+FWT =
+P|D|
+i=2 Ri−1,i −bi,i
+|D| −1
+(18)
+CRUCIAL is the model-agnostic loss function. In addition to testing its ability to decouple from tasks and datasets, we
+also used it for different models. We adopt 3 deep neural networks as the base model. On this basis, we implement
+different strategies and losses for comparison.
+• Base models
+– LSTM [35, 36], based on recurrent neural networks, models time series recursively and protects long
+short-term dependencies by some special gates;
+– CNN [37, 38] extracts hierarchical patterns in time series using stacked trainable small filters or kernels
+among time ranges;
+– Transformer [39, 40], having encoder-decoder structure, uses multi-head attention to model long-range
+dependencies and interactions in sequential data.
+• Strategies for planning learning order
+– Random [25] order is widely used, usually applying the stochastic gradient descent algorithm [25];
+– Easy-to-hard [10] order lets the model learn easy samples then hard samples.
+• Strategies for planning dataset size
+– Full size [41] is classical and widely used, where all samples are used to train the model at each epoch;
+– Increasing size [10] has the increased number of samples, where more and more samples are used to train
+the model. It has been shown as the common point of curriculum learning.
+• Loss functions
+– WeightLoss [14] learns task-instance parameters to tag important samples and replays them;
+– SuperLoss [19] automatically downweights the contribution of samples with a large loss.
+4.2
+Results of Different Tasks
+CRUCIAL(ADP) is significantly better than baselines in Bonferroni-Dunn tests as shown in Figure 5 (a): For task 1
+Ranktask1 = 4.5 > 2.31+1(k = 7, n = 2, m = 5); For task 2, Ranktask2 = 4.5 > 1.34+1(k = 7, n = 6, m = 5); For
+task 3, Ranktask3 = 2.5 > 1.29+1(k = 4, n = 2, m = 5). k, n, m are the number of methods, datasets, cross-validation
+fold, CD = qα
+q
+k(k+1)
+6(nm) , if the average rank of baselines > CD + 1, the result is significantly improved.
+10
+
+
+===== PAGE 11 =====
+
+CCL
+Table 4: Task 3 Continuous Classification Accuracy (AUC-ROC↑) of Three Base Models with Different Losses
+k% means that the current classification is based on the k%-length time series; + means plugging the additional loss to
+the base model
+Method
+40%
+50%
+60%
+70%
+80%
+90%
+100%
+C
+O
+V
+I
+D-
+1
+9
+LSTM
+0.895±0.014
+0.916±0.013
+0.925±0.013
+0.941±0.012
+0.944±0.011
+0.948±0.007
+0.950±0.008
++WeightLoss
+0.896±0.013
+0.916±0.011
+0.926±0.012
+0.945±0.013
+0.944±0.014
+0.952±0.005
+0.961±0.008
++SuperLoss
+0.899±0.015
+0.915±0.014
+0.923±0.012
+0.946±0.014
+0.955±0.017
+0.960±0.005
+0.963±0.005
++CRUCIAL(SIN)
+0.901±0.015
+0.919±0.015
+0.927±0.012
+0.945±0.011
+0.960±0.011
+0.965±0.010
+0.967±0.010
++CRUCIAL(ADP)
+0.900±0.013
+0.916±0.014
+0.930±0.014
+0.945±0.012
+0.962±0.012
+0.967±0.010
+0.969±0.012
+CNN
+0.879±0.016
+0.915±0.014
+0.926±0.014
+0.936±0.010
+0.941±0.006
+0.947±0.006
+0.952±0.006
++WeightLoss
+0.887±0.013
+0.915±0.013
+0.925±0.015
+0.935±0.009
+0.940±0.007
+0.950±0.005
+0.954±0.006
++SuperLoss
+0.885±0.012
+0.912±0.011
+0.924±0.018
+0.932±0.011
+0.939±0.005
+0.943±0.004
+0.955±0.005
++CRUCIAL(ADP)
+0.895±0.016
+0.915±0.014
+0.927±0.011
+0.941±0.010
+0.943±0.007
+0.948±0.004
+0.957±0.008
++CRUCIAL(ADP)
+0.894±0.018
+0.917±0.014
+0.930±0.014
+0.941±0.011
+0.942±0.006
+0.950±0.005
+0.958±0.007
+Transformer
+0.898±0.018
+0.913±0.013
+0.923±0.010
+0.937±0.007
+0.946±0.006
+0.950±0.004
+0.952±0.005
++WeightLoss
+0.901±0.014
+0.913±0.012
+0.924±0.015
+0.940±0.012
+0.948±0.007
+0.958±0.008
+0.953±0.007
++SuperLoss
+0.898±0.018
+0.916±0.017
+0.923±0.014
+0.936±0.012
+0.940±0.013
+0.955±0.009
+0.956±0.008
+++CRUCIAL(ADP)
+0.903±0.021
+0.917±0.015
+0.924±0.017
+0.942±0.011
+0.944±0.010
+0.963±0.007
+0.964±0.005
+CRUCIAL(ADP)
+0.900±0.020
+0.917±0.017
+0.924±0.017
+0.944±0.013
+0.944±0.012
+0.960±0.005
+0.963±0.005
+S
+E
+P
+S
+I
+S
+LSTM
+0.761±0.020
+0.822±0.023
+0.833±0.028
+0.836±0.015
+0.840±0.016
+0.845±0.016
+0.855±0.017
++WeightLoss
+0.767±0.020
+0.827±0.022
+0.834±0.025
+0.839±0.011
+0.848±0.012
+0.849±0.016
+0.865±0.013
++SuperLoss
+0.768±0.021
+0.825±0.023
+0.830±0.022
+0.837±0.015
+0.846±0.014
+0.848±0.017
+0.868±0.012
++CRUCIAL(SIN)
+0.768±0.026
+0.831±0.023
+0.840±0.024
+0.840±0.018
+0.851±0.012
+0.853±0.012
+0.872±0.012
++CRUCIAL(ADP)
+0.767±0.024
+0.833±0.024
+0.838±0.025
+0.840±0.019
+0.853±0.015
+0.855±0.013
+0.873±0.013
+CNN
+0.755±0.027
+0.815±0.025
+0.832±0.027
+0.830±0.028
+0.844±0.012
+0.847±0.010
+0.848±0.016
++WeightLoss
+0.759±0.028
+0.824±0.029
+0.835±0.027
+0.838±0.026
+0.846±0.015
+0.850±0.017
+0.857±0.018
++SuperLoss
+0.761±0.021
+0.820±0.020
+0.837±0.022
+0.832±0.021
+0.835±0.018
+0.845±0.015
+0.850±0.011
++CRUCIAL(SIN)
+0.765±0.025
+0.826±0.027
+0.839±0.027
+0.839±0.025
+0.849±0.017
+0.852±0.011
+0.865±0.016
++CRUCIAL(ADP)
+0.766±0.026
+0.827±0.027
+0.842±0.026
+0.838±0.027
+0.849±0.017
+0.853±0.014
+0.865±0.017
+Transformer
+0.749±0.025
+0.821±0.026
+0.825±0.027
+0.827±0.020
+0.837±0.018
+0.845±0.014
+0.861±0.023
++WeightLoss
+0.752±0.025
+0.823±0.016
+0.825±0.019
+0.829±0.014
+0.839±0.015
+0.849±0.016
+0.859±0.014
++SuperLoss
+0.763±0.020
+0.826±0.026
+0.830±0.026
+0.838±0.024
+0.844±0.017
+0.848±0.015
+0.859±0.016
++CRUCIAL(SIN)
+0.765±0.025
+0.826±0.023
+0.831±0.025
+0.836±0.028
+0.846±0.015
+0.850±0.014
+0.863±0.012
++CRUCIAL(ADP)
+0.766±0.025
+0.825±0.025
+0.834±0.026
+0.837±0.027
+0.848±0.014
+0.852±0.015
+0.862±0.014
+Table 5: Task 3 Continuous Classification Performance on Solving Forgetting and Overfitting (BWT↑and FWT↑) of
+Different Losses
+CE
+WeightLoss
+SuperLoss
+CRUCIAL(SIN)
+CRUCIAL(ADP)
+CE
+WeightLoss
+SuperLoss
+CRUCIAL(SIN)
+CRUCIAL(ADP)
+UCR-EQ
+–0.153
++0.104
++0.043
++0.125
++0.115
++0.217
++0.287
++0.246
++0.364
++0.369
+USHCN
+–0.092
++0.071
++0.019
++0.081
++0.092
++0.316
++0.322
++0.331
++0.348
++0.350
+COVID-19
+–0.066
++0.017
++0.006
++0.032
++0.039
++0.237
++0.265
++0.323
++0.415
++0.412
+SEPSIS
+–0.015
++0.012
++0.014
++0.021
++0.018
++0.289
++0.478
++0.421
++0.498
++0.510
+4.2.1
+Results of task 1
+As shown in Table 2, CRUCIAL can improve the regression accuracy of base models and performs better than the
+compared strategies and losses. It also shows that the two strategies, easy-to-hard order (2) and increasing size (II), can
+improve the results respectively, but their combination will reduce the results. The easy-to-hard order is not suitable to
+be combined with the increasing size, but can be combined with the cyclical size, which shows the effectiveness of
+CRUCIAL.
+4.2.2
+Results of task 2
+As shown in Table 3, for the LSTM model, CRUCIAL loss is better than all of the other losses, showing its additional
+properties, dynamic easy-to-hard learning order, and cyclical sample size, which can enhance the ability of confidence-
+aware losses to make deep learning models more accurate. Meanwhile, in most cases, especially for early classification
+tasks, CRUCIAL(ADP) is better than CRUCIAL(SIN), demonstrating the advantages of the adaptive cycle.
+4.2.3
+Results of task 3
+As shown in Table 4, CRUCIAL(ADP) can improve the performance of DL models, making them classify more
+accurately at every time. Take sepsis diagnosis as an example, compared with the best baseline, our method improves
+11
+
+
+===== PAGE 12 =====
+
+CCL
+Figure 5: Performance of CRUCIAL with Different Settings
+the accuracy by 1.32% on average, 2.19% in the early 50% time stage when the key features are unobvious. Each
+hour of delayed treatment increases sepsis mortality by 4-8% [42]. With the same accuracy, we can predict 0.944 h in
+advance.
+As shown in Table 5, CRUCIAL(ADP) has the highest BWT, meaning it has the lowest negative influence that learning
+the new tasks has on the old tasks. CRUCIAL(ADP) has the highest FWT, meaning it has the highest positive influence
+that learning the former data distributions has on the tasks. Our method can avoid model overfitting and guarantee
+certain model generalization.
+4.3
+Discussions about Characteristics of CRUCIAL
+4.3.1
+CRUCIAL can schedule an easy-to-hard curriculum by dynamically modulating the loss amplitude
+CRUCIAL can schedule an easy-to-hard order without extra procedure when training the model. This mechanism is
+achieved by changing samples’ losses. As shown in Figure 5 (b), it amplifies the contribution of easy samples while
+strongly flattening the input loss for hard ones: CRUCIAL naturally induces a delay (i.e. the time of convergence) with
+potential inconsistencies between the true status of a sample and its respective confidence.
+Meanwhile, CRUCIAL has certain anti-noise potential. Time series dataset often has noise due to various problems in
+the process of data collection. Especially in medical scenarios, failure of monitoring equipment and manual error could
+introduce noise. The noise sample tends to get a large loss. If we scale the loss values of noise samples, the model
+could be resistant to noise. CRUCIAL(ADP) has certain anti-noise because it can reduce the influence of noise on the
+model as shown in Figure 5 (c). The reason for this benefit is that CRUCIAL(ADP) can recognize noise. As shown in
+12
+
+
+===== PAGE 13 =====
+
+CCL
+Figure 5 (b), noisy samples (i.e. with wrong labels) tend to be harder and receive smaller weights throughout training.
+This side effect makes our method attractive when clean data are expensive while noisy data are widely available.
+4.3.2
+CRUCIAL(ADP) can adjust the size of training set adaptively with a rough cycle when training the model
+CRUCIAL achieves less error through the cyclical loss distribution as shown in Figure 4 (f).
+CRUCIAL(ADP) can adaptively find the suitable cycle for different datasets and tasks. As shown in Figure 4 (b) (c),
+for one-shot classification tasks, cycles for the COVID-19 dataset and SEPSIS dataset in CRUCIAL(ADP) are roughly
+the same as cycles of 4 epochs and 16 epochs in CRUCIAL(ADP). More carefully, the cycle is mainly due to the joint
+action of dataset size and loss distribution SK. As shown in Figure 4 (d) (e), these two indicators are consistent with a
+certain phase difference. And the size is generally periodic and increasing.
+CRUCIAL(SIN) is less sensitive to µl. As shown in Figure 5 (h), for the sepsis classification task, we set µl to
+log 2, 0.2, mean. log C (C is the number of classes) appears to be a natural boundary in the cross-entropy loss. 0.2 is
+the empirical value, and mean is the average loss in each epoch. Their results are similar. We suggest setting µl to log C
+for classification tasks and set µl to empirical value for regression tasks; CRUCIAL(SIN) has different performance
+when using the different periodic function F. The period of CRUCIAL(SIN) should preferably be less than that of
+samples as shown in Figure 5 (i). According to experiments, we suggest setting the period of the method to be less
+than the period of the data, and their periods cannot be aligned. Thus, we give a reference setting: F = sin2 (ωt + T ),
+ω = 1
+3ωdata and T = 0.
+4.3.3
+Combining two characteristics can promote the effect of model convergence
+CRUCIAL helps to make the model converge faster and better as shown in Figure 5 (g), the model with CRUCIAL(ADP)
+converges faster and achieves a lower final error value. For continuous classification, as shown in Figure 2 right. The
+easy-to-hard order reduces the turbulence of the gradient. The use of partial harder samples avoids the overfitting
+problem. And the combination of using partial samples and starting from easy samples avoids the forgetting problem.
+More carefully, the easy-to-hard mechanism (E2H) makes the convergence process more stable: As shown in Figure 5
+(e), the curve of the loss value becomes smoother after using E2H, which is the reflection of the black dotted route of the
+solution for distribution 1 turning into the red route in Figure 2 right. The cycle size mechanism makes the convergence
+process faster: As shown in Figure 5 (f), the global error becomes smaller at most epochs after using the cycle size,
+which is the reflection of the black dotted route with overfitting and forgetting turning into the red route.
+5
+Conclusion and Future Work
+This paper proposes a novel CRUCIAL loss to improve the performance of deep learning models when learning time
+series. It is task-agnostic and can be plugged on top of the original task loss with no extra procedure. We show that
+CRUCIAL can determine the sample contribution dynamically by applying the core principle of easy-to-hard order
+in curriculum learning; We prove that the cyclically changed set size can make expected errors between the updated
+gradient and optimal gradient smaller lower than the monotonous set size. CRUCIAL(ADP) has the ability to create an
+adaptive cycle, which is more effective than setting the cycle manually CRUCIAL(SIN). According to the experiments,
+CRUCIAL has the best result than baselines: It helps the deep learning model to archive higher accuracy and faster
+convergence with certain anti-noise abilities.
+Future work can apply CRUCIAL in other scenarios such as computer vision and natural language processing. The core
+idea of sample differentiation in CRUCIAL has the potential to be extended to other data forms like image data. We
+use fashion MNIST dataset [43] to make a preliminary attempt and find that the convergence speed becomes faster
+and the accuracy becomes higher as shown in Figure 5 (d). Meanwhile, a category of research that evaluates samples,
+rankings, models, tasks, etc through difficulty, confidence, loss, etc has the fundamental idea of discrimination. They
+are interlinked to some extent. Thus, a unified framework for measurement can be studied in future work. It also has the
+potential for self-supervised comparative learning in addition to classical supervised learning.
+Acknowledgment
+This work was supported by the National Natural Science Foundation of China (No.62172018, No.62102008).
+13
+
+
+===== PAGE 14 =====
+
+CCL
+References
+[1] Q. Ma, S. Li, and G. W. Cottrell, “Adversarial joint-learning recurrent neural network for incomplete time series
+classification,” IEEE Transactions on Pattern Analysis and Machine Intelligence, vol. 44, no. 4, pp. 1765–1776,
+2022.
+[2] V. Le Guen and N. Thome, “Deep time series forecasting with shape and temporal criteria,” IEEE Transactions on
+Pattern Analysis and Machine Intelligence, pp. 1–1, 2022.
+[3] C. Sun, S. Hong, J. Wang, X. Dong, F. Han, and H. Li, “A systematic review of deep learning methods for
+modeling electrocardiograms during sleep,” Physiological Measurement, vol. 43, no. 8, p. 08TR02, 2022.
+[4] G. Spadon, S. Hong, B. Brandoli, S. Matwin, J. F. Rodrigues-Jr, and J. Sun, “Pay attention to evolution: Time
+series forecasting with deep graph-evolution learning,” IEEE Transactions on Pattern Analysis and Machine
+Intelligence, vol. 44, no. 9, pp. 5368–5384, 2022.
+[5] C. Sun, M. Song, D. Cai, B. Zhang, S. Hong, and H. Li, “Confidence-guided learning process for continuous
+classification of time series,” in Proceedings of the 31st ACM International Conference on Information &
+Knowledge Management, M. A. Hasan and L. Xiong, Eds., 2022, pp. 4525–4529.
+[6] G. Hacohen and D. Weinshall, “On the power of curriculum learning in training deep networks,” in Proceedings
+of International Conference on Machine Learning (ICML), vol. 97, 2019, pp. 2535–2544.
+[7] C. Sun, S. Hong, M. Song, and H. Li, “A review of deep learning methods for irregularly sampled medical time
+series data,” CoRR, vol. abs/2010.12493, 2020.
+[8] E. Arazo, D. Ortego, P. Albert, N. E. O’Connor, and K. McGuinness, “Unsupervised label noise modeling and
+loss correction,” in Proceedings of the 36th International Conference on Machine Learning, ICML 2019, 9-15
+June 2019, Long Beach, California, USA, ser. Proceedings of Machine Learning Research, vol. 97.
+PMLR, 2019,
+pp. 312–321.
+[9] C. Sun, S. Hong, M. Song, Y. Chou, Y. Sun, D. Cai, and H. Li, “TE-ESN: time encoding echo state network
+for prediction based on irregularly sampled time series data,” in Proceedings of the Thirtieth International Joint
+Conference on Artificial Intelligence, 2021, pp. 3010–3016.
+[10] X. Wu, E. Dyer, and B. Neyshabur, “When do curricula work?” in 9th International Conference on Learning
+Representations, ICLR 2021, Virtual Event, Austria, May 3-7, 2021.
+OpenReview.net, 2021.
+[11] M. Delange, R. Aljundi, M. Masana, S. Parisot, X. Jia, A. Leonardis, G. Slabaugh, and T. Tuytelaars, “A continual
+learning survey: Defying forgetting in classification tasks,” IEEE Transactions on Pattern Analysis and Machine
+Intelligence, no. 7, pp. 3366–3385, 2022.
+[12] W. Chen, J. Wang, Q. L. Fe Ng, S. C. Xu, and L. Ba, “The treatment of severe and multiple injuries in intensive
+care unit: report of 80 cases,” European Review for Medical & Pharmacological Sciences, vol. 18, no. 24, p. 3797,
+2014.
+[13] C. Sun, H. Li, M. Song, D. Cai, B. Zhang, and S. Hong, “Continuous diagnosis and prognosis by controlling the
+update process of deep neural networks,” Patterns, vol. 4, no. 2, p. 100687, 2023.
+[14] D. Kiyasseh, T. Zhu, and D. Clifton, “A clinical deep learning framework for continually learning from cardiac
+signals across diseases, time, modalities, and institutions,” Nature Communications, vol. 12, no. 1, p. 4221, 2021.
+[15] D. Novotný, S. Albanie, D. Larlus, and A. Vedaldi, “Self-supervised learning of geometrically stable features
+through probabilistic introspection,” in 2018 IEEE Conference on Computer Vision and Pattern Recognition,
+CVPR 2018, Salt Lake City, UT, USA, June 18-22, 2018.
+Computer Vision Foundation / IEEE Computer Society,
+2018, pp. 3637–3645.
+[16] A. Kendall, Y. Gal, and R. Cipolla, “Multi-task learning using uncertainty to weigh losses for scene geometry and
+semantics,” in 2018 IEEE Conference on Computer Vision and Pattern Recognition, CVPR 2018, Salt Lake City,
+UT, USA, June 18-22, 2018.
+Computer Vision Foundation / IEEE Computer Society, 2018, pp. 7482–7491.
+[17] J. Revaud, C. R. de Souza, M. Humenberger, and P. Weinzaepfel, “R2D2: reliable and repeatable detector
+and descriptor,” in Advances in Neural Information Processing Systems 32: Annual Conference on Neural
+Information Processing Systems 2019, NeurIPS 2019, December 8-14, 2019, Vancouver, BC, Canada, H. M.
+Wallach, H. Larochelle, A. Beygelzimer, F. d’Alché-Buc, E. B. Fox, and R. Garnett, Eds., 2019, pp. 12 405–12 415.
+[18] S. Saxena, O. Tuzel, and D. DeCoste, “Data parameters: A new family of parameters for learning a differentiable
+curriculum,” in Advances in Neural Information Processing Systems 32: Annual Conference on Neural Information
+Processing Systems 2019, NeurIPS 2019, December 8-14, 2019, Vancouver, BC, Canada, H. M. Wallach,
+H. Larochelle, A. Beygelzimer, F. d’Alché-Buc, E. B. Fox, and R. Garnett, Eds., 2019, pp. 11 093–11 103.
+14
+
+
+===== PAGE 15 =====
+
+CCL
+[19] T. Castells, P. Weinzaepfel, and J. Revaud, “Superloss: A generic loss for robust curriculum learning,” in Advances
+in Neural Information Processing Systems 33: Annual Conference on Neural Information Processing Systems
+2020, NeurIPS 2020, December 6-12, 2020, virtual, H. Larochelle, M. Ranzato, R. Hadsell, M. Balcan, and H. Lin,
+Eds., 2020.
+[20] X. Wang, Y. Chen, and W. Zhu, “A survey on curriculum learning,” IEEE Trans. Pattern Anal. Mach. Intell.,
+vol. 44, no. 9, pp. 4555–4576, 2022.
+[21] Y. Zhou, B. Yang, D. F. Wong, and Y. Wan, “Uncertainty-aware curriculum learning for neural machine translation,”
+in Proceedings of the Association for Computational Linguistics (ACL), 2020, pp. 6934–6944.
+[22] M. P. Kumar, B. Packer, and D. Koller, “Self-paced learning for latent variable models,” in Advances in Neural
+Information Processing Systems, J. D. Lafferty, C. K. I. Williams, J. Shawe-Taylor, R. S. Zemel, and A. Culotta,
+Eds.
+Curran Associates, Inc., 2010, pp. 1189–1197.
+[23] T. Zhou, S. Wang, and J. A. Bilmes, “Curriculum learning by dynamic instance hardness,” in Advances in Neural
+Information Processing Systems, H. Larochelle, M. Ranzato, R. Hadsell, M. Balcan, and H. Lin, Eds., 2020.
+[24] Z. Xu and A. Tewari, “On the statistical benefits of curriculum learning,” in International Conference on Machine
+Learning, ICML 2022, vol. 162, 2022, pp. 24 663–24 682.
+[25] Y. Liu, Y. Gao, and W. Yin, “An improved analysis of stochastic gradient descent with momentum,” in Advances in
+Neural Information Processing Systems 33: Annual Conference on Neural Information Processing Systems 2020,
+NeurIPS 2020, December 6-12, 2020, virtual, H. Larochelle, M. Ranzato, R. Hadsell, M. Balcan, and H. Lin, Eds.,
+2020.
+[26] B. Axelrod, S. Garg, V. Sharan, and G. Valiant, “Sample amplification: Increasing dataset size even when learning
+is impossible,” in Proceedings of the 37th International Conference on Machine Learning, ICML 2020, vol. 119,
+2020, pp. 442–451.
+[27] C. Sun, H. Li, M. Song, D. Cai, B. Zhang, and S. Hong, “Adaptive model training strategy for continuous
+classification of time series,” Applied Intelligence, 2023.
+[28] H. T. Kesgin and M. F. Amasyali, “Cyclical curriculum learning,” CoRR, vol. abs/2202.05531, 2022. [Online].
+Available: https://arxiv.org/abs/2202.05531
+[29] S. W. D. Center, “The international sunspot number, int. sunspot number monthly bull. online catalogue (1749-
+2016),” http://www.sidc.be/silso/, 2016.
+[30] W. C. Menne, M. and V. R., “Long-term daily and monthly climate records from stations across the contiguous
+united states.” [Online], 2010.
+[31] Y. Chen, E. Keogh, B. Hu, N. Begum, A. Bagnall, A. Mueen, and G. Batista, “The ucr time series classification
+archive,” July 2015, www.cs.ucr.edu/~eamonn/time_series_data/.
+[32] M. A. Reyna, C. Josef, S. Seyedi, R. Jeter, S. P. Shashikumar, M. B. Westover, A. Sharma, S. Nemati, and G. D.
+Clifford, “Early prediction of sepsis from clinical data: the physionet/computing in cardiology challenge 2019,” in
+46th Computing in Cardiology, CinC 2019, Singapore, September 8-11, 2019.
+IEEE, 2019, pp. 1–4. [Online].
+Available: https://doi.org/10.23919/CinC49843.2019.9005736
+[33] G. J. e. a. Yan L, Zhang H T, “An interpretable mortality prediction model for covid-19 patients,” Nature, Machine
+intelligence, vol. 2, 2020.
+[34] C. Sun, S. Hong, M. Song, H. Li, and Z. Wang, “Predicting covid-19 disease progression and patient outcomes
+based on temporal deep learning,” BMC Medical Informatics and Decision Making, vol. 21:45, 2020.
+[35] A. Gupta, H. P. Gupta, B. Biswas, and T. Dutta, “Approaches and applications of early classification of time series:
+A review,” IEEE Trans. Artif. Intell., vol. 1, no. 1, pp. 47–61, 2020.
+[36] I. M. Baytas, C. Xiao, X. Zhang, F. Wang, A. K. Jain, and J. Zhou, “Patient subtyping via time-aware lstm
+networks,” in Proceedings of the 23rd ACM SIGKDD International Conference on Knowledge Discovery and
+Data Mining, ser. KDD ’17.
+ACM, 2017, pp. 65–74.
+[37] W. Chen and K. Shi, “Multi-scale attention convolutional neural network for time series classification,” Neural
+Networks, vol. 136, pp. 126–140, 2021.
+[38] H. I. Fawaz, G. Forestier, J. Weber, L. Idoumghar, and P. Muller, “Deep learning for time series classification: a
+review,” Data Min. Knowl. Discov., vol. 33, no. 4, pp. 917–963, 2019.
+[39] H. Zhou, S. Zhang, J. Peng, S. Zhang, J. Li, H. Xiong, and W. Zhang, “Informer: Beyond efficient transformer for
+long sequence time-series forecasting,” in Thirty-Fifth AAAI Conference on Artificial Intelligence, AAAI 2021,
+Thirty-Third Conference on Innovative Applications of Artificial Intelligence, IAAI 2021, The Eleventh Symposium
+15
+
+
+===== PAGE 16 =====
+
+CCL
+on Educational Advances in Artificial Intelligence, EAAI 2021, Virtual Event, February 2-9, 2021.
+AAAI Press,
+2021, pp. 11 106–11 115.
+[40] G. Zerveas, S. Jayaraman, D. Patel, A. Bhamidipaty, and C. Eickhoff, “A transformer-based framework for
+multivariate time series representation learning,” in KDD ’21: The 27th ACM SIGKDD Conference on Knowledge
+Discovery and Data Mining, Virtual Event, Singapore, August 14-18, 2021, F. Zhu, B. C. Ooi, and C. Miao, Eds.
+ACM, 2021, pp. 2114–2124. [Online]. Available: https://doi.org/10.1145/3447548.3467401
+[41] Y. Rizk and M. Awad, “On extreme learning machines in sequential and time series prediction: A non-iterative
+and approximate training algorithm for recurrent neural networks,” Neurocomputing, vol. 325, pp. 1–19, 2019.
+[42] C. W. Seymour, F. Gesten, H. C. Prescott, M. E. Friedrich, T. J. Iwashyna, G. S. Phillips, S. Lemeshow, T. Osborn,
+K. M. Terry, and M. M. Levy, “Time to treatment and mortality during mandated emergency care for sepsis,” New
+England Journal of Medicine, vol. 376, no. 23, pp. 2235–2244, 2017.
+[43] H. Xiao, K. Rasul, and R. Vollgraf, “Fashion-mnist: a novel image dataset for benchmarking machine learning
+algorithms,” CoRR, vol. abs/1708.07747, 2017.
+16
+
+
+===== PAGE 17 =====
+
+CCL
+Appendix for
+Curricular and Cyclical Loss for Time Series Learning Strategy
+A
+Expression of CRUCIAL
+A.1
+General Expression
+The general expression of CRUCIAL is:
+L = κ · φD(l, ϵ) + φC(κ),
+ϵ = φS(ε)
+It has three key functions:
+• Constraint function φC
+• Differentiation function φD
+• State function φS
+A.2
+Expression of CRUCIAL(ADP)
+CRUCIAL(SIN) is a explicit cyclical equation option for CRUCIAL. It is expressed as
+CRUCIAL(SIN)(li,t) =
+κi,t · (li,t −ϵt) + λt · (log κi,t)2 li,t ≥εt
+0
+li,t < εt
+where κi,t = e−1
+2 W max(−2
+e ,
+li,t−ϵ
+λ
+)
+Its three key functions are:
+• Constraint function φC(κ) = λ · (log κ)2
+• Differentiation function φD(l, ϵ) = l −ϵ
+• State function φS(ε) = 2ε −µl
+To achieve the cyclical size, we define ε by the periodic function F. ε, ϵ and λ are in the same rhythm. F is optional
+and we found that F = sin2 (ωt + T ), t ∈N performs well in experiments:
+• F = sin2 (ωt + T ), t ∈N
+• λ = −log F
+• ε = 1
+2F · µl
+CRUCIAL(SIN) is periodic. CRUCIAL(SIN) becomes equivalent to the original input loss when λ tends to infinity:
+As
+lim
+λ→+∞κi = e−W
+2 max(−2
+e , li−ϵ
+λ
+) = e−0
+Hence
+lim
+λ→+∞CRUCIAL(SIN)λ(li) =
+lim
+λ→+∞li −ϵ + λW(li −ϵ
+2λ )2 = li −ϵ
+The loss fails when λ tends to 0:
+As
+lim
+λ→0 κi = e−∞= 0
+Hence
+lim
+λ→+∞CRUCIAL(SIN)λ(li) = 0
+17
+
+
+===== PAGE 18 =====
+
+CCL
+CRUCIAL is periodic and the length of the period is 4 epochs (n ∈N):
+CRUCIALt=4n(li) = li −µl, li ≥0;
+CRUCIALt=4n+1∨4n+3(li) = κ(li −µl
+2 ) + 0.1(log κ)2,
+κ =
+
+
+
+
+
+e−1
+2 W (10li−5µl), li ≥µl
+2 −1
+5e
+e−1
+2 W (−2
+e ), µl
+2 −1
+5e > li ≥1
+4µl
+;
+CRUCIAL4n+2(li) = 0, li ≥1
+2µl.
+A.3
+Expression of CRUCIAL(ADP)
+CRUCIAL(ADP) is an adaptive cyclical equation option for CRUCIAL. It is expressed as
+CRUCIAL(li,t) = κi,t · (li,t −ϵt) + λ · (log κi,t)2
+where κi,t = e−1
+2 W max(−2
+e ,
+li,t−ϵt
+λ
+),
+and ϵt =
+PN
+i (li,t−1 −µlt−1)3 · µlt−1
+Nσ3
+lt−1
+Its three key functions are:
+• Constraint function φC(κ) = λ · (log κ)2
+• Differentiation function φD(l, ϵ) = l −ϵ
+• State function φS(ε) = SK =
+PN
+i (li−µl)3
+Nσ3
+l
+To define the confidence coefficient κ, we utilize the regularization term λ(log κ)2 for constraint function ψ. In this
+way, we can use the method of closed-form formula [19] to obtain the final value κ∗= arg minκ L(l, κ). Where we
+directly use their converged value at the limit, which only depends on the input loss l, without requiring additional
+parameters or inducing a convergence delay.
+The confidence parameters κ does not need to be learned and are up-to-date with the sample status under the operation of constraint fu
+With the exponential mapping
+κ = ex
+and scaled mapping
+β = l −ϵ
+λ
+loss equation can be rewritten as
+min L = min
+κ κ(l −ϵ) + λ(log κ)2 = min
+x βex + x2
+When
+β > −2
+e
+the function admits a single local minimum by solving the root of the derivative
+∂(βex + x2)
+∂x
+= 0 ⇒β
+2 = −xe−x ⇒x = −W(β
+2 )
+where W(∗) is the Lambert W function for the solution to y = xex.
+Finally, when β > −2
+e,
+κ = e−W ( β
+2 )
+When β ≤−2
+e, we cap the optimal
+κ = e−W ( −2/e
+2
+) = e
+Note that κi,t = e−1
+2 W max(−2
+e ,
+li,t−ϵt
+λ
+) applies to both CRUCIAL(SIN) and CRUCIAL(ADP).
+18
+
+
+===== PAGE 19 =====
+
+CCL
+B
+Proofs of properties and theorems
+CRUCIAL satisfy three basic properties and two characteristic properties.
+B.1
+Basic Properties
+CRUCIAL satisfy three basic properties for generality.
+Property 1 Translation-invariance. ∀C, ∃C′|L(l + C, κ) = L(l, κ) + C′. C, C′ are constant.
+Property 2 Homogeneity. ∃λ, λ′|∀C > 0, Lλ′(C · l, κ) = C · Lλ(l, κ). C is a constant.
+Property 3 Generalization. ∃κ|L(l, κ) = l + C. C is a constant.
+Property 1.
+CRUCIAL(l + C) = CRUCIAL(l) + C′, C′ = (κ′ −κ)(l −ϵ) + κ′C + λ((log κ′)2 −(log κ)2)
+Property 2.
+λ′ = Cλ, CRUCIALCλ(Cl) = κ(Cl)(Cl−Cϵ)+Cλ(log κ(Cl))2 = C(κ(l)(l−ϵ)+λ(log κ(l))2) = C·CRUCIALλ(l)
+Property 3.
+κ = 1, CRUCIAL(l) = 1 · (l −ϵ) + λ · (log 1)2 = l −ϵ
+With Property 1, if we add a constant to the input, loss should have no effect on loss’s gradient; With Property 2, we can
+accordingly rescale λ to handle input losses of any amplitude; With Property 3, it can amount to the input loss for a
+particular confidence.
+B.2
+Characteristic Properties
+After satisfying the three basic properties, CRUCIAL satisfies two additional points defined in Definition 4. They are
+achieved by Property 4 and Property 5, which are also the main points of our method.
+Property 4 Differentiated Scaling. ∀li, lj, li < ϵ, lj > ϵ| Li
+li−ϵ >
+Lj
+lj−ϵ
+Property 5 Cyclical Sampling with Less Total Error. ∃ε, ∀C|εt ≈εt+p, PN
+i=1 Lε(li) < PN
+i=1 LC(li), p is the
+period and C is the constant threshold.
+When continuously learning time series over time, the model learns subsets St = {Xi,1:t}N
+i=1 one by one from S. Due
+to uncertain similarity and difference between adjacent X1:t and X1:t−1, we arrange the size from non-full/partial
+dataset, specifically, the cyclical size. Property 5 shows that the cyclical size of the learning set can make the model
+achieve better performance. We prove that in the learning process, the expected error between the updated gradient
+and optimal gradient by using the alternate data size is smaller than that by using monotonous ones. The process is
+Theorem 1 + Theorem 2 →Theorem 3.
+Let the L function be minimized for the data set S = {Xi}N
+i=1. S dataset consist of N samples, where Xi represents
+the i-th training sample and yi is its label. When training a deep learning model f with parameters w, we minimize the
+loss li of each input sample Xi to optimize global loss L:
+arg min Lw
+(19)
+Lw = 1
+N
+N
+X
+i=1
+li
+li =l(yi, f(Xi, w))
+(20)
+19
+
+
+===== PAGE 20 =====
+
+CCL
+Where f(Xi, w) is the prediction for Xi of model f with parameters w, yi is the actual label and l is the loss function.
+The optimization process for Equation 19 can be performed with the gradient descent algorithm
+wt+1 = wt −η∇wL(wt)
+(21)
+Where it optimizes global loss L with learning rate η.
+But in practice, the optimization is performed based on data batch, like (momentum) stochastic gradient descent:
+wt+1 = wt −η∇wli(wt)
+(22)
+The difference of the stochastic gradient descent algorithm from the gradient descent algorithm is that it updates the
+weights at each step, not according to all samples in the training set, but according to a small number of randomly
+selected samples at each step. Thus, it makes some errors.
+The expected value of mean squared error between updating with sample Xi and all samples at time t is:
+E[∆(wt)] = E[(∇wli(wt) −∇wL(wt))2]
+= E[(∇w(li(wt) −L(wt)))2]
+(23)
+Thus, at training time t, wt+1 = wt −η∇wli(wt), the main factor leading to the difference δt between updating wt to
+wt+1 and updating wt to optimal wt+1 is reflected in the mean squared error between the loss li and the global loss L.
+E[δt] = E[(li(wt) −L(wt))2]
+(24)
+Based on this we focus on two conditions defined as below.
+CONDITION U: Select samples randomly ⇒Xi is selected with the probability 1
+N
+CONDITION P: Select samples based on loss li ⇒Xi is selected with the probability
+Λe−Λli
+PN
+i=1 Λe−Λli
+CONDITION U: If the training samples are randomly selected from a uniform distribution, the i-th sample will be
+selected with the mean probability in Equation 25, where N is the number of samples.
+Pi = 1
+N
+(25)
+CONDITION P: If the training samples are selected differently, the model training process will be the exponential
+distributed stochastic gradient descent. For example, in CRUCIAL(ADP), samples whose li < ϵ are more likely to be
+selected as their loss amplitudes are maintained but that of samples whose li > ϵ are modulated smaller. As the losses
+are uniform distributed, the probability P(li < ϵ) of a sample is exponential distributed with p(li) = Λe−Λli. Λ is the
+rate parameter. The i-th sample will be selected with the exponential probability in Equation 26.
+Pi =
+Λe−Λli
+PN
+i=1 Λe−Λli
+(26)
+Based on above two conditions, we propose three theorems. Theorem 1 and 2 are the foundation of Theorem 3.
+Theorem 1 At training time t, if the loss values are normal distributed N(µ, σ2), the expected error of U will be lower
+than that of P:
+li(wt) ∼N(µ, σ2) =⇒EU < EP
+Theorem 2 At training time t, if the loss values are half-normal distributed N(µ + σ
+q
+2
+π, σ2(1 −2
+π)), the expected
+error of P will be lower than that of U under the condition of σ < π
+Λ:
+li(wt) ∼N(µ + σ
+r
+2
+π , σ2(1 −2
+π )) ∧σ < π
+Λ =⇒EP < EU
+Theorem 3 The expected error of classical loss becomes lower with the constraint of CRUCIAL.
+ECRUCIAL < E
+20
+
+
+===== PAGE 21 =====
+
+CCL
+At training time t, based on Equation 24 we write expected value of the error for U and P as follow using variance bias
+decomposition.
+EU[δt] = (EU[A] −B)2 + EU[A2] −E2
+U[A]
+(27)
+EP [δt] = (EP [A] −B)2 + EP [A2] −E2
+P [A]
+(28)
+with
+A = li(wt)
+(29)
+B = L(wt)
+(30)
+Theorem 1. At training time t, li(wt) ∼N(µ, σ2),
+From Equation 20
+B = L(wt) = 1
+N
+N
+X
+i=1
+li(wt) = µ
+Equation 27 and can be calculated as follows:
+Since li(wt) ∼N(µ, σ2), and the i-th sample is selected with mean probability in Equation 25
+EU[A] = EU[li(wt)] = µ
+(31)
+From the definition of variance D(x) = E(x −E(x))2 = E(x2) −E2(x)
+EU[A2] −E2
+U[A] = σ2
+(32)
+Thus
+EU = (µ −µ)2 + σ2 = σ2
+(33)
+Equation 28 and can be calculated as follows:
+Since the i-th sample is selected with the exponential probability in Equation 26
+EP [A] = E[li(wt)Λe−Λli(wt)]
+E[Λe−Λli(wt)]
+= Λe
+Λ(Λσ2−2µ)
+2
+(µ −Λσ2)
+Λe
+Λ(Λσ2−2µ)
+2
+= µ −Λσ2
+(34)
+EP [A2] = E[l2
+i (wt)Λe−Λ∇wtli(wt)]
+E[Λe−Λli(wt)]
+= µ2 + σ2 + Λ2σ4 −2Λµσ2
+(35)
+Thus
+EP = ((µ −Λσ2) −µ)2 + µ2 + σ2 + Λ2σ4 −2Λµσ2 −(µ −Λσ2)2 = Λ2σ4 + σ2
+(36)
+Finally, we compare EU and EP
+σ2 < Λ2σ4 + σ2 =⇒EU < EP
+Theorem 2. At training time t, li(wt) ∼N(µ + σ
+q
+2
+π, σ2(1 −2
+π)),
+From Equation 20
+B = L(wt) = 1
+N
+N
+X
+i=1
+li(wt) = µ + σ
+r
+2
+π
+Equation 27 and can be calculated as follows:
+Since li(wt) ∼N(µ + σ
+q
+2
+π, σ2(1 −2
+π)), and the i-th sample is selected with mean probability in Equation 25
+EU[A] = µ + σ
+r
+2
+π
+(37)
+From the definition of variance D(x) = E(x −E(x))2 = E(x2) −E2(x)
+EU[A2] −E2
+U[A] = σ2(1 −2
+π )
+(38)
+Thus
+EU = ((µ + σ
+r
+2
+π ) −(µ + σ
+r
+2
+π ))2 + σ2(1 −2
+π ) = σ2(1 −2
+π )
+(39)
+21
+
+
+===== PAGE 22 =====
+
+CCL
+Equation 28 and can be calculated as follows:
+Since the i-th sample is selected with the exponential probability in Equation 26
+EP [A] = µ −Λσ2 + ♢
+(40)
+EP [A2] = µ2 + σ2 + Λ2σ4 −2Λµσ2 + ♢(Λµ2 −2µ)
+(41)
+♢=
+√
+2σe
+−σ2Λ2
+2
+√πerfc(
+√
+2
+2 σΛ)
+(42)
+Thus
+EP = ((µ −Λσ2 + ♢) −µ)2 + µ2 + σ2 + Λ2σ4 −2Λµσ2 + ♢(Λµ2 −2µ) −(µ −Λσ2 + ♢)2
+= σ2( 2
+π + 1) + (2σ 2
+π + Λσ2)(Λσ2 −♢)
+(43)
+Finally, we compare EU and EP , as ♢contains the erfc function, we evaluate these expressions numerically instead of
+using analytic equivalent. If we want to get EU < EP , we should constrain σ < π
+Λ by solving equation
+σ2( 2
+π + 1) + (2σ 2
+π + Λσ2)(Λσ2 −♢) < σ2(1 −2
+π )
+(44)
+Finally
+If σ < π
+Λ, Then EU < EP
+In CRUCIAL, the sample is selected according to its loss after modulating the amplitude l →κ(l −ϵ). When it
+corresponds to the probability density function of the exponential probability in Equation 26, i.e.
+Λe−Λl = κ(l −ϵ)
+(45)
+To solve this equation, we set x = Λ, a = l, b = κ(l −ϵ), then, we can get
+xe−ax = b
+(46)
+Then we change it to
+−axe−ax = −ab
+(47)
+Using, Lambert W function, we get
+x = −W(−ab)
+a
+(48)
+Then
+Λ = −W(−κl(l −ϵ))
+l
+(49)
+From Equation 7 and Figure 3 (a), when λ < 0.01,
+for the loss of easy samples (l −ϵ < 0)
+−κl(l −ϵ) > 0, then Λ < 0 < π
+σ
+(50)
+for the loss of hard samples (l −ϵ ≤0)
+κ(l −ϵ) ≈0, then Λ ≈0 < π
+σ
+(51)
+Thus, when we set λ < 0.01 in the constraint function φC, we can satisfy the condition σ < π
+Λ in Theorem 2. Finally,
+CRUCIAL satisfies Theorem 1 and 2 =⇒Theorem 3.
+22
+
+
+===== PAGE 23 =====
+
+CCL
+Table 6: Notations Used in Appendix
+Notation
+Description
+Xi, xi,t, Yi
+Time series sample, its value at time t, and its label
+S, D
+Dataset and its distribution
+f, w
+Deep learning model and its parameters
+L
+Overall loss of a task
+li
+Original loss when learning sample Xi
+Li
+New loss of Xi after using CRUCIAL
+κ
+Confidence coefficient to modulate l
+λ
+Regularization coefficient to constrain κ
+ϵ
+Threshold to distinguish difficulty of l
+ε
+Indication of current training status
+φC
+Constraint function about κ
+φD
+Differentiation function about ϵ
+φS
+State function about ε
+N(µl, σ2
+l )
+Distribution of loss l (mean and variance)
+W(∗)
+Lambert W function for the solution to y = xex
+F
+Periodic function in CRUCIAL(SIN)
+23
