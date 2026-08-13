@@ -96,7 +96,7 @@ class SpatialAttentionContractTests(unittest.TestCase):
         self.assertFalse(torch.allclose(grid_pe[:, :, 0], grid_pe[:, :, 1]))
         self.assertFalse(torch.allclose(cls_pe[:, :, 0], cls_pe[:, :, 1]))
 
-    def test_value_path_does_not_include_position(self):
+    def test_value_path_includes_position(self):
         aggregator = models.SpatialAttentionAggregator(hidden_size=8, dropout=0.0)
         with torch.no_grad():
             aggregator.W_q.weight.zero_()
@@ -111,15 +111,24 @@ class SpatialAttentionContractTests(unittest.TestCase):
         coords_b = torch.tensor([[[30.0, 40.0], [31.0, 41.0]]])
         output_a, _ = aggregator.forward_weights(tokens, coords_a, mask)
         output_b, _ = aggregator.forward_weights(tokens, coords_b, mask)
-        self.assertTrue(torch.allclose(output_a, output_b, atol=1e-6))
+        self.assertFalse(torch.allclose(output_a, output_b, atol=1e-6))
 
     def test_temporal_attention_has_no_rope_option(self):
         with self.assertRaises(TypeError):
             models.CausalScaledDotProductAttention(8, num_heads=1, use_rope=True)
 
-    def test_model_contract_version_is_six(self):
+    def test_model_contract_version_is_seven(self):
         self.assertTrue(hasattr(models, "MODEL_CONTRACT_VERSION"))
-        self.assertEqual(models.MODEL_CONTRACT_VERSION, 6)
+        self.assertEqual(models.MODEL_CONTRACT_VERSION, 7)
+
+    def test_old_value_path_contract_is_rejected(self):
+        checkpoint_contract = 6
+        with self.assertRaisesRegex(ValueError, "checkpoint contract mismatch"):
+            if checkpoint_contract != models.MODEL_CONTRACT_VERSION:
+                raise ValueError(
+                    f"checkpoint contract mismatch: expected {models.MODEL_CONTRACT_VERSION}, "
+                    f"got {checkpoint_contract}"
+                )
 
     def test_model_has_no_spatial_encoding_parameter(self):
         signature = inspect.signature(models.TFTEncoderForYieldPrediction)

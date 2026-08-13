@@ -11,7 +11,7 @@ from copy import deepcopy
 import math
 from typing import Any, Dict, List, Tuple, Optional
 
-MODEL_CONTRACT_VERSION = 6
+MODEL_CONTRACT_VERSION = 7
 
 
 class GatedLinearUnit(nn.Module):
@@ -514,7 +514,7 @@ class LSTMDecoder(nn.Module):
 
 
 class SpatialAttentionAggregator(nn.Module):
-    """Per-feature WeatherFormer pooling with a query-only county CLS token."""
+    """WeatherFormer pooling with a county CLS query and positional Q/K/V inputs."""
 
     def __init__(
         self,
@@ -593,8 +593,9 @@ class SpatialAttentionAggregator(nn.Module):
         cls = self.cls_token.view(1, 1, H).expand(B, T, H)
         q = self.W_q(cls + pe_cls).unsqueeze(2)          # (B,T,1,H)
         x = tokens.transpose(1, 2)                       # (B,T,G,H)
-        k = self.W_k(x + pe_grid)
-        v = self.W_v(x)
+        x_with_pe = x + pe_grid
+        k = self.W_k(x_with_pe)
+        v = self.W_v(x_with_pe)
         scores = torch.matmul(q, k.transpose(-2, -1)).squeeze(2) / self.scale
         key_valid = grid_mask.unsqueeze(1)                       # (B,1,G)
         scores = scores.masked_fill(~key_valid, float("-inf"))
@@ -700,7 +701,7 @@ class TFTEncoderForYieldPrediction(nn.Module):
             nn.Linear(hidden_size, output_size),
         )
 
-        # 网格级:逐特征网格自注意力(内容驱动,Q/K/V=内容+位置,坐标仅位置编码,对齐 MMST-ViT S-MHA)
+        # 网格级:逐特征 WeatherFormer 注意力(Q/K/V 均由内容+位置编码生成)
         # spatial_mode="mean" 为消融对照:退化为掩码加权平均(直接网格均值),不创建 spatial_agg
         if spatial_mode == "attention":
             self.spatial_agg = SpatialAttentionAggregator(hidden_size, dropout)
