@@ -183,6 +183,7 @@ def infer():
     num_lstm_layers = int(hp["num_lstm_layers"])
     dropout = float(hp["dropout"])
     spatial_mode = str(hp["spatial_mode"])
+    variable_selection_stage = str(hp.get("variable_selection_stage", "grid"))
     print(f"    超参: hidden_size={hidden_size}, num_heads={num_heads}, "
           f"num_lstm_layers={num_lstm_layers}, dropout={dropout}, spatial_mode={spatial_mode}")
     model = TFTEncoderForYieldPrediction(
@@ -194,6 +195,7 @@ def infer():
         output_size=1,
         num_heads=num_heads,
         spatial_mode=spatial_mode,
+        variable_selection_stage=variable_selection_stage,
     )
     model.load_state_dict(torch.load(ckpt_path, map_location=device))
     model = model.to(device)

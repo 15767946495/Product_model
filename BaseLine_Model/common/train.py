@@ -22,8 +22,8 @@ from common.data import metrics, per_state_report, de_std
 
 
 def run_training(model, data, device, args, tag, save_dir,
-                 make_batches, step_fn, eval_pred_fn):
-    tr, va = data["train"], data["val"]
+                 make_batches, step_fn, eval_pred_fn, test_pred_fn):
+    tr, va, te = data["train"], data["val"], data["test"]
     stats = data["stats"]
     de = de_std(stats["ymean"], stats["ystd"])
 
@@ -68,16 +68,23 @@ def run_training(model, data, device, args, tag, save_dir,
         pred_raw = de(np.asarray(eval_pred_fn(model)))
     overall = metrics(pred_raw, np.asarray(va["y"]))
     per_state = per_state_report(va["meta"], pred_raw, np.asarray(va["y"]))
+    with torch.no_grad():
+        test_pred_raw = de(np.asarray(test_pred_fn(model)))
+    test_overall = metrics(test_pred_raw, np.asarray(te["y"]))
+    test_per_state = per_state_report(te["meta"], test_pred_raw, np.asarray(te["y"]))
 
     print(f"  ==== {tag}: RMSE={overall['rmse']:.3f} R²={overall['r2']:.3f} "
           f"Corr={overall['corr']:.3f} n={overall['n']}")
     for st, mm in per_state.items():
         print(f"    {st:12s} n={mm['n']:3d} RMSE={mm['rmse']:.3f} R²={mm['r2']:.3f}")
+    print(f"  ==== {tag} TEST: RMSE={test_overall['rmse']:.3f} "
+          f"R²={test_overall['r2']:.3f} Corr={test_overall['corr']:.3f} n={test_overall['n']}")
 
     save_dir = Path(save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
     torch.save(best_state, save_dir / f"best_{tag}.pth")
-    result = {"model": tag, "overall": overall, "per_state": per_state,
+    result = {"model": tag, "validation": overall, "validation_per_state": per_state,
+              "test": test_overall, "test_per_state": test_per_state,
               "epochs": len(hist["epoch"])}
     with open(save_dir / f"results_{tag}.json", "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, indent=2)

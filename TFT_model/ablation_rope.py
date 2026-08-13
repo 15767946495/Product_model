@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-两组空间消融: mean / additive，农学构造特征固定开启。
+四组消融: 变量选择位置(county/grid) × 空间聚合(mean/additive)，农学构造特征固定开启。
 
 每组:
   1) python train.py --output_dir <combo_dir> --val_year <V> <开关> ...
   2) python infer.py  --output_dir <combo_dir> --val_year <V>
-组合编号: 0=mean, 1=additive。
+组合编号: 0=county/mean, 1=county/additive, 2=grid/mean, 3=grid/additive。
 空间注意力逐时间步执行，CLS 与网格 token 均使用 WeatherFormer 四槽时空加性编码。
 输出目录前缀带 "gridvsn2"，与旧实验隔离。
 
 已训练完成的组(目录里已有 best_model.pth)默认跳过,加 --force 重训。
 
 用法:
-  python ablation_rope.py --constructed            # 2 组: mean/additive
+  python ablation_rope.py --constructed            # 4 组联合消融
   python ablation_rope.py --constructed --val_year 2022 --force
   python ablation_rope.py --constructed --combo 0 1
   python ablation_rope.py --constructed --infer-only
@@ -32,8 +32,10 @@ _THIS_DIR = Path(__file__).resolve().parent
 
 def constructed_combo(i: int) -> dict:
     combos = [
-        {"use_constructed": True, "spatial_mode": "mean"},
-        {"use_constructed": True, "spatial_mode": "attention"},
+        {"use_constructed": True, "spatial_mode": "mean", "variable_selection_stage": "county"},
+        {"use_constructed": True, "spatial_mode": "attention", "variable_selection_stage": "county"},
+        {"use_constructed": True, "spatial_mode": "mean", "variable_selection_stage": "grid"},
+        {"use_constructed": True, "spatial_mode": "attention", "variable_selection_stage": "grid"},
     ]
     return combos[i]
 
@@ -134,7 +136,8 @@ def run_combo(
                "--output_dir", str(combo_dir)]
         if args.constructed:
             cmd.append("--use_constructed")
-        cmd += ["--spatial_mode", f.get("spatial_mode", "attention")]
+        cmd += ["--spatial_mode", f.get("spatial_mode", "attention"),
+                "--variable_selection_stage", f.get("variable_selection_stage", "grid")]
         if args.use_crucial:
             cmd.append("--use_crucial")
         print(f"[训练] {' '.join(cmd)} GPU={gpu_id or 'default'}", flush=True)
@@ -162,6 +165,7 @@ def run_combo(
         "use_constructed": f.get("use_constructed", False),
         "spatial_mode": f.get("spatial_mode", "attention"),
         "encoding": "none" if f["spatial_mode"] == "mean" else "additive",
+        "variable_selection_stage": f.get("variable_selection_stage", "grid"),
         "best_train_val_rmse": parse_train_best_rmse(train_log),
         "last_rmse": last.get("rmse"),
         "last_r2": last.get("r2"),
@@ -171,11 +175,11 @@ def run_combo(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="空间消融: 网格均值 vs WeatherFormer 时空加性编码")
+    parser = argparse.ArgumentParser(description="联合消融: 变量选择位置 × 空间聚合方式")
     parser.add_argument("--val_year", type=str, default="2021",
                         help="验证/测试年,与 train.py/infer.py 一致(默认 2021,即网格搜索最优配置的年)")
     parser.add_argument("--constructed", action="store_true",
-                        help="2 组空间消融，农学构造特征(15维)固定开启")
+                        help="4 组联合消融，农学构造特征(15维)固定开启")
     parser.add_argument("--hidden_size", type=int, default=36)
     parser.add_argument("--num_heads", type=int, default=1)
     parser.add_argument("--num_lstm_layers", type=int, default=1)
@@ -196,8 +200,8 @@ def main():
 
     if not args.constructed:
         parser.error("当前脚本仅支持 --constructed 两组空间消融")
-    combo_fn, max_combo, feat_col = constructed_combo, 1, "构造"
-    combo_name = lambda f: "mean" if f["spatial_mode"] == "mean" else "additive"
+    combo_fn, max_combo, feat_col = constructed_combo, 3, "构造"
+    combo_name = lambda f: f"{f['variable_selection_stage']}_{'mean' if f['spatial_mode'] == 'mean' else 'additive'}"
 
     combos = args.combo if args.combo is not None else list(range(max_combo + 1))
     valid_combos = []
@@ -218,7 +222,7 @@ def main():
             validate_parallel_args(args.constructed, args.parallel, visible_devices, 0)
         except ValueError as exc:
             parser.error(str(exc))
-    tag = f"gridvsn2_val{args.val_year.replace(',', '_')}_hs{args.hidden_size}_h{args.num_heads}_lstm{args.num_lstm_layers}_c15"
+    tag = f"gridvsn3_val{args.val_year.replace(',', '_')}_hs{args.hidden_size}_h{args.num_heads}_lstm{args.num_lstm_layers}_c15"
     base = _THIS_DIR / "train_output" / tag
     base.mkdir(parents=True, exist_ok=True)
 

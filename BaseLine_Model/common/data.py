@@ -108,11 +108,21 @@ def kNN_adjacency(centroids, k=5, self_loop=True):
 
 # ---------------------------------------------------------------- 数据准备
 
-def prepare(val_year: int = 2021, out_dir=None, force: bool = False, gnn_k: int = 5):
+def split_years(samples, val_year: int, test_year: int):
+    if test_year <= val_year:
+        raise ValueError("test_year must be greater than val_year")
+    train = [s for s in samples if s["year"] < val_year]
+    val = [s for s in samples if s["year"] == val_year]
+    test = [s for s in samples if s["year"] == test_year]
+    return train, val, test
+
+
+def prepare(val_year: int = 2021, test_year: int = 2022, out_dir=None,
+            force: bool = False, gnn_k: int = 5):
     """构建/加载 9 州数据(缓存到 output/baselines_data.pt)。"""
     out_dir = Path(out_dir) if out_dir else OUT_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
-    cache_path = out_dir / "baselines_data.pt"
+    cache_path = out_dir / f"baselines_data_val{val_year}_test{test_year}.pt"
     if cache_path.exists() and not force:
         print(f"[数据] 使用缓存 {cache_path}")
         return torch.load(cache_path, map_location="cpu", weights_only=False)
@@ -122,9 +132,8 @@ def prepare(val_year: int = 2021, out_dir=None, force: bool = False, gnn_k: int 
     soil_dict = load_county_soil(DEFAULT_COUNTY_SOIL)
     all_samples = build_dataset(cache["entries"], meta, soil_dict, STATES)
 
-    tr = [s for s in all_samples if s["year"] < val_year]
-    va = [s for s in all_samples if s["year"] == val_year]
-    print(f"[数据] 训练 {len(tr)} / 验证 {len(va)} (9 玉米带州)")
+    tr, va, te = split_years(all_samples, val_year, test_year)
+    print(f"[数据] 训练 {len(tr)} / 验证 {len(va)} / 测试 {len(te)} (9 玉米带州)")
 
     def pack(samples):
         W = np.stack([s["weather"] for s in samples])
@@ -139,7 +148,7 @@ def prepare(val_year: int = 2021, out_dir=None, force: bool = False, gnn_k: int 
         return {"weather": W, "soil": S, "y": Y, "grid_weather": grid_weather_list,
                 "grid_coords": grid_coords_list, "adjacency": A, "meta": meta_list}
 
-    tr_p, va_p = pack(tr), pack(va)
+    tr_p, va_p, te_p = pack(tr), pack(va), pack(te)
 
     wm = tr_p["weather"].reshape(-1, N_FEATS).mean(0)
     ws = tr_p["weather"].reshape(-1, N_FEATS).std(0) + 1e-6
@@ -148,15 +157,16 @@ def prepare(val_year: int = 2021, out_dir=None, force: bool = False, gnn_k: int 
     ym = float(tr_p["y"].mean())
     ys = float(tr_p["y"].std()) + 1e-6
 
-    for split in (tr_p, va_p):
+    for split in (tr_p, va_p, te_p):
         split["weather"] = (split["weather"] - wm) / ws
         split["soil"] = (split["soil"] - sm) / ss
         split["y_std"] = (split["y"] - ym) / ys
         split["grid_weather"] = [(gw - wm) / ws for gw in split["grid_weather"]]
 
     gmax = max(max(g.shape[0] for g in tr_p["grid_weather"]),
-               max(g.shape[0] for g in va_p["grid_weather"]))
-    data = {"train": tr_p, "val": va_p, "Gmax": gmax,
+               max(g.shape[0] for g in va_p["grid_weather"]),
+               max(g.shape[0] for g in te_p["grid_weather"]))
+    data = {"train": tr_p, "val": va_p, "test": te_p, "Gmax": gmax,
             "stats": {"wmean": wm, "wstd": ws, "smean": sm, "sstd": ss,
                       "ymean": ym, "ystd": ys}}
     torch.save(data, cache_path)

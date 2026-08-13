@@ -486,7 +486,10 @@ def main():
     parser.add_argument("--early_stop_patience", type=int, default=EARLY_STOP_PATIENCE)
     parser.add_argument("--spatial_mode", type=str, default="attention",
                         choices=["attention", "mean"],
-                        help="网格→县聚合方式: attention(空间注意力,默认) / mean(直接网格均值,消融对照)")
+                         help="网格→县聚合方式: attention(空间注意力,默认) / mean(直接网格均值,消融对照)")
+    parser.add_argument("--variable_selection_stage", type=str, default="grid",
+                        choices=["grid", "county"],
+                        help="变量选择位置: grid(逐网格 VSN) / county(空间聚合后 VSN)")
     parser.add_argument("--use_gdd", action="store_true",
                         help="追加累计积温 CumGDD 通道(base 8°C,由 Avg Temperature 按网格累计)")
     parser.add_argument("--use_constructed", action="store_true",
@@ -615,13 +618,14 @@ def main():
         output_size=1,
         num_heads=args.num_heads,
         spatial_mode=args.spatial_mode,
+        variable_selection_stage=args.variable_selection_stage,
     )
 
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"  参数总量: {total_params:,}, 可训练: {trainable_params:,}")
     print(f"  消融开关: use_constructed={args.use_constructed}  use_gdd={args.use_gdd}  "
-          f"spatial_mode={args.spatial_mode}")
+          f"spatial_mode={args.spatial_mode}  variable_selection_stage={args.variable_selection_stage}")
 
     # 保存模型超参
     hparams = {
@@ -634,6 +638,7 @@ def main():
         "soil_dim": SOIL_DIM,
         "loss": "crucial" if args.use_crucial else "mse",
         "spatial_mode": args.spatial_mode,
+        "variable_selection_stage": args.variable_selection_stage,
         "use_gdd": bool(args.use_gdd),
         "use_constructed": bool(args.use_constructed),
     }

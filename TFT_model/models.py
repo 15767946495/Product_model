@@ -11,7 +11,7 @@ from copy import deepcopy
 import math
 from typing import Any, Dict, List, Tuple, Optional
 
-MODEL_CONTRACT_VERSION = 5
+MODEL_CONTRACT_VERSION = 6
 
 
 class GatedLinearUnit(nn.Module):
@@ -617,12 +617,14 @@ class TFTEncoderForYieldPrediction(nn.Module):
         output_size = 1,
         num_heads: int = 3,
         spatial_mode: str = "attention",
+        variable_selection_stage: str = "grid",
     ):
         super().__init__()
         self.hidden_size = hidden_size
         self.num_heads = num_heads
         self.dynamic_feature_names = list(dynamic_feature_names)
         self.spatial_mode = spatial_mode
+        self.variable_selection_stage = variable_selection_stage
 
         # 1. 静态：县级连续土壤(Linear 映射,不分桶)+ 上下文 GRN
         self.soil_static_encoder = SoilStaticEncoder(
@@ -636,14 +638,25 @@ class TFTEncoderForYieldPrediction(nn.Module):
             {name: nn.Linear(1, hidden_size) for name in self.dynamic_feature_names}
         )
 
-        # 3. 每个网格独立执行 VSN，静态 c_s 作为变量选择上下文
         vsn_inputs = {name: hidden_size for name in self.dynamic_feature_names}
-        self.grid_vsn = VariableSelectionNetwork(
-            input_sizes=vsn_inputs,
-            hidden_size=hidden_size,
-            dropout=dropout,
-            context_size=hidden_size,
-        )
+        if variable_selection_stage == "grid":
+            self.grid_vsn = VariableSelectionNetwork(
+                input_sizes=vsn_inputs,
+                hidden_size=hidden_size,
+                dropout=dropout,
+                context_size=hidden_size,
+            )
+            self.county_vsn = None
+        elif variable_selection_stage == "county":
+            self.grid_vsn = None
+            self.county_vsn = VariableSelectionNetwork(
+                input_sizes=vsn_inputs,
+                hidden_size=hidden_size,
+                dropout=dropout,
+                context_size=hidden_size,
+            )
+        else:
+            raise ValueError("variable_selection_stage must be 'grid' or 'county'")
 
         # 4. LSTM 编码器（仅编码器，无解码器）
         self.lstm_encoder = LSTMEncoder(
@@ -724,33 +737,56 @@ class TFTEncoderForYieldPrediction(nn.Module):
         c_s, c_e, c_c, c_h = self.soil_static_encoder(soil_feats)
         c_s_expanded = c_s.unsqueeze(1).repeat(1, max_seq_len, 1)
 
-        # 每个网格独立做静态条件 VSN，生成一个完整气象 token
         G = grid_feats.shape[1]
-        grid_inputs = {
-            name: self.per_feature_linear[name](grid_feats[..., j:j + 1]).reshape(
-                B * G, T, self.hidden_size
-            )
+        projected = {
+            name: self.per_feature_linear[name](grid_feats[..., j:j + 1])
             for j, name in enumerate(self.dynamic_feature_names)
         }
-        grid_seq_lens = seq_lens.repeat_interleave(G)
-        grid_context = c_s.unsqueeze(1).expand(B, G, self.hidden_size)
-        grid_context = grid_context.reshape(B * G, self.hidden_size)
-        grid_context = grid_context.unsqueeze(1).expand(B * G, T, self.hidden_size)
-        grid_token, grid_vsn_weights = self.grid_vsn(
-            grid_inputs, grid_seq_lens, context=grid_context
-        )
-        grid_token = grid_token.reshape(B, G, T, self.hidden_size)
-        grid_token = grid_token * grid_mask[:, :, None, None].to(grid_token.dtype)
-
-        # mean 与 attention 共用完全相同的 grid token，只改变空间聚合器
-        if self.spatial_mode == "attention":
-            temporal_feat, spatial_weights = self.spatial_agg.forward_weights(
-                grid_token, grid_coords, grid_mask
+        if self.variable_selection_stage == "grid":
+            grid_inputs = {
+                name: tensor.reshape(B * G, T, self.hidden_size)
+                for name, tensor in projected.items()
+            }
+            grid_seq_lens = seq_lens.repeat_interleave(G)
+            grid_context = c_s.unsqueeze(1).expand(B, G, self.hidden_size)
+            grid_context = grid_context.reshape(B * G, self.hidden_size)
+            grid_context = grid_context.unsqueeze(1).expand(B * G, T, self.hidden_size)
+            grid_token, grid_vsn_weights = self.grid_vsn(
+                grid_inputs, grid_seq_lens, context=grid_context
             )
+            grid_token = grid_token.reshape(B, G, T, self.hidden_size)
+            grid_token = grid_token * grid_mask[:, :, None, None].to(grid_token.dtype)
+            if self.spatial_mode == "attention":
+                temporal_feat, spatial_weights = self.spatial_agg.forward_weights(
+                    grid_token, grid_coords, grid_mask
+                )
+            else:
+                denom = grid_mask.sum(dim=1, keepdim=True).clamp(min=1.0)
+                temporal_feat = grid_token.sum(dim=1) / denom.unsqueeze(-1)
+                spatial_weights = None
+            county_vsn_weights = None
         else:
-            denom = grid_mask.sum(dim=1, keepdim=True).clamp(min=1.0)
-            temporal_feat = grid_token.sum(dim=1) / denom.unsqueeze(-1)
-            spatial_weights = None
+            county_inputs = {}
+            feature_spatial_weights = []
+            for name, tensor in projected.items():
+                tensor = tensor * grid_mask[:, :, None, None].to(tensor.dtype)
+                if self.spatial_mode == "attention":
+                    pooled, weights = self.spatial_agg.forward_weights(
+                        tensor, grid_coords, grid_mask
+                    )
+                    feature_spatial_weights.append(weights)
+                else:
+                    denom = grid_mask.sum(dim=1, keepdim=True).clamp(min=1.0)
+                    pooled = tensor.sum(dim=1) / denom.unsqueeze(-1)
+                county_inputs[name] = pooled
+            temporal_feat, county_vsn_weights = self.county_vsn(
+                county_inputs, seq_lens, context=c_s_expanded
+            )
+            grid_vsn_weights = None
+            spatial_weights = (
+                torch.stack(feature_spatial_weights, dim=-1)
+                if feature_spatial_weights else None
+            )
 
         # ========== 4. LSTM 编码器 ==========
         lstm_feat_raw, _, _, _ = self.lstm_encoder(
@@ -777,6 +813,7 @@ class TFTEncoderForYieldPrediction(nn.Module):
         grad_tensors = {
             "static_feat": c_s,
             "grid_vsn_weights": grid_vsn_weights,
+            "county_vsn_weights": county_vsn_weights,
             "temporal_feat": temporal_feat,
             "cat_feat": cat_feat,
             "lstm_feat_raw": lstm_feat_raw,
@@ -790,6 +827,7 @@ class TFTEncoderForYieldPrediction(nn.Module):
             "grad_tensors": grad_tensors,
             "pred_all": pred_all,
             "grid_vsn_weights": grid_vsn_weights,
+            "county_vsn_weights": county_vsn_weights,
             "spatial_weights": spatial_weights,
         }
 

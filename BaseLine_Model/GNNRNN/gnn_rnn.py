@@ -49,6 +49,7 @@ class GNNRNN(nn.Module):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--val_year", type=int, default=2021)
+    ap.add_argument("--test_year", type=int, default=2022)
     ap.add_argument("--epochs", type=int, default=150)
     ap.add_argument("--lr", type=float, default=3e-3)
     ap.add_argument("--patience", type=int, default=30)
@@ -64,8 +65,8 @@ def main():
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     out_dir = Path(args.out_dir) if args.out_dir else D.OUT_DIR
 
-    data = D.prepare(args.val_year, out_dir, args.force_prep, gnn_k=args.gnn_k)
-    tr, va = data["train"], data["val"]
+    data = D.prepare(args.val_year, args.test_year, out_dir, args.force_prep, gnn_k=args.gnn_k)
+    tr, va, te = data["train"], data["val"], data["test"]
     Xtr = D.to_tensor(tr["weather"], device)
     Ytr = D.to_tensor(tr["y_std"], device).unsqueeze(1)
     Str = D.to_tensor(tr["soil"], device)
@@ -73,6 +74,9 @@ def main():
     Xva = D.to_tensor(va["weather"], device)
     Sva = D.to_tensor(va["soil"], device)
     Ava = D.to_tensor(va["adjacency"], device)
+    Xte = D.to_tensor(te["weather"], device)
+    Ste = D.to_tensor(te["soil"], device)
+    Ate = D.to_tensor(te["adjacency"], device)
 
     model = GNNRNN().to(device)
     print(f"[模型] GNN-RNN 参数: {sum(p.numel() for p in model.parameters()):,}")
@@ -92,8 +96,11 @@ def main():
     def eval_pred_fn(model):
         return model(Xva, Ava, Sva).squeeze(1).detach().cpu().numpy()
 
+    def test_pred_fn(model):
+        return model(Xte, Ate, Ste).squeeze(1).detach().cpu().numpy()
+
     run_training(model, data, device, args, "gnn_rnn", out_dir,
-                 make_batches, step_fn, eval_pred_fn)
+                 make_batches, step_fn, eval_pred_fn, test_pred_fn)
 
 
 if __name__ == "__main__":

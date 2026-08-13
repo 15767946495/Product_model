@@ -167,7 +167,7 @@ def run_mode(mode_cfg: dict, data: dict, device: str, dry_run: bool) -> dict:
 
     # 模型超参（infer.py 读取，含 spatial_mode）
     hparams = {
-        "model_contract_version": 5,
+        "model_contract_version": 6,
         "hidden_size": HIDDEN_SIZE,
         "num_heads": NUM_HEADS,
         "num_lstm_layers": NUM_LSTM_LAYERS,

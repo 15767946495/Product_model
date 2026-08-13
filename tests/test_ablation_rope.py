@@ -45,12 +45,14 @@ class ParallelValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "duplicate"):
             ABLATION_ROPE.validate_unique_combos([0, 1, 1])
 
-    def test_constructed_combos_are_mean_and_additive(self):
+    def test_constructed_combos_cover_vsn_stage_and_spatial_pooling(self):
         self.assertEqual(
-            [ABLATION_ROPE.constructed_combo(i) for i in range(2)],
+            [ABLATION_ROPE.constructed_combo(i) for i in range(4)],
             [
-                {"use_constructed": True, "spatial_mode": "mean"},
-                {"use_constructed": True, "spatial_mode": "attention"},
+                {"use_constructed": True, "spatial_mode": "mean", "variable_selection_stage": "county"},
+                {"use_constructed": True, "spatial_mode": "attention", "variable_selection_stage": "county"},
+                {"use_constructed": True, "spatial_mode": "mean", "variable_selection_stage": "grid"},
+                {"use_constructed": True, "spatial_mode": "attention", "variable_selection_stage": "grid"},
             ],
         )
 

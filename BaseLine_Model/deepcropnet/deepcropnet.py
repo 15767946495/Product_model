@@ -66,15 +66,18 @@ def county_gdd_kdd_prcp(feats):
     return gdd_d, kdd_d, prcp_d
 
 
-def prepare_dcn(val_year=2021, out_dir=None, force=False):
+def prepare_dcn(val_year=2021, test_year=2022, out_dir=None, force=False):
     out_dir = Path(out_dir) if out_dir else OUT_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
-    tr_path, va_path = out_dir / "train_dcn_data.pt", out_dir / "val_dcn_data.pt"
-    if tr_path.exists() and va_path.exists() and not force:
+    tr_path = out_dir / f"train_dcn_data_val{val_year}_test{test_year}.pt"
+    va_path = out_dir / f"val_dcn_data_val{val_year}_test{test_year}.pt"
+    te_path = out_dir / f"test_dcn_data_val{val_year}_test{test_year}.pt"
+    if tr_path.exists() and va_path.exists() and te_path.exists() and not force:
         tr = torch.load(tr_path, map_location="cpu", weights_only=False)
         va = torch.load(va_path, map_location="cpu", weights_only=False)
         print(f"[数据] 使用缓存 {tr_path}")
-        return tr, va
+        te = torch.load(te_path, map_location="cpu", weights_only=False)
+        return tr, va, te
 
     meta_lines = D.load_jsonl(D.DEFAULT_DATA_JSONL)
     cache = D.load_grid_cache(D.DEFAULT_GRID_CACHE)
@@ -102,19 +105,24 @@ def prepare_dcn(val_year=2021, out_dir=None, force=False):
              if e is not None and str(m["State"]).lower() in states]
     tr_pairs = [p for p in pairs if int(p[0]["Year"]) < val_year]
     va_pairs = [p for p in pairs if int(p[0]["Year"]) == val_year]
+    te_pairs = [p for p in pairs if int(p[0]["Year"]) == test_year]
 
     Xtr, ytr, reg_tr, meta_tr = build(tr_pairs)
     Xva, yva, reg_va, meta_va = build(va_pairs)
+    Xte, yte, reg_te, meta_te = build(te_pairs)
     Xtr = np.stack(Xtr).astype(np.float32)
     Xva = np.stack(Xva).astype(np.float32)
+    Xte = np.stack(Xte).astype(np.float32)
     ytr = np.array(ytr, dtype=np.float32)
     yva = np.array(yva, dtype=np.float32)
-    print(f"[数据] 训练 {len(Xtr)} / 验证 {len(Xva)} (20周×3特征 GDD/KDD/PRCP)")
+    yte = np.array(yte, dtype=np.float32)
+    print(f"[数据] 训练 {len(Xtr)} / 验证 {len(Xva)} / 测试 {len(Xte)} (20周×3特征 GDD/KDD/PRCP)")
 
     mean = Xtr.reshape(-1, 3).mean(0)
     std = Xtr.reshape(-1, 3).std(0) + 1e-8
     Xtr = (Xtr - mean) / std
     Xva = (Xva - mean) / std
+    Xte = (Xte - mean) / std
 
     # 池化线性趋势(供 anomaly 目标;仅 4 训练年,趋势本身噪声大,默认用 raw)
     years_tr = np.array([m["year"] for m in meta_tr], dtype=np.float64)
@@ -122,17 +130,20 @@ def prepare_dcn(val_year=2021, out_dir=None, force=False):
     coef, *_ = np.linalg.lstsq(A, ytr.astype(np.float64), rcond=None)
     ytr_trend = (coef[0] * years_tr + coef[1]).astype(np.float32)
     yva_trend = (coef[0] * np.array([m["year"] for m in meta_va]) + coef[1]).astype(np.float32)
+    yte_trend = (coef[0] * np.array([m["year"] for m in meta_te]) + coef[1]).astype(np.float32)
 
     def save(path, X, y, trend, reg, metas):
         torch.save({"X": X, "y_raw": y, "y_trend": trend,
                     "region": np.array(reg, dtype=np.int64), "meta": metas}, path)
     save(tr_path, Xtr, ytr, ytr_trend, reg_tr, meta_tr)
     save(va_path, Xva, yva, yva_trend, reg_va, meta_va)
-    print(f"[数据] 已保存 {tr_path} / {va_path}")
+    save(te_path, Xte, yte, yte_trend, reg_te, meta_te)
+    print(f"[数据] 已保存 {tr_path} / {va_path} / {te_path}")
     print("区域分布 train:", {r: reg_tr.count(r) for r in sorted(set(reg_tr))})
     print("区域分布 val:  ", {r: reg_va.count(r) for r in sorted(set(reg_va))})
-    return torch.load(tr_path, map_location="cpu", weights_only=False), \
-        torch.load(va_path, map_location="cpu", weights_only=False)
+    return (torch.load(tr_path, map_location="cpu", weights_only=False),
+            torch.load(va_path, map_location="cpu", weights_only=False),
+            torch.load(te_path, map_location="cpu", weights_only=False))
 
 
 # ============================== 模型 ==============================
@@ -175,6 +186,7 @@ class DeepCropNet(nn.Module):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--val_year", type=int, default=2021)
+    ap.add_argument("--test_year", type=int, default=2022)
     ap.add_argument("--target", type=str, default="raw", choices=["raw", "anomaly"])
     ap.add_argument("--single_head", action="store_true", help="消融:无 MTL")
     ap.add_argument("--epochs", type=int, default=200)
@@ -192,15 +204,17 @@ def main():
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     out_dir = Path(args.out_dir) if args.out_dir else OUT_DIR
 
-    tr, va = prepare_dcn(args.val_year, out_dir, args.force_prep)
+    tr, va, te = prepare_dcn(args.val_year, args.test_year, out_dir, args.force_prep)
 
     # 目标:raw = 原始单产;anomaly = 原始单产 - 趋势。预测后还原。
     if args.target == "raw":
         bias_tr = np.zeros_like(tr["y_raw"], dtype=np.float32)
         bias_va = np.zeros_like(va["y_raw"], dtype=np.float32)
+        bias_te = np.zeros_like(te["y_raw"], dtype=np.float32)
     else:
         bias_tr = np.asarray(tr["y_trend"], dtype=np.float32)
         bias_va = np.asarray(va["y_trend"], dtype=np.float32)
+        bias_te = np.asarray(te["y_trend"], dtype=np.float32)
     ytr_target = np.asarray(tr["y_raw"], dtype=np.float32) - bias_tr
     yva_target = np.asarray(va["y_raw"], dtype=np.float32) - bias_va
 
@@ -211,9 +225,11 @@ def main():
 
     region_tr = torch.tensor(tr["region"], dtype=torch.long)
     region_va = torch.tensor(va["region"], dtype=torch.long)
+    region_te = torch.tensor(te["region"], dtype=torch.long)
     if args.single_head:
         region_tr = torch.zeros_like(region_tr)
         region_va = torch.zeros_like(region_va)
+        region_te = torch.zeros_like(region_te)
 
     region_ids = sorted(set(tr["region"].tolist()) | set(va["region"].tolist()))
     model = DeepCropNet(region_ids=region_ids).to(device)
@@ -221,6 +237,7 @@ def main():
 
     Xtr = torch.tensor(tr["X"], dtype=torch.float32, device=device)
     Xva = torch.tensor(va["X"], dtype=torch.float32, device=device)
+    Xte = torch.tensor(te["X"], dtype=torch.float32, device=device)
     ytr_t = torch.tensor(ytr_t, dtype=torch.float32, device=device).unsqueeze(1)
     N = len(Xtr)
 
@@ -269,6 +286,12 @@ def main():
     overall = D.metrics(pred_raw, np.asarray(va["y_raw"]))
     print(f"  ==== DeepCropNet({args.target}): RMSE={overall['rmse']:.3f} "
           f"R²={overall['r2']:.3f} Corr={overall['corr']:.3f}")
+    with torch.no_grad():
+        pv, _ = model(Xte, region_te)
+        pred_test = pv.squeeze(1).cpu().numpy() * y_std + y_mean + bias_te
+    test_overall = D.metrics(pred_test, np.asarray(te["y_raw"]))
+    print(f"  ==== DeepCropNet({args.target}) TEST: RMSE={test_overall['rmse']:.3f} "
+          f"R²={test_overall['r2']:.3f} Corr={test_overall['corr']:.3f}")
 
     per_region = {}
     for r in sorted(set(va["region"].tolist())):
@@ -281,7 +304,8 @@ def main():
 
     out_dir.mkdir(parents=True, exist_ok=True)
     torch.save(best_state, out_dir / f"best_dcn_{args.target}.pth")
-    result = {"model": "deepcropnet", "target": args.target, "overall": overall,
+    result = {"model": "deepcropnet", "target": args.target,
+              "validation": overall, "test": test_overall,
               "per_region": {str(k): v for k, v in per_region.items()}}
     with open(out_dir / f"dcn_results_{args.target}.json", "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, indent=2)

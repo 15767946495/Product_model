@@ -117,9 +117,9 @@ class SpatialAttentionContractTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             models.CausalScaledDotProductAttention(8, num_heads=1, use_rope=True)
 
-    def test_model_contract_version_is_five(self):
+    def test_model_contract_version_is_six(self):
         self.assertTrue(hasattr(models, "MODEL_CONTRACT_VERSION"))
-        self.assertEqual(models.MODEL_CONTRACT_VERSION, 5)
+        self.assertEqual(models.MODEL_CONTRACT_VERSION, 6)
 
     def test_model_has_no_spatial_encoding_parameter(self):
         signature = inspect.signature(models.TFTEncoderForYieldPrediction)
@@ -173,6 +173,43 @@ class SpatialAttentionContractTests(unittest.TestCase):
             _, _, aux_a = model(grid_feats, coords, mask, soil, seq_lens)
             _, _, aux_b = model(grid_feats, coords, mask, soil + 2.0, seq_lens)
         self.assertFalse(torch.allclose(aux_a["grid_vsn_weights"], aux_b["grid_vsn_weights"]))
+
+    def test_county_vsn_is_available_after_featurewise_spatial_pooling(self):
+        model = models.TFTEncoderForYieldPrediction(
+            soil_dim=7,
+            dynamic_feature_names=["temperature", "precipitation"],
+            hidden_size=8,
+            num_lstm_layers=1,
+            dropout=0.0,
+            output_size=1,
+            num_heads=1,
+            spatial_mode="attention",
+            variable_selection_stage="county",
+        )
+        self.assertIsNone(getattr(model, "grid_vsn", None))
+        self.assertIsInstance(model.county_vsn, models.VariableSelectionNetwork)
+
+    def test_county_vsn_weights_change_with_static_context(self):
+        torch.manual_seed(0)
+        model = models.TFTEncoderForYieldPrediction(
+            soil_dim=7,
+            dynamic_feature_names=["temperature", "precipitation"],
+            hidden_size=8,
+            num_lstm_layers=1,
+            dropout=0.0,
+            output_size=1,
+            num_heads=1,
+            spatial_mode="mean",
+            variable_selection_stage="county",
+        ).eval()
+        grid_feats = torch.randn(1, 2, 3, 2)
+        coords = torch.randn(1, 2, 2)
+        mask = torch.ones(1, 2, dtype=torch.bool)
+        seq_lens = torch.tensor([3])
+        with torch.no_grad():
+            _, _, aux_a = model(grid_feats, coords, mask, torch.randn(1, 7), seq_lens)
+            _, _, aux_b = model(grid_feats, coords, mask, torch.randn(1, 7) + 2.0, seq_lens)
+        self.assertFalse(torch.allclose(aux_a["county_vsn_weights"], aux_b["county_vsn_weights"]))
 
 
 if __name__ == "__main__":
