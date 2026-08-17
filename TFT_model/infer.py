@@ -48,6 +48,7 @@ from data import (
     GDD_FEATURE_NAME,
     CONSTRUCTED_FEATURES,
 )
+from error_report import metrics_by_group, prediction_records
 
 
 def infer():
@@ -210,10 +211,16 @@ def infer():
     # 提前预报节点:每节点所有县的 pred / 真实单产
     node_preds: Dict[Tuple[int, int], List[float]] = {k: [] for k in cutoff_list}
     node_labels: Dict[Tuple[int, int], List[float]] = {k: [] for k in cutoff_list}
+    final_states: List[str] = []
+    final_years: List[int] = []
+    final_fips: List[str] = []
+    final_counties: List[str] = []
+    final_preds: List[float] = []
+    final_labels: List[float] = []
 
     with torch.no_grad():
         for batch in tqdm(val_loader, desc="Infer"):
-            grid_feats, grid_coords, grid_mask, month_ids, soil_feats, labels, seq_lens, states, years, _, _ = batch
+            grid_feats, grid_coords, grid_mask, month_ids, soil_feats, labels, seq_lens, states, years, fips, counties = batch
             grid_feats = grid_feats.to(device)
             grid_coords = grid_coords.to(device)
             grid_mask = grid_mask.to(device)
@@ -248,6 +255,13 @@ def infer():
                 yr = int(years[b])
                 end_d = _date(yr, 11, 30)
                 lab = float(label_raw[b, 0].item())
+                final_idx = int((torch.arange(T, device=device) * valid_mask[b]).argmax().item())
+                final_states.append(str(states[b]))
+                final_years.append(yr)
+                final_fips.append(str(fips[b]))
+                final_counties.append(str(counties[b]))
+                final_preds.append(float(pred_raw[b, final_idx].item()))
+                final_labels.append(lab)
                 for (mm, dd) in cutoff_list:
                     t_idx = sl - 1 - (end_d - _date(yr, mm, dd)).days
                     if 0 <= t_idx < sl:
@@ -413,6 +427,22 @@ def infer():
     with open(result_path, "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
     print(f"  结果已保存: {result_path}")
+
+    # ========== 9. 逐县与分州误差报告 ==========
+    records = prediction_records(
+        final_states, final_years, final_fips, final_counties,
+        final_preds, final_labels,
+    )
+    county_result_path = os.path.join(output_dir, "county_predictions.json")
+    with open(county_result_path, "w", encoding="utf-8") as f:
+        json.dump(records, f, ensure_ascii=False, indent=2)
+
+    state_metrics = metrics_by_group(final_states, final_preds, final_labels)
+    state_result_path = os.path.join(output_dir, "state_metrics.json")
+    with open(state_result_path, "w", encoding="utf-8") as f:
+        json.dump(state_metrics, f, ensure_ascii=False, indent=2)
+    print(f"  逐县预测已保存: {county_result_path}")
+    print(f"  州级指标已保存: {state_result_path}")
     print(f"\n{'='*50}")
     print(f"推理完成！最后时间步指标 (共 {steps} 个有效步):")
     print(f"  RMSE: {last_rmse:.6f}" if not math.isnan(last_rmse) else "  RMSE: N/A")
