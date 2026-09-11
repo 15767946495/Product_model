@@ -15,3 +15,9 @@ BaseLine_Model/output/
 
 # 本地工具配置
 .claude/settings.local.json
+
+# 规划文档（不进入 git）
+docs/
+
+# 密钥文件
+mmst_vit/setenv.sh
