@@ -30,9 +30,9 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 # ========== 搜索空间 ==========
-HIDDEN_SIZES = [16,24,32,36]
-NUM_HEADS = [1, 2]
-NUM_LSTM_LAYERS = [1, 2]
+HIDDEN_SIZES = [16, 24,32,48, 64]
+NUM_HEADS = [1, 2, 4]
+NUM_LSTM_LAYERS = [1, 2, 4]
 DROPOUT = 0.2
 BATCH_SIZE = 8
 EPOCHS = 500
