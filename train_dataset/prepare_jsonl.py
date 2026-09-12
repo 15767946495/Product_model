@@ -22,6 +22,18 @@ import pandas as pd
 import numpy as np
 from glob import glob
 
+PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if PROJECT_DIR not in sys.path:
+    sys.path.insert(0, PROJECT_DIR)
+from cropnet_protocol import (  # noqa: E402
+    ALLOWED_STATES,
+    START_MONTH,
+    END_MONTH,
+    DAYS_PER_MONTH,
+    PROTOCOL_MAX_STEPS,
+    validate_calendar_fields,
+)
+
 # ============================================================
 # 1. 路径配置（基于脚本所在目录，Windows/WSL 通用）
 # ============================================================
@@ -32,15 +44,6 @@ DATA_DIR = os.path.join(PROJECT_DIR, "DataSrc", "cropnet_dataset", "data")
 USDA_DIR = os.path.join(DATA_DIR, "usda_corn")
 WEATHER_DIR = os.path.join(DATA_DIR, "weather")
 OUTPUT_PATH = os.path.join(SCRIPT_DIR, "dataset.jsonl")
-
-ALLOWED_STATES = {
-    "minnesota", "wisconsin", "michigan", "illinois",
-    "indiana", "ohio", "missouri", "kentucky",
-}
-START_MONTH = 4
-END_MONTH = 9
-DAYS_PER_MONTH = 28
-PROTOCOL_MAX_STEPS = (END_MONTH - START_MONTH + 1) * DAYS_PER_MONTH
 
 os.makedirs(os.path.dirname(OUTPUT_PATH), exist_ok=True)
 
@@ -124,10 +127,7 @@ def _load_state_weather(year, state_abbr):
         print(f"    [警告] {state_abbr} {year} 数据无 Day 列")
         return None
 
-    df = df[
-        df["Month"].between(START_MONTH, END_MONTH)
-        & df["Day"].between(1, DAYS_PER_MONTH)
-    ].copy()
+    df = filter_weather_rows(df)
     if df.empty:
         return None
 
@@ -139,6 +139,15 @@ def _load_state_weather(year, state_abbr):
             columns={"Year": "year", "Month": "month", "Day": "day"}
         )
     )
+    return df
+
+
+def filter_weather_rows(df):
+    """Keep daily weather rows inside the shared calendar protocol."""
+    df = df[
+        df["Month"].between(START_MONTH, END_MONTH)
+        & df["Day"].between(1, DAYS_PER_MONTH)
+    ].copy()
     return df
 
 
@@ -262,6 +271,7 @@ def process_all():
             sample["month"] = resampled["month"][:min_len]
             sample["day"] = resampled["day"][:min_len]
             sample["l_enc"] = min_len
+            validate_calendar_fields(sample["month"], sample["day"], min_len)
 
             all_samples.append(sample)
 

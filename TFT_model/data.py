@@ -16,6 +16,7 @@ import json
 import math
 import os
 import random
+import sys
 import torch
 from torch.utils.data import Dataset, DataLoader, Sampler
 import numpy as np
@@ -26,11 +27,16 @@ from typing import Any, List, Dict, Optional, Tuple, Iterator
 # ============================================================
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 TRAIN_DATA_DIR = os.path.join(SCRIPT_DIR, "..", "train_dataset")
-
-PROTOCOL_START_MONTH = 4
-PROTOCOL_END_MONTH = 9
-PROTOCOL_DAYS_PER_MONTH = 28
-PROTOCOL_MAX_STEPS = 168
+PROJECT_DIR = os.path.dirname(SCRIPT_DIR)
+if PROJECT_DIR not in sys.path:
+    sys.path.insert(0, PROJECT_DIR)
+from cropnet_protocol import (  # noqa: E402
+    PROTOCOL_START_MONTH,
+    PROTOCOL_END_MONTH,
+    PROTOCOL_DAYS_PER_MONTH,
+    PROTOCOL_MAX_STEPS,
+    TIME_WINDOW,
+)
 
 DEFAULT_DATA_JSONL = os.path.join(TRAIN_DATA_DIR, "dataset.jsonl")
 DEFAULT_GRID_CACHE = os.path.join(TRAIN_DATA_DIR, "grid_cache.pt")
@@ -106,7 +112,7 @@ def hargreaves_pet(
     """Hargreaves 参考蒸散 ET0（mm/day），逐网格逐日。
 
     参数均为 (G, T)：tmean/tmax/tmin 摄氏温度；lat_deg: (G,) 纬度（度）。
-    序列自 3/1 起 275 天，故首日 doy=60（非闰年），doy_start=60 使 3/1 落在第 60 天；
+    序列的 DOY 起点仍由调用方传入；本协议的日期范围为 4/1--9/28；
     忽略闰年差异（2020 为闰年，逐日太阳几何误差 <1%）。
     返回 (G, T) mm/day。
     """
@@ -819,10 +825,12 @@ def load_grid_cache(path: str = DEFAULT_GRID_CACHE) -> Dict:
         raise ValueError("grid_cache must use version 4")
     if payload.get("coord_type") != "grid_center":
         raise ValueError("grid_cache must use coord_type='grid_center'")
-    if payload.get("time_window") != "04-01--09-28":
+    if payload.get("time_window") != TIME_WINDOW:
         raise ValueError("grid_cache time window mismatch")
-    if payload.get("days_per_month") != 28:
+    if payload.get("days_per_month") != PROTOCOL_DAYS_PER_MONTH:
         raise ValueError("grid_cache days_per_month mismatch")
+    if payload.get("max_steps") != PROTOCOL_MAX_STEPS:
+        raise ValueError("grid_cache max_steps mismatch")
     return payload
 
 
@@ -948,7 +956,7 @@ class GridTimeSeriesDataset(Dataset):
     每个样本一条 (县, 年):
       - grid_feats: (G, T, F) 该县覆盖 G 个 9×9km 网格的气象时序
       - grid_coords: (G, 2) 每个网格的 [lat, lon]
-      - month: (T,) 时间步月份 (3-11)
+      - month: (T,) 时间步月份 (4-9)
       - static_bucket_ids: {"carbon_bucket": (1,), "ph_bucket": (1,)}
       - yield_per_acre: (1,) 单产 (bu/ac)
       - seq_len: 有效时间步数

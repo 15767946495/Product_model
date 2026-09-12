@@ -18,16 +18,25 @@
 """
 import os
 import json
+import sys
 import numpy as np
 import pandas as pd
 import torch
 
+PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if PROJECT_DIR not in sys.path:
+    sys.path.insert(0, PROJECT_DIR)
 import prepare_jsonl
 from prepare_jsonl import (
     WRF_COLS,
     _load_state_weather,
     STATE_TO_USPS,
     PROTOCOL_MAX_STEPS,
+)
+from cropnet_protocol import (  # noqa: E402
+    ALLOWED_STATES,
+    DAYS_PER_MONTH,
+    TIME_WINDOW,
 )
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -39,6 +48,13 @@ META_PATH = os.path.join(SCRIPT_DIR, "grid_cache_meta.json")
 def _median(xs):
     s = sorted(xs)
     return s[len(s) // 2]
+
+
+def validate_jsonl_states(meta_lines):
+    """Reject JSONL metadata containing a state outside the shared allowlist."""
+    invalid = sorted({str(row.get("State", "")).lower() for row in meta_lines} - ALLOWED_STATES)
+    if invalid:
+        raise ValueError(f"JSONL contains states outside allowed states: {invalid}")
 
 
 def center_coords(row):
@@ -113,6 +129,7 @@ def process():
             line = line.strip()
             if line:
                 meta_lines.append(json.loads(line))
+    validate_jsonl_states(meta_lines)
     print(f"  jsonl 行数: {len(meta_lines)}")
 
     # ---- 2. 按 (year, state_abbr) 分组,逐组加载气象 ----
@@ -159,8 +176,8 @@ def process():
     payload = {
         "version": 4,
         "coord_type": "grid_center",
-        "time_window": "04-01--09-28",
-        "days_per_month": 28,
+        "time_window": TIME_WINDOW,
+        "days_per_month": DAYS_PER_MONTH,
         "max_steps": PROTOCOL_MAX_STEPS,
         "feat_names": list(WRF_COLS),
         "entries": entries,
@@ -171,8 +188,8 @@ def process():
     meta = {
         "version": 4,
         "coord_type": "grid_center",
-        "time_window": "04-01--09-28",
-        "days_per_month": 28,
+        "time_window": TIME_WINDOW,
+        "days_per_month": DAYS_PER_MONTH,
         "max_steps": PROTOCOL_MAX_STEPS,
         "n_lines": len(meta_lines),
         "n_ok": n_ok,

@@ -6,7 +6,7 @@ DeepCropNet 9 玉米带州的 weather / soil / yield 张量,供
 CNNRNN / ConvLSTM / GNNRNN 三个基线共用。
 
 要点:
-  - 逐日 275 步(与 TFT 同粒度),网格不截断(逐样本列表存储,训练时按 batch 内最大 G 动态填充)
+   - 逐日最多 168 步(与 TFT 同粒度),网格不截断(逐样本列表存储,训练时按 batch 内最大 G 动态填充)
   - 天气/土壤/目标 z-score(仅训练集统计),报告时还原到原始 bu/ac
   - 训练 = 年份 < val_year,验证 = val_year(默认 2021)
   - 结果缓存到 output/baselines_data.pt,用 force=True 重建
@@ -21,8 +21,13 @@ import torch
 
 _ROOT = Path(__file__).resolve().parent.parent          # BaseLine_Model/
 _TFT = _ROOT.parent / "TFT_model"
+_PROJECT = _ROOT.parent
 if str(_TFT) not in sys.path:
     sys.path.insert(0, str(_TFT))
+if str(_PROJECT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT))
+
+from cropnet_protocol import ALLOWED_STATES, PROTOCOL_MAX_STEPS  # noqa: E402
 
 from data import (  # noqa: E402   (TFT_model 数据管线)
     load_jsonl,
@@ -38,9 +43,8 @@ from data import (  # noqa: E402   (TFT_model 数据管线)
 OUT_DIR = _ROOT / "output"
 
 # 统一 CropNet 协议的八州、4--9 月每月前 28 天。
-STATES = ["minnesota", "wisconsin", "michigan", "illinois",
-          "indiana", "ohio", "missouri", "kentucky"]
-N_STEPS = 168
+STATES = ALLOWED_STATES
+N_STEPS = PROTOCOL_MAX_STEPS
 N_FEATS = len(DEFAULT_DYNAMIC_FEATURE_NAMES)            # 11
 SOIL_DIM = len(SOIL_FEATURES)                           # 7
 
@@ -69,18 +73,18 @@ def build_dataset(cache_entries, meta_lines, soil_dict, states=STATES):
         feats = e["feats"].numpy()                 # (G, T, 11)
         coords = e["coords"].numpy()               # (G, 2)
         county_daily = feats.mean(axis=0)          # (T, 11) 县均值
-        weather = pad_daily(county_daily)          # (275, 11)
+        weather = pad_daily(county_daily)          # (168, 11)
         # 网格按经纬度排序(ConvLSTM 的 1D 空间轴)
         order = np.lexsort((coords[:, 1], coords[:, 0]))
-        grid_daily = pad_daily(feats[order])       # (G, 275, 11)
+        grid_daily = pad_daily(feats[order])       # (G, 168, 11)
         soil = np.array([float(soil_dict[str(m["FIPS"])][f]) for f in SOIL_FEATURES],
                         dtype=np.float32)          # (7,)
         samples.append({
             "fips": str(m["FIPS"]), "county": str(m.get("County", "")),
             "state": state, "year": int(m["Year"]),
             "y": float(m["yield_per_acre"]),
-            "weather": weather.astype(np.float32),        # (275, 11)
-            "grid_weather": grid_daily.astype(np.float32),  # (G, 275, 11)
+            "weather": weather.astype(np.float32),        # (168, 11)
+            "grid_weather": grid_daily.astype(np.float32),  # (G, 168, 11)
             "grid_coords": coords[order].astype(np.float32),  # (G, 2)
             "soil": soil,
         })
@@ -119,7 +123,7 @@ def split_years(samples, val_year: int, test_year: int):
 
 def prepare(val_year: int = 2021, test_year: int = 2022, out_dir=None,
             force: bool = False, gnn_k: int = 5):
-    """构建/加载 9 州数据(缓存到 output/baselines_data.pt)。"""
+    """构建/加载八州数据(缓存到 output/baselines_data.pt)。"""
     out_dir = Path(out_dir) if out_dir else OUT_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
     cache_path = out_dir / f"baselines_data_val{val_year}_test{test_year}.pt"
