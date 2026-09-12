@@ -94,3 +94,34 @@ git diff --check && /root/miniconda3/envs/hqx/bin/python -m py_compile cropnet_p
 - 测试仍有 PyTorch 的 `pynvml` 弃用警告。
 - 按任务范围未执行真实数据重建、未训练模型，未修改后续 MMST-ViT manifest 或其他基线模型文件。
 - 工作区仍保留既有未跟踪运行产物 `DataSrc` 和 `BaseLine_Model/output`，未修改、未提交。
+
+## 测试闭环追加
+
+### 修复内容
+
+- 在 `tests/test_cropnet_protocol.py` 增加 `month=3`、`month=10`、`day=0`、`day=29` 非法日历字段覆盖。
+- 增加恰好 `l_enc=168` 的合法边界和空日历输入覆盖；空输入按当前协议校验实现断言为合法。
+- 使用最小 pandas DataFrame fixture 覆盖 `prepare_grid.build_entry()`，验证 `month`、`day` 与 `feats` 时间长度一致且不超过 168；同时覆盖空 DataFrame 返回 `None`。
+- 覆盖多个合法州通过、非法州拒绝的 `validate_jsonl_states()` 行为。
+- 直接验证 `TFT_model.data` 的协议常量与共享 `cropnet_protocol` 的对应值完全一致。
+- 未修改生产代码、运行产物、后续 TFT/基线/MMST-ViT 入口，未训练模型。
+
+### 测试命令及实际结果
+
+```text
+/root/miniconda3/envs/hqx/bin/python -m pytest tests/test_cropnet_protocol.py -q
+```
+
+结果：`24 passed, 1 warning in 1.32s`。
+
+```text
+git diff --check && /root/miniconda3/envs/hqx/bin/python -m py_compile cropnet_protocol.py tests/test_cropnet_protocol.py train_dataset/prepare_jsonl.py train_dataset/prepare_grid.py TFT_model/data.py BaseLine_Model/common/data.py
+```
+
+结果：退出码 `0`，无输出。
+
+### 当前 concerns
+
+- 测试仍有 PyTorch 的 `pynvml` 弃用警告；不影响测试结果。
+- 未执行真实数据重建、未训练模型，符合本次只处理测试闭环的范围。
+- 工作区仍保留既有未跟踪运行产物 `DataSrc` 和 `BaseLine_Model/output`，未修改、未提交。

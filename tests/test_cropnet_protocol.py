@@ -11,6 +11,7 @@ sys.path.insert(0, str(ROOT / "TFT_model"))
 sys.path.insert(0, str(ROOT / "BaseLine_Model"))
 sys.path.insert(0, str(ROOT))
 
+import cropnet_protocol as shared_protocol  # noqa: E402
 from cropnet_protocol import (  # noqa: E402
     ALLOWED_STATES,
     START_MONTH,
@@ -22,6 +23,7 @@ from cropnet_protocol import (  # noqa: E402
 import prepare_jsonl  # noqa: E402
 import prepare_grid  # noqa: E402
 from common import data as baseline_data  # noqa: E402
+import data as tft_data  # noqa: E402
 from data import load_grid_cache  # noqa: E402
 
 
@@ -37,6 +39,14 @@ def test_shared_protocol_values():
     assert prepare_jsonl.PROTOCOL_MAX_STEPS == PROTOCOL_MAX_STEPS
     assert prepare_grid.PROTOCOL_MAX_STEPS == PROTOCOL_MAX_STEPS
     assert baseline_data.STATES is ALLOWED_STATES
+
+
+def test_tft_protocol_constants_match_shared_protocol():
+    assert tft_data.PROTOCOL_START_MONTH == shared_protocol.START_MONTH
+    assert tft_data.PROTOCOL_END_MONTH == shared_protocol.END_MONTH
+    assert tft_data.PROTOCOL_DAYS_PER_MONTH == shared_protocol.DAYS_PER_MONTH
+    assert tft_data.PROTOCOL_MAX_STEPS == shared_protocol.PROTOCOL_MAX_STEPS
+    assert tft_data.TIME_WINDOW == shared_protocol.TIME_WINDOW
 
 
 def test_protocol_has_exactly_eight_allowed_states():
@@ -76,6 +86,23 @@ def test_calendar_validation_requires_aligned_fields_and_168_step_limit():
 
     with pytest.raises(ValueError, match="same length"):
         prepare_jsonl.validate_calendar_fields([4], [1, 2], 1)
+
+
+@pytest.mark.parametrize(
+    ("month", "day"),
+    [(3, 1), (10, 1), (4, 0), (4, 29)],
+)
+def test_calendar_validation_rejects_invalid_month_and_day(month, day):
+    with pytest.raises(ValueError, match="protocol window"):
+        prepare_jsonl.validate_calendar_fields([month], [day], 1)
+
+
+def test_calendar_validation_accepts_exact_168_steps_and_empty_input():
+    month = [4] * 168
+    day = [1] * 168
+
+    prepare_jsonl.validate_calendar_fields(month, day, 168)
+    prepare_jsonl.validate_calendar_fields([], [], 0)
 
 
 @pytest.mark.parametrize(
@@ -134,3 +161,47 @@ def test_grid_input_rejects_state_outside_allowlist():
 
     with pytest.raises(ValueError, match="allowed states"):
         prepare_grid.validate_jsonl_states(rows)
+
+
+def test_grid_input_accepts_multiple_allowed_states():
+    rows = [
+        {"State": "Minnesota"},
+        {"State": "wisconsin"},
+        {"State": "OHIO"},
+    ]
+
+    prepare_grid.validate_jsonl_states(rows)
+
+
+def test_build_entry_aligns_calendar_fields_with_features_and_caps_at_168():
+    dates = pd.date_range("2020-04-01", periods=168, freq="D")
+    frame = pd.DataFrame(
+        {
+            "Grid Index": [1] * len(dates),
+            "date": dates,
+            "Lat (llcrnr)": [40.0] * len(dates),
+            "Lat (urcrnr)": [41.0] * len(dates),
+            "Lon (llcrnr)": [-90.0] * len(dates),
+            "Lon (urcrnr)": [-89.0] * len(dates),
+            **{feature: [float(index)] * len(dates)
+               for index, feature in enumerate(prepare_grid.WRF_COLS)},
+        }
+    )
+
+    entry = prepare_grid.build_entry(frame, prepare_grid.WRF_COLS)
+
+    assert entry["feats"].shape == (1, 168, len(prepare_grid.WRF_COLS))
+    assert entry["l_enc"] == entry["feats"].shape[1]
+    assert len(entry["month"]) == len(entry["day"]) == entry["l_enc"]
+    assert entry["l_enc"] <= PROTOCOL_MAX_STEPS
+
+
+def test_build_entry_returns_none_for_empty_input():
+    empty = pd.DataFrame(
+        columns=[
+            "Grid Index", "date", "Lat (llcrnr)", "Lat (urcrnr)",
+            "Lon (llcrnr)", "Lon (urcrnr)", *prepare_grid.WRF_COLS,
+        ]
+    )
+
+    assert prepare_grid.build_entry(empty, prepare_grid.WRF_COLS) is None
