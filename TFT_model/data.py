@@ -27,6 +27,11 @@ from typing import Any, List, Dict, Optional, Tuple, Iterator
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 TRAIN_DATA_DIR = os.path.join(SCRIPT_DIR, "..", "train_dataset")
 
+PROTOCOL_START_MONTH = 4
+PROTOCOL_END_MONTH = 9
+PROTOCOL_DAYS_PER_MONTH = 28
+PROTOCOL_MAX_STEPS = 168
+
 DEFAULT_DATA_JSONL = os.path.join(TRAIN_DATA_DIR, "dataset.jsonl")
 DEFAULT_GRID_CACHE = os.path.join(TRAIN_DATA_DIR, "grid_cache.pt")
 # 源数据已迁移到 DataSrc/(2026-08 重构)
@@ -810,8 +815,14 @@ def create_dataloader(
 def load_grid_cache(path: str = DEFAULT_GRID_CACHE) -> Dict:
     """加载 grid_cache.pt,返回 {"version", "feat_names", "entries"}。"""
     payload = torch.load(path, map_location="cpu")
-    if payload.get("version") != 3 or payload.get("coord_type") != "grid_center":
-        raise ValueError("grid_cache must use version 3 with coord_type='grid_center'")
+    if payload.get("version") != 4:
+        raise ValueError("grid_cache must use version 4")
+    if payload.get("coord_type") != "grid_center":
+        raise ValueError("grid_cache must use coord_type='grid_center'")
+    if payload.get("time_window") != "04-01--09-28":
+        raise ValueError("grid_cache time window mismatch")
+    if payload.get("days_per_month") != 28:
+        raise ValueError("grid_cache days_per_month mismatch")
     return payload
 
 

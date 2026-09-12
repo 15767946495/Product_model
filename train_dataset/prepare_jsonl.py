@@ -33,6 +33,15 @@ USDA_DIR = os.path.join(DATA_DIR, "usda_corn")
 WEATHER_DIR = os.path.join(DATA_DIR, "weather")
 OUTPUT_PATH = os.path.join(SCRIPT_DIR, "dataset.jsonl")
 
+ALLOWED_STATES = {
+    "minnesota", "wisconsin", "michigan", "illinois",
+    "indiana", "ohio", "missouri", "kentucky",
+}
+START_MONTH = 4
+END_MONTH = 9
+DAYS_PER_MONTH = 28
+PROTOCOL_MAX_STEPS = (END_MONTH - START_MONTH + 1) * DAYS_PER_MONTH
+
 os.makedirs(os.path.dirname(OUTPUT_PATH), exist_ok=True)
 
 # ============================================================
@@ -111,8 +120,14 @@ def _load_state_weather(year, state_abbr):
         print(f"    [警告] {state_abbr} {year} 数据无 Month 列")
         return None
 
-    # 只保留 3月-11月（玉米生长季）
-    df = df[df["Month"].isin(range(3, 12))].copy()
+    if "Day" not in df.columns:
+        print(f"    [警告] {state_abbr} {year} 数据无 Day 列")
+        return None
+
+    df = df[
+        df["Month"].between(START_MONTH, END_MONTH)
+        & df["Day"].between(1, DAYS_PER_MONTH)
+    ].copy()
     if df.empty:
         return None
 
@@ -134,7 +149,7 @@ def _county_daily_series(county_df, src_cols):
     county_df : DataFrame with [date, Grid Index, ...气象列]
     src_cols  : list of 气象列名
 
-    返回 dict，含各气象列 list + "month" list。
+    返回 dict，含各气象列 list + "month"/"day" list。
     """
     daily_avg = county_df.groupby("date")[src_cols].mean().reset_index()
     daily_avg = daily_avg.sort_values("date")
@@ -146,6 +161,7 @@ def _county_daily_series(county_df, src_cols):
     for col in src_cols:
         result[col] = daily_avg[col].tolist()
     result["month"] = daily_avg["date"].dt.month.tolist()
+    result["day"] = daily_avg["date"].dt.day.tolist()
     return result
 
 
@@ -186,6 +202,7 @@ def process_all():
         usda_rows.append(df)
 
     usda_all = pd.concat(usda_rows, ignore_index=True)
+    usda_all = usda_all[usda_all["state"].isin(ALLOWED_STATES)].copy()
     # 移除无缩写或无效产量的行
     usda_all = usda_all.dropna(subset=["state_abbr", "prod", "yield_"])
     print(f"  USDA 总行数: {len(usda_all)}")

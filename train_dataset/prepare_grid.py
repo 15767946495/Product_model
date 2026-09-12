@@ -7,8 +7,9 @@
     供模型做「逐特征网格注意力合并」后,再进入时序 VSN 特征筛选。
 
 输出:
-  - train_dataset/grid_cache.pt   (~1.3GB): {"version":3, "feat_names": WRF_COLS,
-      "entries": [ None | {"feats":(G,T,F) f32, "coords":(G,2) f32, "month":(T,) long, "l_enc":int} ]}
+   - train_dataset/grid_cache.pt   (~1.3GB): {"version":4, "feat_names": WRF_COLS,
+       "entries": [ None | {"feats":(G,T,F) f32, "coords":(G,2) f32,
+       "month":(T,) long, "day":(T,) long, "l_enc":int} ]}
     entries[i] 与 dataset.jsonl 第 i 行按索引对齐(顺序即缓存索引)。
   - train_dataset/grid_cache_meta.json: 版本、G 分布、与 jsonl l_enc 不一致数等。
 
@@ -22,7 +23,12 @@ import pandas as pd
 import torch
 
 import prepare_jsonl
-from prepare_jsonl import WRF_COLS, _load_state_weather, STATE_TO_USPS
+from prepare_jsonl import (
+    WRF_COLS,
+    _load_state_weather,
+    STATE_TO_USPS,
+    PROTOCOL_MAX_STEPS,
+)
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 JSONL_PATH = os.path.join(SCRIPT_DIR, "dataset.jsonl")
@@ -83,10 +89,12 @@ def build_entry(county_df, feats):
         coords[gi] = center_coords(row0)
 
     month = np.array([d.month for d in common], dtype=np.int64)
+    day = np.array([d.day for d in common], dtype=np.int64)
     return {
         "feats": torch.from_numpy(feats_arr),
         "coords": torch.from_numpy(coords),
         "month": torch.from_numpy(month),
+        "day": torch.from_numpy(day),
         "l_enc": int(T),
         "G": int(G),
     }
@@ -149,8 +157,11 @@ def process():
     print(f"  与 jsonl l_enc 不一致条数: {mismatch}")
 
     payload = {
-        "version": 3,
+        "version": 4,
         "coord_type": "grid_center",
+        "time_window": "04-01--09-28",
+        "days_per_month": 28,
+        "max_steps": PROTOCOL_MAX_STEPS,
         "feat_names": list(WRF_COLS),
         "entries": entries,
     }
@@ -158,8 +169,11 @@ def process():
     print(f"  已保存: {OUT_PATH} ({round(os.path.getsize(OUT_PATH)/1e9, 2)} GB)")
 
     meta = {
-        "version": 3,
+        "version": 4,
         "coord_type": "grid_center",
+        "time_window": "04-01--09-28",
+        "days_per_month": 28,
+        "max_steps": PROTOCOL_MAX_STEPS,
         "n_lines": len(meta_lines),
         "n_ok": n_ok,
         "feat_names": list(WRF_COLS),

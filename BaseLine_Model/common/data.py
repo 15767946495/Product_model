@@ -37,10 +37,10 @@ from data import (  # noqa: E402   (TFT_model 数据管线)
 
 OUT_DIR = _ROOT / "output"
 
-# DeepCropNet(Lin 2020)论文的 9 玉米带州:MN, WI, MI, IA, IL, IN, OH, MO, KY
-STATES = ["minnesota", "wisconsin", "michigan", "iowa", "illinois",
+# 统一 CropNet 协议的八州、4--9 月每月前 28 天。
+STATES = ["minnesota", "wisconsin", "michigan", "illinois",
           "indiana", "ohio", "missouri", "kentucky"]
-N_STEPS = 275          # 逐日(3-11月),与 TFT 输入粒度一致
+N_STEPS = 168
 N_FEATS = len(DEFAULT_DYNAMIC_FEATURE_NAMES)            # 11
 SOIL_DIM = len(SOIL_FEATURES)                           # 7
 
