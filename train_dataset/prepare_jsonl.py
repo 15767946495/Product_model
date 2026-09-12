@@ -254,12 +254,13 @@ def process_all():
                 "County": row["county"],
                 "yield_per_acre": float(row["yield_"]),
             }
-            # 各特征长度对齐（含 month）
+            # 各特征长度对齐（含 month/day）
             lengths = [len(v) for v in resampled.values()]
             min_len = min(lengths)
             for col in WRF_COLS:
                 sample[col] = resampled[col][:min_len]
             sample["month"] = resampled["month"][:min_len]
+            sample["day"] = resampled["day"][:min_len]
             sample["l_enc"] = min_len
 
             all_samples.append(sample)
