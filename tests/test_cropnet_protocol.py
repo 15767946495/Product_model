@@ -249,6 +249,10 @@ def test_expected_calendar_requires_ordered_protocol_sequence():
     validate_expected_calendar(list(month), list(day))
     with pytest.raises(ValueError, match="exact"):
         validate_expected_calendar(list(month[1:]) + [month[0]], list(day[1:]) + [day[0]])
+    with pytest.raises(ValueError, match="exactly 168"):
+        validate_expected_calendar([4], [1])
+    with pytest.raises(ValueError, match="lengths must match"):
+        validate_expected_calendar([4] * 168, [1] * 167)
 
 
 @pytest.mark.parametrize(

@@ -60,6 +60,10 @@ def validate_grid_entry(entry, index=None):
 
 def validate_expected_calendar(month, day, prefix="calendar"):
     """Require the exact ordered 4/1--9/28, 168-step calendar."""
+    if len(month) != len(day):
+        raise ValueError(f"{prefix} month/day lengths must match")
+    if len(month) != PROTOCOL_MAX_STEPS:
+        raise ValueError(f"{prefix} must contain exactly {PROTOCOL_MAX_STEPS} steps")
     pairs = tuple(zip(month, day))
     if pairs != EXPECTED_CALENDAR:
         raise ValueError(f"{prefix} must equal the exact 4/1--9/28 calendar")

@@ -43,6 +43,32 @@ def _keys(rows, official=False):
     return {(str(r["FIPS"]), int(r["Year"])) for r in rows}
 
 
+def _validate_official_record(record: object, data_root: Path, index: int) -> list[str]:
+    violations = []
+    if not isinstance(record, dict):
+        return [f"official record {index}: not an object"]
+    try:
+        if str(record["state"]).strip().lower() not in ALLOWED_STATES:
+            violations.append(f"official record {index}: state outside allowlist")
+        data = record["data"]
+        short_term = data["HRRR"]["short_term"]
+        long_term = data["HRRR"]["long_term"]
+        sentinel = data["sentinel"]
+        if len(short_term) != 6:
+            violations.append(f"official record {index}: short_term length is not 6")
+        if len(long_term) != 1 or len(long_term[0]) != 60:
+            violations.append(f"official record {index}: long_term shape is not [60]")
+        if len(sentinel) != 4:
+            violations.append(f"official record {index}: sentinel length is not 4")
+        paths = [data["USDA"], *short_term, *(p for context in long_term for p in context), *sentinel]
+        for relative in paths:
+            if not isinstance(relative, str) or not (data_root / relative).is_file():
+                violations.append(f"official record {index}: missing path {relative!r}")
+    except (KeyError, TypeError, IndexError) as error:
+        violations.append(f"official record {index}: malformed structure: {error}")
+    return violations
+
+
 def audit_staging(staging: Path, data_root: Path, manifest_dir: Path) -> dict:
     dataset = staging / "dataset.jsonl"
     cache_path = staging / "grid_cache.pt"
@@ -66,7 +92,13 @@ def audit_staging(staging: Path, data_root: Path, manifest_dir: Path) -> dict:
     split_rows = split_samples(rows)
     root_valid_path = manifest_dir / "valid-no-ia.jsonl"
     root_valid = tft_data.load_jsonl(str(root_valid_path))
-    if _keys(root_valid) != _keys(rows):
+    root_keys = _keys(root_valid)
+    shared_keys = _keys(rows)
+    if len(root_valid) != len(rows):
+        violations.append("root valid-no-ia row count differs from shared JSONL")
+    if len(root_keys) != len(root_valid):
+        violations.append("root valid-no-ia contains duplicate identity keys")
+    if root_keys != shared_keys:
         violations.append("root valid-no-ia differs from shared JSONL")
     official = {}
     for name in SPLIT_YEARS:
@@ -74,6 +106,11 @@ def audit_staging(staging: Path, data_root: Path, manifest_dir: Path) -> dict:
         official_path = manifest_dir / f"{name}.official.no-ia.json"
         valid = tft_data.load_jsonl(str(valid_path))
         records = json.loads(official_path.read_text(encoding="utf-8"))
+        if not isinstance(records, list):
+            violations.append(f"{name}: official payload is not a list")
+            records = []
+        for record_index, record in enumerate(records):
+            violations.extend(_validate_official_record(record, data_root, record_index))
         if _keys(valid) != _keys(split_rows[name]):
             violations.append(f"{name}: valid-no-ia differs from shared JSONL split")
         if _keys(valid) != _keys(records, official=True):
@@ -128,9 +165,18 @@ def smoke(staging: Path, soil_path: Path, smoke_dir: Path) -> dict:
         jsonl_path=str(staging / "dataset.jsonl"),
         grid_cache_path=str(staging / "grid_cache.pt"),
     )
+    dcn_reload = prepare_dcn(out_dir=smoke_dir / "dcn", force=False)
+    for generated, reloaded in zip(dcn, dcn_reload):
+        if generated.get("val_year") != reloaded.get("val_year") or generated.get("test_year") != reloaded.get("test_year"):
+            raise ValueError("DeepCropNet cache reload metadata mismatch")
     return {"jsonl_rows": len(meta), "grid_samples": len(grid_samples),
             "baseline_splits": {name: len(baseline[name]["y"]) for name in ("train", "val", "test")},
-            "deepcropnet_splits": [len(part["y_raw"]) for part in dcn]}
+            "deepcropnet_splits": [len(part["y_raw"]) for part in dcn],
+            "deepcropnet_reload_splits": [len(part["y_raw"]) for part in dcn_reload],
+            "deepcropnet_reload_metadata": [
+                {"val_year": part["val_year"], "test_year": part["test_year"]}
+                for part in dcn_reload
+            ]}
 
 
 def atomic_exchange_directories(staging: Path, active: Path) -> None:
@@ -155,6 +201,33 @@ def install_runtime_bundle(bundle: Path, active: Path) -> None:
         os.replace(bundle, backup)
     else:
         os.replace(bundle, active)
+
+
+def ensure_runtime_entrypoints(runtime_root: Path, active: Path) -> None:
+    """Create compatibility links once; both links resolve through one stable active directory."""
+    endpoints = {
+        runtime_root / "train_dataset": active / "train_dataset",
+        runtime_root / "DataSrc" / "mmst_vit" / "manifests": active / "manifests",
+    }
+    for endpoint, target in endpoints.items():
+        endpoint.parent.mkdir(parents=True, exist_ok=True)
+        if endpoint.exists() or endpoint.is_symlink():
+            if not endpoint.is_symlink() or endpoint.resolve() != target.resolve():
+                raise RuntimeError(f"runtime entrypoint is not the stable task8 link: {endpoint}")
+            continue
+        os.symlink(target, endpoint, target_is_directory=True)
+
+
+def install_runtime_bundle_with_entrypoints(bundle: Path, runtime_root: Path) -> None:
+    """Install a bundle after entrypoint validation; exchange is the only version switch."""
+    active = runtime_root / "task8-active"
+    ensure_runtime_entrypoints(runtime_root, active)
+    install_runtime_bundle(bundle, active)
+
+
+def audit_active_bundle(runtime_root: Path, data_root: Path) -> dict:
+    active = runtime_root / "task8-active"
+    return audit_staging(active / "train_dataset", data_root, active / "manifests")
 
 
 def generate_and_install(runtime_root: Path, data_root: Path) -> dict:
@@ -191,20 +264,7 @@ def generate_and_install(runtime_root: Path, data_root: Path) -> dict:
         for name in ("valid-no-ia.jsonl", "valid-no-ia.train.jsonl", "valid-no-ia.val.jsonl", "valid-no-ia.test.jsonl",
                      "train.official.no-ia.json", "val.official.no-ia.json", "test.official.no-ia.json"):
             os.replace(staging / "manifests" / name, install_manifest / name)
-        install_runtime_bundle(install_dir, active)
-        runtime_dataset = runtime_root / "train_dataset"
-        runtime_manifest = runtime_root / "DataSrc" / "mmst_vit" / "manifests"
-        for endpoint, target in ((runtime_dataset, active_dataset), (runtime_manifest, active_manifest)):
-            if endpoint.is_symlink() or endpoint.exists():
-                if endpoint.is_dir() and not endpoint.is_symlink():
-                    backup = endpoint.with_name(endpoint.name + ".task8-legacy")
-                    if not backup.exists():
-                        os.replace(endpoint, backup)
-                    else:
-                        shutil.rmtree(endpoint)
-                else:
-                    endpoint.unlink()
-            os.symlink(target, endpoint, target_is_directory=True)
+        install_runtime_bundle_with_entrypoints(install_dir, runtime_root)
         audit["installed"] = True
         audit["source_roots"] = {
             "sentinel": str(data_root / "mmst_vit" / "download"),
@@ -227,7 +287,9 @@ def main(argv=None):
     parser.add_argument("--report", type=Path, default=ROOT / ".superpowers" / "sdd" / "task-8-report.json")
     args = parser.parse_args(argv)
     if args.audit_only:
-        raise SystemExit("audit-only requires existing staging input and is intentionally not an active install")
+        result = audit_active_bundle(args.runtime_root, args.data_root)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
     result = generate_and_install(args.runtime_root, args.data_root)
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
