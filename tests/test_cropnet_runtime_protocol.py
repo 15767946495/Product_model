@@ -20,14 +20,6 @@ DATASET_ROOT = Path(os.environ.get("CROPNET_RUNTIME_DATASET_ROOT", RUNTIME_ROOT 
 MMST_ROOT = Path(os.environ.get("MMST_RUNTIME_ROOT", RUNTIME_ROOT / "DataSrc" / "mmst_vit"))
 MANIFEST_DIR = Path(os.environ.get("MMST_MANIFEST_DIR", MMST_ROOT / "manifests"))
 DATA_ROOT = Path(os.environ.get("MMST_DATA_ROOT", RUNTIME_ROOT / "DataSrc"))
-REPORT_PATH = Path(
-    os.environ.get(
-        "CROPNET_RUNTIME_AUDIT_REPORT",
-        ROOT / ".superpowers" / "sdd" / "task-7-report.md",
-    )
-)
-
-
 def _read_jsonl(path: Path) -> list[dict]:
     with path.open(encoding="utf-8") as handle:
         return [json.loads(line) for line in handle if line.strip()]
@@ -71,7 +63,15 @@ def _audit_cache(path: Path, row_count: int) -> dict:
 
     import torch
 
-    cache = torch.load(path, map_location="cpu", weights_only=False)
+    try:
+        cache = torch.load(path, map_location="cpu", weights_only=True)
+    except Exception as error:
+        result["status"] = "cache_audit_unavailable"
+        result["violations"].append(f"cache could not be safely loaded with weights_only=True: {error}")
+        return result
+    if not isinstance(cache, dict):
+        result["violations"].append("cache payload is not a dict")
+        return result
     for field, expected in (("version", 4), ("max_steps", 168), ("time_window", TIME_WINDOW)):
         if cache.get(field) != expected:
             result["violations"].append(f"cache {field}={cache.get(field)!r}, expected {expected!r}")
@@ -94,14 +94,37 @@ def _audit_cache(path: Path, row_count: int) -> dict:
     return result
 
 
-def _record_paths(record: dict) -> list[str]:
-    weather = record["data"]["HRRR"]
-    return [
-        record["data"]["USDA"],
-        *weather["short_term"],
-        *(path for context in weather["long_term"] for path in context),
-        *record["data"]["sentinel"],
-    ]
+def _record_paths(record: dict) -> tuple[list[str] | None, str | None]:
+    try:
+        data = record["data"]
+        weather = data["HRRR"]
+        paths = [
+            data["USDA"],
+            *weather["short_term"],
+            *(path for context in weather["long_term"] for path in context),
+            *data["sentinel"],
+        ]
+        if not all(isinstance(path, str) for path in paths):
+            raise TypeError("all protocol paths must be strings")
+        return paths, None
+    except (KeyError, TypeError, ValueError) as error:
+        return None, f"malformed record paths: {error}"
+
+
+def _sample_key(row: dict, *, official: bool) -> tuple[str, int, str, str]:
+    if official:
+        return (
+            str(row["FIPS"]),
+            int(row["year"]),
+            str(row["state"]).strip().lower(),
+            str(row["county"]).strip(),
+        )
+    return (
+        str(row["FIPS"]),
+        int(row["Year"]),
+        str(row["State"]).strip().lower(),
+        str(row["County"]).strip(),
+    )
 
 
 def _audit_official(split: str, records: list[dict], valid_rows: list[dict]) -> dict:
@@ -116,30 +139,59 @@ def _audit_official(split: str, records: list[dict], valid_rows: list[dict]) -> 
         if state not in ALLOWED_STATES:
             invalid_valid_state_count += 1
     missing_paths = []
-    if len(records) != len(valid_rows):
-        violations.append(f"{split}: official records={len(records)}, valid-no-ia rows={len(valid_rows)}")
+    valid_keys = set()
+    official_keys = set()
+    for index, row in enumerate(valid_rows):
+        try:
+            valid_keys.add(_sample_key(row, official=False))
+        except (KeyError, TypeError, ValueError) as error:
+            violations.append(f"{split} valid-no-ia row {index}: malformed identity: {error}")
+    if len(valid_keys) != len(valid_rows):
+        violations.append(f"{split}: valid-no-ia contains duplicate or collapsed identity keys")
     for index, record in enumerate(records):
-        state = str(record.get("state", "")).strip().lower()
-        state_values.add(state)
-        if state not in ALLOWED_STATE_ABBRS:
-            invalid_state_count += 1
+        try:
+            state = str(record["state"]).strip().lower()
+            state_values.add(state)
+            if state not in ALLOWED_STATE_ABBRS:
+                invalid_state_count += 1
+            official_keys.add(_sample_key(record, official=True))
+        except (KeyError, TypeError, ValueError) as error:
+            violations.append(f"{split} record {index}: malformed identity: {error}")
+            continue
         try:
             short_term = record["data"]["HRRR"]["short_term"]
             long_term = record["data"]["HRRR"]["long_term"]
             sentinel = record["data"]["sentinel"]
-        except (KeyError, TypeError) as error:
+        except (KeyError, TypeError, ValueError) as error:
             violations.append(f"{split} record {index}: missing protocol field: {error}")
             continue
-        if len(short_term) != 6:
+        try:
+            short_term_length = len(short_term)
+            long_term_length = len(long_term)
+            long_term_context_length = len(long_term[0]) if long_term_length else None
+            sentinel_length = len(sentinel)
+        except (TypeError, IndexError):
+            violations.append(f"{split} record {index}: malformed protocol collection")
+            continue
+        if short_term_length != 6:
             violations.append(f"{split} record {index}: short_term length={len(short_term)}, expected 6")
-        if len(long_term) != 1 or len(long_term[0]) != 60:
+        if long_term_length != 1 or long_term_context_length != 60:
             violations.append(f"{split} record {index}: long_term shape is not [60]")
-        if len(sentinel) != 4:
-            violations.append(f"{split} record {index}: sentinel length={len(sentinel)}, expected 4")
-        missing_paths.extend(
-            str(DATA_ROOT / relative)
-            for relative in _record_paths(record)
-            if not (DATA_ROOT / relative).is_file()
+        if sentinel_length != 4:
+            violations.append(f"{split} record {index}: sentinel length={sentinel_length}, expected 4")
+        paths, path_error = _record_paths(record)
+        if path_error:
+            violations.append(f"{split} record {index}: {path_error}")
+        elif paths is not None:
+            missing_paths.extend(
+                str(DATA_ROOT / relative)
+                for relative in paths
+                if not (DATA_ROOT / relative).is_file()
+            )
+    if valid_keys != official_keys:
+        violations.append(
+            f"{split}: valid-no-ia and official identity key sets differ; "
+            f"only-valid={len(valid_keys - official_keys)}, only-official={len(official_keys - valid_keys)}"
         )
     return {
         "record_count": len(records),
@@ -150,52 +202,10 @@ def _audit_official(split: str, records: list[dict], valid_rows: list[dict]) -> 
         "invalid_state_count": invalid_state_count,
         "valid_parsed_state_values": sorted(valid_state_values),
         "invalid_valid_state_count": invalid_valid_state_count,
+        "valid_identity_key_count": len(valid_keys),
+        "official_identity_key_count": len(official_keys),
+        "identity_keys_equal": valid_keys == official_keys,
     }
-
-
-def _write_report(report: dict) -> None:
-    REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    lines = [
-        "# Task 7 Runtime Protocol Audit",
-        "",
-        "本报告由只读审计测试生成；未调用数据生成、缓存生成、训练或推理入口。",
-        "",
-        "## 输入与状态",
-        f"- runtime root: `{RUNTIME_ROOT}`",
-        f"- dataset JSONL: `{report['dataset']['path']}` ({report['dataset']['status']})",
-        f"- grid cache: `{report['cache']['path']}` ({report['cache']['status']})",
-        f"- valid-no-ia / official manifest directory: `{MANIFEST_DIR}`",
-        f"- shared cache conclusion: **{report['shared_cache_conclusion']}**",
-        "",
-        "## 协议审计",
-        f"- dataset rows: `{report['dataset'].get('row_count', 0)}`",
-        f"- dataset protocol violations: `{len(report['dataset'].get('violations', []))}`",
-        f"- cache protocol violations: `{len(report['cache'].get('violations', []))}`",
-        f"- official manifest protocol violations: `{report['official_violation_count']}`",
-        f"- missing official data/Sentinel paths: `{report['official_missing_path_count']}`",
-        "",
-        "## 结论分类",
-        "- **协议违规**：仅表示已存在并成功解析的产物违反八州、日历、步数、cache 对齐、manifest 结构或路径存在性约束。",
-        "- **共享缓存已清理**：dataset/grid cache 缺失单独记录，不为审计重新生成，也不将缺失缓存误报为协议违规。",
-        "",
-        "## 详细问题",
-    ]
-    details = report["dataset"].get("violations", []) + report["cache"].get("violations", [])
-    for split, result in report["official"].items():
-        details.extend(result["violations"])
-        if result["invalid_state_count"]:
-            details.append(
-                f"{split}: {result['invalid_state_count']} parsed state values are outside the abbreviation allowlist; "
-                f"values={result['parsed_state_values']}"
-            )
-        if result["invalid_valid_state_count"]:
-            details.append(
-                f"{split}: {result['invalid_valid_state_count']} valid-no-ia parsed State values are outside the full-name allowlist; "
-                f"values={result['valid_parsed_state_values']}"
-            )
-        details.extend(f"{split}: missing path `{path}`" for path in result["missing_paths"])
-    lines.extend(f"- {item}" for item in details) if details else lines.append("- 无")
-    REPORT_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def test_current_runtime_protocol_is_audited_read_only():
@@ -232,21 +242,29 @@ def test_current_runtime_protocol_is_audited_read_only():
         )
         official_missing_path_count += len(result["missing_paths"])
 
-    report = {
-        "dataset": dataset,
-        "cache": cache,
-        "official": official,
-        "official_violation_count": official_violation_count,
-        "official_missing_path_count": official_missing_path_count,
-        "shared_cache_conclusion": (
-            "旧共享 dataset/grid cache 已清理；当前运行时缺失属于产物存在性状态，不是由审计生成或修复"
-            if not dataset_path.is_file() or not cache_path.is_file()
-            else "共享 dataset/grid cache 存在并已审计"
-        ),
-    }
-    _write_report(report)
-
     assert not dataset["violations"], dataset["violations"]
     assert not cache["violations"], cache["violations"]
     assert official_violation_count == 0, official
     assert official_missing_path_count == 0, official
+
+
+def test_official_audit_reports_malformed_records_without_raising():
+    result = _audit_official(
+        "train",
+        [{"FIPS": "17001", "year": 2020, "state": "illinois", "county": "ADAMS", "data": None}],
+        [{"FIPS": "17001", "Year": 2020, "State": "illinois", "County": "ADAMS"}],
+    )
+
+    assert result["identity_keys_equal"] is True
+    assert any("missing protocol field" in violation for violation in result["violations"])
+
+
+def test_official_audit_reports_identity_key_mismatch():
+    result = _audit_official(
+        "train",
+        [{"FIPS": "17003", "year": 2020, "state": "illinois", "county": "ADAMS", "data": {}}],
+        [{"FIPS": "17001", "Year": 2020, "State": "illinois", "County": "ADAMS"}],
+    )
+
+    assert result["identity_keys_equal"] is False
+    assert any("identity key sets differ" in violation for violation in result["violations"])
