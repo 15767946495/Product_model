@@ -503,3 +503,16 @@ def test_deepcropnet_prepare_rejects_old_protocol_cache(tmp_path):
         torch.save({"version": 3}, tmp_path / f"{split}_dcn_data_val2021_test2022.pt")
     with pytest.raises(ValueError, match="version 4 mismatch"):
         deepcropnet.prepare_dcn(out_dir=tmp_path)
+
+
+@pytest.mark.parametrize("split", ["val", "test"])
+def test_deepcropnet_prepare_rejects_wrong_split_year_cache(tmp_path, split):
+    valid = {"version": 4, "time_window": TIME_WINDOW, "days_per_month": 28,
+             "max_steps": 168, "val_year": 2021, "test_year": 2022}
+    for name in ("train", "val", "test"):
+        payload = dict(valid)
+        if name == split:
+            payload["test_year"] = 2023
+        torch.save(payload, tmp_path / f"{name}_dcn_data_val2021_test2022.pt")
+    with pytest.raises(ValueError, match="split years mismatch"):
+        deepcropnet.prepare_dcn(out_dir=tmp_path)

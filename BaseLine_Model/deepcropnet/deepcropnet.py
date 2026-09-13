@@ -77,13 +77,13 @@ def prepare_dcn(val_year=2021, test_year=2022, out_dir=None, force=False,
     if tr_path.exists() and va_path.exists() and te_path.exists() and not force:
         tr = torch.load(tr_path, map_location="cpu", weights_only=False)
         va = torch.load(va_path, map_location="cpu", weights_only=False)
-        for cached in (tr, va):
-            validate_protocol_metadata(cached, "DeepCropNet cache")
-        if tr.get("val_year") != val_year or tr.get("test_year") != test_year:
-            raise ValueError("DeepCropNet cache split years mismatch")
-        print(f"[数据] 使用缓存 {tr_path}")
         te = torch.load(te_path, map_location="cpu", weights_only=False)
-        validate_protocol_metadata(te, "DeepCropNet cache")
+        for cached in (tr, va, te):
+            validate_protocol_metadata(cached, "DeepCropNet cache")
+        for cached in (tr, va, te):
+            if cached.get("val_year") != val_year or cached.get("test_year") != test_year:
+                raise ValueError("DeepCropNet cache split years mismatch")
+        print(f"[数据] 使用缓存 {tr_path}")
         return tr, va, te
 
     meta_lines = D.load_jsonl(jsonl_path or D.DEFAULT_DATA_JSONL)

@@ -64,6 +64,10 @@ def audit_staging(staging: Path, data_root: Path, manifest_dir: Path) -> dict:
         if list(zip(entry["month"].tolist(), entry["day"].tolist())) != expected:
             violations.append(f"cache entry {index}: calendar mismatch")
     split_rows = split_samples(rows)
+    root_valid_path = manifest_dir / "valid-no-ia.jsonl"
+    root_valid = tft_data.load_jsonl(str(root_valid_path))
+    if _keys(root_valid) != _keys(rows):
+        violations.append("root valid-no-ia differs from shared JSONL")
     official = {}
     for name in SPLIT_YEARS:
         valid_path = manifest_dir / f"valid-no-ia.{name}.jsonl"
@@ -82,18 +86,29 @@ def audit_staging(staging: Path, data_root: Path, manifest_dir: Path) -> dict:
             "years": dict(Counter(int(row["Year"]) for row in valid)),
         }
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
-    for field, expected_value in (("version", 4), ("time_window", TIME_WINDOW), ("max_steps", 168)):
+    for field, expected_value in (("version", 4), ("time_window", TIME_WINDOW),
+                                  ("days_per_month", 28), ("max_steps", 168)):
         if meta.get(field) != expected_value:
             violations.append(f"meta {field} mismatch")
     return {
         "violations": violations,
-        "sha256": {name: sha256(staging / name) for name in ("dataset.jsonl", "grid_cache.pt", "grid_cache_meta.json")},
+        "sha256": {
+            "dataset.jsonl": sha256(dataset),
+            "grid_cache.pt": sha256(cache_path),
+            "grid_cache_meta.json": sha256(meta_path),
+            **{
+                path.name: sha256(path)
+                for path in sorted(manifest_dir.iterdir())
+                if path.is_file()
+            },
+        },
         "rows": len(rows),
         "states": dict(Counter(str(row["State"]).lower() for row in rows)),
         "years": dict(Counter(int(row["Year"]) for row in rows)),
         "split_keys": {name: sorted(_keys(rows_)) for name, rows_ in split_rows.items()},
         "splits": official,
         "cache_entries": len(cache["entries"]),
+        "root_valid_no_ia_rows": len(root_valid),
     }
 
 
@@ -129,9 +144,23 @@ def atomic_exchange_directories(staging: Path, active: Path) -> None:
         raise OSError(error, os.strerror(error), str(active))
 
 
+def install_runtime_bundle(bundle: Path, active: Path) -> None:
+    """Exchange one complete bundle, leaving the previous bundle as rollback target."""
+    active.parent.mkdir(parents=True, exist_ok=True)
+    if active.exists():
+        atomic_exchange_directories(bundle, active)
+        backup = active.with_name("task8-backup")
+        if backup.exists():
+            shutil.rmtree(backup)
+        os.replace(bundle, backup)
+    else:
+        os.replace(bundle, active)
+
+
 def generate_and_install(runtime_root: Path, data_root: Path) -> dict:
-    active = runtime_root / "train_dataset"
-    active_manifest = runtime_root / "DataSrc" / "mmst_vit" / "manifests"
+    active = runtime_root / "task8-active"
+    active_dataset = active / "train_dataset"
+    active_manifest = active / "manifests"
     staging = Path(tempfile.mkdtemp(prefix="task8-", dir=str(runtime_root)))
     smoke_dir = Path(tempfile.mkdtemp(prefix="task8-smoke-", dir=str(runtime_root)))
     try:
@@ -143,6 +172,7 @@ def generate_and_install(runtime_root: Path, data_root: Path) -> dict:
         rows = build_samples_from_shared_jsonl(dataset)
         splits = split_samples(rows)
         manifest_staging = staging / "manifests"
+        write_jsonl(manifest_staging / "valid-no-ia.jsonl", rows)
         for name, split in splits.items():
             write_jsonl(manifest_staging / f"valid-no-ia.{name}.jsonl", split)
         write_official_manifests(rows, manifest_staging, data_root)
@@ -151,23 +181,30 @@ def generate_and_install(runtime_root: Path, data_root: Path) -> dict:
             raise RuntimeError("staging audit failed: " + "; ".join(audit["violations"][:10]))
         smoke_result = smoke(staging, data_root / "soil_dataset" / "county_soil.json", smoke_dir)
         audit["smoke"] = smoke_result
-        active_manifest.mkdir(parents=True, exist_ok=True)
-        install_dir = staging / "train_dataset"
-        install_dir.mkdir()
-        if active.is_dir():
-            for existing in active.iterdir():
-                if existing.name not in {"dataset.jsonl", "grid_cache.pt", "grid_cache_meta.json"}:
-                    destination = install_dir / existing.name
-                    if existing.is_dir():
-                        shutil.copytree(existing, destination)
-                    else:
-                        shutil.copy2(existing, destination)
+        install_dir = staging / "bundle"
+        install_dataset = install_dir / "train_dataset"
+        install_manifest = install_dir / "manifests"
+        install_dataset.mkdir(parents=True)
+        install_manifest.mkdir(parents=True)
         for name in ("dataset.jsonl", "grid_cache.pt", "grid_cache_meta.json"):
-            os.replace(staging / name, install_dir / name)
-        atomic_exchange_directories(install_dir, active)
-        for name in ("valid-no-ia.train.jsonl", "valid-no-ia.val.jsonl", "valid-no-ia.test.jsonl",
+            os.replace(staging / name, install_dataset / name)
+        for name in ("valid-no-ia.jsonl", "valid-no-ia.train.jsonl", "valid-no-ia.val.jsonl", "valid-no-ia.test.jsonl",
                      "train.official.no-ia.json", "val.official.no-ia.json", "test.official.no-ia.json"):
-            os.replace(staging / "manifests" / name, active_manifest / name)
+            os.replace(staging / "manifests" / name, install_manifest / name)
+        install_runtime_bundle(install_dir, active)
+        runtime_dataset = runtime_root / "train_dataset"
+        runtime_manifest = runtime_root / "DataSrc" / "mmst_vit" / "manifests"
+        for endpoint, target in ((runtime_dataset, active_dataset), (runtime_manifest, active_manifest)):
+            if endpoint.is_symlink() or endpoint.exists():
+                if endpoint.is_dir() and not endpoint.is_symlink():
+                    backup = endpoint.with_name(endpoint.name + ".task8-legacy")
+                    if not backup.exists():
+                        os.replace(endpoint, backup)
+                    else:
+                        shutil.rmtree(endpoint)
+                else:
+                    endpoint.unlink()
+            os.symlink(target, endpoint, target_is_directory=True)
         audit["installed"] = True
         audit["source_roots"] = {
             "sentinel": str(data_root / "mmst_vit" / "download"),
