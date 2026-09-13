@@ -27,6 +27,39 @@ import data as tft_data  # noqa: E402
 from data import load_grid_cache  # noqa: E402
 
 
+def test_jsonl_dry_run_reports_protocol_without_writing(tmp_path, capsys, monkeypatch):
+    output = tmp_path / "dataset.jsonl"
+    monkeypatch.setattr(prepare_jsonl, "OUTPUT_PATH", str(output))
+
+    prepare_jsonl.main(["--dry-run"])
+
+    captured = capsys.readouterr().out
+    assert '"allowed_states": [' in captured
+    assert '"start_month": 4' in captured
+    assert '"end_month": 9' in captured
+    assert '"days_per_month": 28' in captured
+    assert '"max_steps": 168' in captured
+    assert not output.exists()
+
+
+def test_jsonl_process_all_accepts_output_path(tmp_path, monkeypatch):
+    output = tmp_path / "dataset.jsonl"
+    monkeypatch.setattr(prepare_jsonl, "DATA_DIR", str(tmp_path / "data"))
+
+    with pytest.raises(SystemExit, match="1"):
+        prepare_jsonl.process_all(output_path=str(output))
+
+    assert not output.exists()
+
+
+def test_soil_loader_skips_non_state_mapping(tmp_path, capsys):
+    soil_path = tmp_path / "county_soil.csv"
+    soil_path.write_text("FIPS,ph\n17001,6.5\n", encoding="utf-8")
+
+    assert prepare_jsonl._load_soil_map(str(soil_path)) == {}
+    assert "州级土壤映射字段不完整" in capsys.readouterr().out
+
+
 def test_shared_protocol_values():
     assert ALLOWED_STATES == {
         "minnesota", "wisconsin", "michigan", "illinois",

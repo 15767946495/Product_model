@@ -19,6 +19,7 @@
 import os
 import json
 import sys
+import argparse
 import numpy as np
 import pandas as pd
 import torch
@@ -116,7 +117,18 @@ def build_entry(county_df, feats):
     }
 
 
-def process():
+def process(jsonl_path=None, out_path=None, meta_path=None, data_dir=None):
+    global JSONL_PATH, OUT_PATH, META_PATH
+    if jsonl_path:
+        JSONL_PATH = jsonl_path
+    if out_path:
+        OUT_PATH = out_path
+    if meta_path:
+        META_PATH = meta_path
+    if data_dir:
+        prepare_jsonl.DATA_DIR = data_dir
+        prepare_jsonl.USDA_DIR = os.path.join(data_dir, "usda_corn")
+        prepare_jsonl.WEATHER_DIR = os.path.join(data_dir, "weather")
     print("=" * 60)
     print("WRF-HRRR 气象 → 网格级 grid_cache.pt")
     print("=" * 60)
@@ -204,5 +216,15 @@ def process():
     print("\n完成!")
 
 
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="生成 CropNet 网格缓存")
+    parser.add_argument("--jsonl", default=JSONL_PATH, help="输入 JSONL 路径")
+    parser.add_argument("--output", default=OUT_PATH, help="缓存输出路径")
+    parser.add_argument("--meta-output", default=META_PATH, help="缓存元数据输出路径")
+    parser.add_argument("--data-dir", default=prepare_jsonl.DATA_DIR, help="cropnet_dataset/data 根目录")
+    args = parser.parse_args(argv)
+    process(args.jsonl, args.output, args.meta_output, args.data_dir)
+
+
 if __name__ == "__main__":
-    process()
+    main()

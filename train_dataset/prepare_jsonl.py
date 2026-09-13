@@ -18,6 +18,7 @@
 import os
 import json
 import sys
+import argparse
 import pandas as pd
 import numpy as np
 from glob import glob
@@ -44,8 +45,6 @@ DATA_DIR = os.path.join(PROJECT_DIR, "DataSrc", "cropnet_dataset", "data")
 USDA_DIR = os.path.join(DATA_DIR, "usda_corn")
 WEATHER_DIR = os.path.join(DATA_DIR, "weather")
 OUTPUT_PATH = os.path.join(SCRIPT_DIR, "dataset.jsonl")
-
-os.makedirs(os.path.dirname(OUTPUT_PATH), exist_ok=True)
 
 # ============================================================
 # 2. 特征配置 — 使用 WRF-HRRR 原始列名
@@ -174,7 +173,35 @@ def _county_daily_series(county_df, src_cols):
     return result
 
 
-def process_all():
+def _load_soil_map(soil_path):
+    if not os.path.exists(soil_path):
+        print(f"  [警告] 找不到州级土壤映射，跳过土壤特征: {soil_path}")
+        return {}
+    soil_df = pd.read_csv(soil_path)
+    required = {"State", "carbon_bucket", "ph_bucket"}
+    if not required.issubset(soil_df.columns):
+        print(f"  [警告] 州级土壤映射字段不完整，跳过土壤特征: {soil_path}")
+        return {}
+    return soil_df.set_index("State")[["carbon_bucket", "ph_bucket"]].to_dict("index")
+
+
+def protocol_dry_run():
+    return {
+        "allowed_states": sorted(ALLOWED_STATES),
+        "start_month": START_MONTH,
+        "end_month": END_MONTH,
+        "days_per_month": DAYS_PER_MONTH,
+        "max_steps": PROTOCOL_MAX_STEPS,
+    }
+
+
+def process_all(output_path=None, data_dir=None, soil_path=None):
+    output_path = output_path or OUTPUT_PATH
+    data_dir = data_dir or DATA_DIR
+    soil_path = soil_path or os.path.join(SCRIPT_DIR, "us_state_soil.csv")
+    global USDA_DIR, WEATHER_DIR
+    USDA_DIR = os.path.join(data_dir, "usda_corn")
+    WEATHER_DIR = os.path.join(data_dir, "weather")
     print("=" * 60)
     print("cropnet_dataset → JSONL (县级粒度)")
     print("=" * 60)
@@ -210,6 +237,9 @@ def process_all():
         df["county"] = df["county_name"].str.strip().str.lower().str.replace(" ", "_")
         usda_rows.append(df)
 
+    if not usda_rows:
+        print(f"[错误] 找不到 USDA 输入文件: {USDA_DIR}")
+        raise SystemExit(1)
     usda_all = pd.concat(usda_rows, ignore_index=True)
     usda_all = usda_all[usda_all["state"].isin(ALLOWED_STATES)].copy()
     # 移除无缩写或无效产量的行
@@ -277,8 +307,7 @@ def process_all():
 
     # ---- 3. Merge 静态土壤特征 ----
     print("\n[3/4] Merge 土壤静态特征...")
-    soil_df = pd.read_csv(os.path.join(SCRIPT_DIR, "us_state_soil.csv"))
-    soil_map = soil_df.set_index("State")[["carbon_bucket", "ph_bucket"]].to_dict("index")
+    soil_map = _load_soil_map(soil_path)
 
     matched = 0
     missing_states = set()
@@ -301,7 +330,8 @@ def process_all():
         print("[错误] 无样本生成，退出")
         sys.exit(1)
 
-    with open(OUTPUT_PATH, "w", encoding="utf-8") as f:
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as f:
         for sample in all_samples:
             f.write(json.dumps(sample, ensure_ascii=False) + "\n")
 
@@ -314,7 +344,7 @@ def process_all():
     print(f"  Counties: {fips_count}")
     lens = [s["l_enc"] for s in all_samples]
     print(f"  序列长度: min={min(lens)}, max={max(lens)}, mean={np.mean(lens):.1f}")
-    print(f"  输出: {OUTPUT_PATH}")
+    print(f"  输出: {output_path}")
 
     # 示例
     print(f"\n  示例:")
@@ -326,5 +356,18 @@ def process_all():
     print("\n完成!")
 
 
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="生成 CropNet 县级 JSONL")
+    parser.add_argument("--dry-run", action="store_true", help="只打印共享协议，不写文件")
+    parser.add_argument("--output", default=OUTPUT_PATH, help="JSONL 输出路径")
+    parser.add_argument("--data-dir", default=DATA_DIR, help="cropnet_dataset/data 根目录")
+    parser.add_argument("--soil-path", default=None, help="州级土壤映射 CSV，可省略")
+    args = parser.parse_args(argv)
+    if args.dry_run:
+        print(json.dumps(protocol_dry_run(), ensure_ascii=False, indent=2))
+        return
+    process_all(output_path=args.output, data_dir=args.data_dir, soil_path=args.soil_path)
+
+
 if __name__ == "__main__":
-    process_all()
+    main()
