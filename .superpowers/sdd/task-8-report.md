@@ -6,7 +6,7 @@
 - 运行环境：`/root/miniconda3/envs/hqx/bin/python`
 - 运行时根目录：`/data/raid0/hqx/Product_model_runtime`
 - 生成方式：staging 生成、完整审计和只读 smoke 通过后，Linux `renameat2(RENAME_EXCHANGE)` 一次交换完整 runtime bundle；两个稳定兼容入口均指向该 bundle 的子目录，不逐文件更新 manifest
-- 回滚：旧 `train_dataset` 和 MMST manifest 目录保留为 `.task8-legacy`，新 active bundle 失败时不会被半成品覆盖
+- 回滚：旧版本保留为 `task8-backup`；交换后备份移动、入口创建或收尾失败时恢复旧 active 和入口，且不会删除已有唯一 backup
 - 训练/推理：未执行
 - Sentinel、USDA、weather、soil：仅只读访问，未修改或删除
 - 旧权重：保持已删除
@@ -93,9 +93,9 @@ MMST manifest 现在从共享 JSONL 身份源生成；USDA/weather 不再独立�
 ## 测试
 
 ```text
-91 passed, 1 warning
+103 passed, 1 warning
 ```
 
-测试覆盖完整日期序列及长度/对齐门禁、缓存旧协议拒绝、共享 JSONL/root valid manifest 身份源、官方结构/状态/路径审计、运行时审计、meta `days_per_month`、val/test DeepCropNet split 年份拒绝、默认 reload smoke、audit-only CLI、整体原子目录交换和安装失败回滚。
+测试覆盖完整日期序列及长度/对齐门禁、缓存旧协议拒绝、共享 JSONL/root valid manifest 身份源、官方结构/状态/路径审计、绝对路径与 `..` 路径逃逸拒绝、运行时审计、meta `days_per_month`、严格整数 `l_enc`、val/test DeepCropNet split 年份拒绝、默认 reload smoke、audit-only CLI、整体原子目录交换、交换后备份失败、入口创建失败和 active 缺失安装失败回滚。
 
 机器可读明细：`.superpowers/sdd/task-8-report.json`。

@@ -216,3 +216,118 @@ def test_staging_audit_requires_root_valid_manifest_and_meta_days(tmp_path):
     )
     result = audit_staging(staging, tmp_path, manifests)
     assert "meta days_per_month mismatch" in result["violations"]
+
+
+def test_backup_move_failure_rolls_back_active_and_keeps_existing_backup(tmp_path, monkeypatch):
+    active = tmp_path / "task8-active"
+    bundle = tmp_path / "bundle"
+    backup = tmp_path / "task8-backup"
+    for root, value in ((active, "old"), (bundle, "new"), (backup, "older")):
+        (root / "train_dataset").mkdir(parents=True)
+        (root / "manifests").mkdir()
+        (root / "train_dataset/dataset.jsonl").write_text(value, encoding="utf-8")
+        (root / "manifests/valid-no-ia.jsonl").write_text(value, encoding="utf-8")
+    task8.ensure_runtime_entrypoints(tmp_path, active)
+    real_replace = task8.os.replace
+
+    def fail_backup_move(source, destination):
+        if Path(source) == bundle and Path(destination).name.startswith("task8-backup."):
+            raise OSError("injected backup move failure")
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(task8.os, "replace", fail_backup_move)
+    with pytest.raises(OSError, match="backup move failure"):
+        install_runtime_bundle_with_entrypoints(bundle, tmp_path)
+
+    assert (tmp_path / "train_dataset/dataset.jsonl").read_text(encoding="utf-8") == "old"
+    assert (tmp_path / "DataSrc/mmst_vit/manifests/valid-no-ia.jsonl").read_text(encoding="utf-8") == "old"
+    assert (backup / "train_dataset/dataset.jsonl").read_text(encoding="utf-8") == "older"
+    assert (bundle / "train_dataset/dataset.jsonl").read_text(encoding="utf-8") == "new"
+
+
+def test_entrypoint_creation_failure_rolls_back_new_active_and_created_link(tmp_path, monkeypatch):
+    active = tmp_path / "task8-active"
+    bundle = tmp_path / "bundle"
+    for root, value in ((active, "old"), (bundle, "new")):
+        (root / "train_dataset").mkdir(parents=True)
+        (root / "manifests").mkdir()
+        (root / "train_dataset/dataset.jsonl").write_text(value, encoding="utf-8")
+        (root / "manifests/valid-no-ia.jsonl").write_text(value, encoding="utf-8")
+    real_symlink = task8.os.symlink
+    calls = 0
+
+    def fail_second_link(source, destination, target_is_directory=False):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("injected entrypoint failure")
+        return real_symlink(source, destination, target_is_directory=target_is_directory)
+
+    monkeypatch.setattr(task8.os, "symlink", fail_second_link)
+    with pytest.raises(OSError, match="entrypoint failure"):
+        install_runtime_bundle_with_entrypoints(bundle, tmp_path)
+
+    assert (active / "train_dataset/dataset.jsonl").read_text(encoding="utf-8") == "old"
+    assert (bundle / "train_dataset/dataset.jsonl").read_text(encoding="utf-8") == "new"
+    assert not (tmp_path / "train_dataset").exists()
+    assert not (tmp_path / "DataSrc/mmst_vit/manifests").exists()
+
+
+def test_missing_active_install_failure_restores_original_missing_state(tmp_path, monkeypatch):
+    bundle = tmp_path / "bundle"
+    (bundle / "train_dataset").mkdir(parents=True)
+    (bundle / "manifests").mkdir()
+    (bundle / "train_dataset/dataset.jsonl").write_text("new", encoding="utf-8")
+    real_symlink = task8.os.symlink
+
+    def fail_first_link(*args, **kwargs):
+        raise OSError("injected first install failure")
+
+    monkeypatch.setattr(task8.os, "symlink", fail_first_link)
+    with pytest.raises(OSError, match="first install failure"):
+        install_runtime_bundle_with_entrypoints(bundle, tmp_path)
+
+    assert not (tmp_path / "task8-active").exists()
+    assert not (tmp_path / "train_dataset").exists()
+    assert not (tmp_path / "DataSrc/mmst_vit/manifests").exists()
+    assert (bundle / "train_dataset/dataset.jsonl").read_text(encoding="utf-8") == "new"
+    monkeypatch.setattr(task8.os, "symlink", real_symlink)
+
+
+@pytest.mark.parametrize("relative", ["/tmp/outside", "../outside"])
+def test_official_audit_rejects_paths_outside_data_root(tmp_path, relative):
+    record = {
+        "state": "illinois",
+        "data": {
+            "USDA": relative,
+            "HRRR": {"short_term": [relative] * 6, "long_term": [[relative] * 60]},
+            "sentinel": [relative] * 4,
+        },
+    }
+    violations = task8._validate_official_record(record, tmp_path / "data", 0)
+    assert any("path escapes data_root" in item for item in violations)
+
+
+def test_staging_audit_rejects_fractional_l_enc(tmp_path):
+    staging = tmp_path / "staging"
+    manifests = staging / "manifests"
+    manifests.mkdir(parents=True)
+    month = [4] * 28 + [5] * 28 + [6] * 28 + [7] * 28 + [8] * 28 + [9] * 28
+    row = {"FIPS": "17001", "Year": 2020, "State": "illinois", "County": "a",
+           "month": month, "day": list(range(1, 29)) * 6, "l_enc": 168.9}
+    (staging / "dataset.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+    (manifests / "valid-no-ia.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+    for split in ("train", "val", "test"):
+        (manifests / f"valid-no-ia.{split}.jsonl").write_text("", encoding="utf-8")
+        (manifests / f"{split}.official.no-ia.json").write_text("[]", encoding="utf-8")
+    import torch
+    entry = {"feats": torch.zeros(1, 168, 12), "coords": torch.zeros(1, 2),
+             "month": torch.tensor(month), "day": torch.tensor(row["day"]), "l_enc": 168}
+    torch.save({"version": 4, "coord_type": "grid_center", "time_window": "04-01--09-28",
+                "days_per_month": 28, "max_steps": 168, "entries": [entry]}, staging / "grid_cache.pt")
+    (staging / "grid_cache_meta.json").write_text(
+        json.dumps({"version": 4, "time_window": "04-01--09-28", "days_per_month": 28, "max_steps": 168}),
+        encoding="utf-8"
+    )
+    result = audit_staging(staging, tmp_path, manifests)
+    assert "dataset row 0: l_enc is not 168" in result["violations"]

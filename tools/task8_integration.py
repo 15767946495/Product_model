@@ -62,7 +62,16 @@ def _validate_official_record(record: object, data_root: Path, index: int) -> li
             violations.append(f"official record {index}: sentinel length is not 4")
         paths = [data["USDA"], *short_term, *(p for context in long_term for p in context), *sentinel]
         for relative in paths:
-            if not isinstance(relative, str) or not (data_root / relative).is_file():
+            if not isinstance(relative, str):
+                violations.append(f"official record {index}: missing path {relative!r}")
+                continue
+            candidate = (data_root / relative).resolve()
+            try:
+                candidate.relative_to(data_root.resolve())
+            except ValueError:
+                violations.append(f"official record {index}: path escapes data_root {relative!r}")
+                continue
+            if not candidate.is_file():
                 violations.append(f"official record {index}: missing path {relative!r}")
     except (KeyError, TypeError, IndexError) as error:
         violations.append(f"official record {index}: malformed structure: {error}")
@@ -80,7 +89,8 @@ def audit_staging(staging: Path, data_root: Path, manifest_dir: Path) -> dict:
     for index, row in enumerate(rows):
         if str(row.get("State", "")).lower() not in ALLOWED_STATES:
             violations.append(f"dataset row {index}: state outside allowlist")
-        if int(row.get("l_enc", -1)) != PROTOCOL_MAX_STEPS:
+        l_enc = row.get("l_enc")
+        if isinstance(l_enc, bool) or not isinstance(l_enc, int) or l_enc != PROTOCOL_MAX_STEPS:
             violations.append(f"dataset row {index}: l_enc is not 168")
         if list(zip(row.get("month", []), row.get("day", []))) != expected:
             violations.append(f"dataset row {index}: calendar mismatch")
@@ -191,16 +201,27 @@ def atomic_exchange_directories(staging: Path, active: Path) -> None:
 
 
 def install_runtime_bundle(bundle: Path, active: Path) -> None:
-    """Exchange one complete bundle, leaving the previous bundle as rollback target."""
+    """Exchange one complete bundle and preserve the previous active directory."""
     active.parent.mkdir(parents=True, exist_ok=True)
-    if active.exists():
+    old_exists = active.exists()
+    if old_exists:
         atomic_exchange_directories(bundle, active)
         backup = active.with_name("task8-backup")
         if backup.exists():
-            shutil.rmtree(backup)
-        os.replace(bundle, backup)
+            suffix = next(index for index in range(1, 10000) if not backup.with_name(f"task8-backup.{index}").exists())
+            backup = backup.with_name(f"task8-backup.{suffix}")
+        try:
+            os.replace(bundle, backup)
+        except Exception:
+            atomic_exchange_directories(bundle, active)
+            raise
     else:
-        os.replace(bundle, active)
+        try:
+            os.replace(bundle, active)
+        except Exception:
+            if active.exists() and not bundle.exists():
+                os.replace(active, bundle)
+            raise
 
 
 def ensure_runtime_entrypoints(runtime_root: Path, active: Path) -> None:
@@ -218,11 +239,62 @@ def ensure_runtime_entrypoints(runtime_root: Path, active: Path) -> None:
         os.symlink(target, endpoint, target_is_directory=True)
 
 
+def _entrypoint_paths(runtime_root: Path, active: Path) -> dict[Path, Path]:
+    return {
+        runtime_root / "train_dataset": active / "train_dataset",
+        runtime_root / "DataSrc" / "mmst_vit" / "manifests": active / "manifests",
+    }
+
+
+def _validate_entrypoint_state(runtime_root: Path, active: Path) -> None:
+    for endpoint, target in _entrypoint_paths(runtime_root, active).items():
+        if endpoint.exists() or endpoint.is_symlink():
+            if not endpoint.is_symlink() or endpoint.resolve() != target.resolve():
+                raise RuntimeError(f"runtime entrypoint is not the stable task8 link: {endpoint}")
+
+
+def _create_missing_entrypoints(runtime_root: Path, active: Path) -> list[Path]:
+    created = []
+    try:
+        for endpoint, target in _entrypoint_paths(runtime_root, active).items():
+            endpoint.parent.mkdir(parents=True, exist_ok=True)
+            if endpoint.exists() or endpoint.is_symlink():
+                continue
+            os.symlink(target, endpoint, target_is_directory=True)
+            created.append(endpoint)
+    except Exception:
+        for endpoint in reversed(created):
+            endpoint.unlink(missing_ok=True)
+        raise
+    return created
+
+
 def install_runtime_bundle_with_entrypoints(bundle: Path, runtime_root: Path) -> None:
-    """Install a bundle after entrypoint validation; exchange is the only version switch."""
+    """Install a complete bundle with rollback for post-exchange failures."""
     active = runtime_root / "task8-active"
-    ensure_runtime_entrypoints(runtime_root, active)
-    install_runtime_bundle(bundle, active)
+    _validate_entrypoint_state(runtime_root, active)
+    old_exists = active.exists()
+    if old_exists:
+        atomic_exchange_directories(bundle, active)
+    else:
+        os.replace(bundle, active)
+    created = []
+    try:
+        created = _create_missing_entrypoints(runtime_root, active)
+        if old_exists:
+            backup = active.with_name("task8-backup")
+            if backup.exists():
+                suffix = next(index for index in range(1, 10000) if not backup.with_name(f"task8-backup.{index}").exists())
+                backup = backup.with_name(f"task8-backup.{suffix}")
+            os.replace(bundle, backup)
+    except Exception:
+        for endpoint in reversed(created):
+            endpoint.unlink(missing_ok=True)
+        if old_exists:
+            atomic_exchange_directories(bundle, active)
+        else:
+            os.replace(active, bundle)
+        raise
 
 
 def audit_active_bundle(runtime_root: Path, data_root: Path) -> dict:
