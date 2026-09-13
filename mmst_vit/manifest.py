@@ -12,6 +12,8 @@ from typing import Iterable, Sequence
 
 import pandas as pd
 
+from cropnet_protocol import ALLOWED_STATES
+
 TRAIN_YEARS = tuple(range(2017, 2021))
 VAL_YEAR = 2021
 TEST_YEAR = 2022
@@ -28,8 +30,6 @@ STATE_ABBR = {
     "VIRGINIA": "VA", "WASHINGTON": "WA", "WISCONSIN": "WI", "WEST VIRGINIA": "WV",
     "WYOMING": "WY",
 }
-
-
 def normalize_fips(value: object) -> str:
     """Return a five-digit FIPS string, rejecting missing/non-numeric values."""
     text = str(value).strip()
@@ -68,7 +68,7 @@ def _usda_rows(usda_dir: Path, years: Sequence[int]) -> dict[tuple[str, int], di
                     "Year": year,
                     "County": row.get("county_name", "").strip(),
                     "yield_per_acre": yield_value,
-                    "State": STATE_ABBR.get(row.get("state_name", "").strip().upper(), row.get("state_name", "").strip().upper()),
+                    "State": row.get("state_name", "").strip().lower(),
                     "usda_file": path.name,
                 }
     return rows
@@ -111,7 +111,8 @@ def build_valid_samples(usda_dir: Path, weather_dir: Path, years: Sequence[int])
     for key in sorted(set(usda) & weather, key=lambda item: (item[1], item[0])):
         row = dict(usda[key])
         row.update({"StateFIPS": _state_from_fips(row["FIPS"]), "weather_year": key[1]})
-        samples.append(row)
+        if row["State"] in ALLOWED_STATES:
+            samples.append(row)
     return samples
 
 
@@ -146,9 +147,10 @@ def main() -> None:
     args = _parse_args()
     samples = build_valid_samples(args.usda_dir, args.weather_dir, args.years)
     splits = split_samples(samples)
-    write_jsonl(args.output, samples)
+    output = args.output.with_name("valid-no-ia.jsonl")
+    write_jsonl(output, samples)
     for name, rows in splits.items():
-        write_jsonl(args.output.with_name(f"{args.output.stem}.{name}.jsonl"), rows)
+        write_jsonl(output.with_name(f"{output.stem}.{name}.jsonl"), rows)
     print(json.dumps({"samples": len(samples), **{name: len(rows) for name, rows in splits.items()}}, indent=2))
 
 

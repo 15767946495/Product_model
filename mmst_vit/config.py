@@ -5,6 +5,15 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+SHORT_TERM_MONTHS = tuple(range(4, 10))
+LONG_TERM_YEARS = tuple(range(2017, 2022))
+SENTINEL_QUARTERS = (("04-01", "06-30"), ("07-01", "09-30"))
+STATE_NAMES = {
+    "IL": "Illinois", "IN": "Indiana", "KY": "Kentucky", "MI": "Michigan",
+    "MN": "Minnesota", "MO": "Missouri", "OH": "Ohio", "WI": "Wisconsin",
+}
+STATE_ABBR = {name.lower(): abbr for abbr, name in STATE_NAMES.items()}
+
 
 def make_config(output_dir: Path, data_root: Path, source_dir: Path, train_file: Path, val_file: Path, test_file: Path, target_fips: Path) -> dict:
     return {
@@ -43,27 +52,36 @@ def official_sample_record(
     """
     fips = str(fips).zfill(5)
     state_ansi, county_ansi = fips[:2], fips[2:]
+    state_name = state.strip().lower()
+    state_abbr = STATE_ABBR.get(state_name, state.upper())
     weather_files = [
-        f"cropnet_dataset/data/weather/{year}/{state}/HRRR_{state_ansi}_{state}_{year}-{month:02d}.csv"
+        f"cropnet_dataset/data/weather/{weather_year}/{state_abbr}/HRRR_{state_ansi}_{state_abbr}_{weather_year}-{month:02d}.csv"
+        for weather_year in LONG_TERM_YEARS
         for month in range(1, 13)
     ]
     sentinel = []
     for image_type in sentinel_types:
-        prefix = "Agriculture" if image_type == "AG" else "NDVI"
-        for start, end in (("04-01", "06-30"), ("07-01", "09-30")):
+        prefix = "Agriculture" if image_type == "AG" else "Vegetation"
+        for start, end in SENTINEL_QUARTERS:
             sentinel.append(
-                f"Sentinel-2 Imagery/data/{image_type}/{year}/{state}/"
-                f"{prefix}_{state_ansi}_{state}_{year}-{start}_{year}-{end}.h5"
+                f"mmst_vit/download/Sentinel-2 Imagery/data/{image_type}/{year}/{state_abbr}/"
+                f"{prefix}_{state_ansi}_{state_abbr}_{year}-{start}_{year}-{end}.h5"
             )
     return {
         "FIPS": fips,
         "year": int(year),
         "county": county,
-        "state": state,
+        "state": state_name,
         "county_ansi": county_ansi,
         "state_ansi": state_ansi,
         "data": {
-            "HRRR": {"short_term": weather_files[3:9], "long_term": [weather_files]},
+            "HRRR": {
+                "short_term": [
+                    f"cropnet_dataset/data/weather/{year}/{state_abbr}/HRRR_{state_ansi}_{state_abbr}_{year}-{month:02d}.csv"
+                    for month in SHORT_TERM_MONTHS
+                ],
+                "long_term": [weather_files],
+            },
             "USDA": f"cropnet_dataset/data/usda_corn/USDA_Corn_County_{year}.csv",
             "sentinel": sentinel,
         },
