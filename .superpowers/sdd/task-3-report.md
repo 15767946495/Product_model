@@ -9,6 +9,7 @@ TFT、TFT 推理、`TFT_model/ablation_rope.py` 和 `ablation/ablation.py` 已�
 ## 提交哈希
 
 - `cf837ada8702e008cf6b66d9521c04137a588a62`：`feat: align TFT and ablations with cropnet short-season protocol`
+- `abc23a2e69f72641a2fbc9eab7a17339473198ce`：`fix: close task 3 protocol validation gaps`
 
 ## 修改文件
 
