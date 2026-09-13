@@ -31,6 +31,7 @@ _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT))
 
 from common import data as D
+from cropnet_protocol import protocol_metadata, validate_protocol_metadata
 
 OUT_DIR = _ROOT / "output"
 
@@ -66,7 +67,8 @@ def county_gdd_kdd_prcp(feats):
     return gdd_d, kdd_d, prcp_d
 
 
-def prepare_dcn(val_year=2021, test_year=2022, out_dir=None, force=False):
+def prepare_dcn(val_year=2021, test_year=2022, out_dir=None, force=False,
+                jsonl_path=None, grid_cache_path=None):
     out_dir = Path(out_dir) if out_dir else OUT_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
     tr_path = out_dir / f"train_dcn_data_val{val_year}_test{test_year}.pt"
@@ -75,12 +77,17 @@ def prepare_dcn(val_year=2021, test_year=2022, out_dir=None, force=False):
     if tr_path.exists() and va_path.exists() and te_path.exists() and not force:
         tr = torch.load(tr_path, map_location="cpu", weights_only=False)
         va = torch.load(va_path, map_location="cpu", weights_only=False)
+        for cached in (tr, va):
+            validate_protocol_metadata(cached, "DeepCropNet cache")
+        if tr.get("val_year") != val_year or tr.get("test_year") != test_year:
+            raise ValueError("DeepCropNet cache split years mismatch")
         print(f"[数据] 使用缓存 {tr_path}")
         te = torch.load(te_path, map_location="cpu", weights_only=False)
+        validate_protocol_metadata(te, "DeepCropNet cache")
         return tr, va, te
 
-    meta_lines = D.load_jsonl(D.DEFAULT_DATA_JSONL)
-    cache = D.load_grid_cache(D.DEFAULT_GRID_CACHE)
+    meta_lines = D.load_jsonl(jsonl_path or D.DEFAULT_DATA_JSONL)
+    cache = D.load_grid_cache(grid_cache_path or D.DEFAULT_GRID_CACHE)
     entries = cache["entries"]
     states = set(D.STATES)
 
@@ -133,7 +140,8 @@ def prepare_dcn(val_year=2021, test_year=2022, out_dir=None, force=False):
     yte_trend = (coef[0] * np.array([m["year"] for m in meta_te]) + coef[1]).astype(np.float32)
 
     def save(path, X, y, trend, reg, metas):
-        torch.save({"X": X, "y_raw": y, "y_trend": trend,
+        torch.save({**protocol_metadata(), "val_year": val_year, "test_year": test_year,
+                    "X": X, "y_raw": y, "y_trend": trend,
                     "region": np.array(reg, dtype=np.int64), "meta": metas}, path)
     save(tr_path, Xtr, ytr, ytr_trend, reg_tr, meta_tr)
     save(va_path, Xva, yva, yva_trend, reg_va, meta_va)

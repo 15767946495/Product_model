@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from mmst_vit.config import official_sample_record
-from mmst_vit.manifest import ALLOWED_STATES, build_valid_samples
+from mmst_vit.manifest import ALLOWED_STATES, build_samples_from_shared_jsonl, build_valid_samples
 from mmst_vit.official import write_official_manifests, write_official_split
 
 
@@ -136,6 +136,13 @@ def test_official_cli_builds_all_split_json_arrays_from_small_manifests(tmp_path
             path = data_root / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             path.touch()
+    (manifest_dir / "shared.jsonl").write_text(
+        "".join(
+            (manifest_dir / f"valid-no-ia.{split}.jsonl").read_text(encoding="utf-8")
+            for split in ("train", "val", "test")
+        ),
+        encoding="utf-8",
+    )
 
     result = subprocess.run(
         [
@@ -144,6 +151,8 @@ def test_official_cli_builds_all_split_json_arrays_from_small_manifests(tmp_path
             "mmst_vit.official",
             "--manifest-dir",
             str(manifest_dir),
+            "--shared-jsonl",
+            str(manifest_dir / "shared.jsonl"),
             "--data-root",
             str(data_root),
             "--output-dir",
@@ -158,3 +167,13 @@ def test_official_cli_builds_all_split_json_arrays_from_small_manifests(tmp_path
     for split in sample_by_year:
         output = output_dir / f"{split}.official.no-ia.json"
         assert len(json.loads(output.read_text(encoding="utf-8"))) == 1
+
+
+def test_shared_jsonl_is_the_manifest_identity_source(tmp_path):
+    shared = tmp_path / "dataset.jsonl"
+    rows = [
+        {"FIPS": "17001", "Year": 2020, "State": "illinois", "County": "a"},
+        {"FIPS": "17003", "Year": 2021, "State": "illinois", "County": "b"},
+    ]
+    shared.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    assert build_samples_from_shared_jsonl(shared, [2020]) == [rows[0]]

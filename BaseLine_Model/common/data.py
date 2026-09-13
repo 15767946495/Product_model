@@ -27,7 +27,7 @@ if str(_TFT) not in sys.path:
 if str(_PROJECT) not in sys.path:
     sys.path.insert(0, str(_PROJECT))
 
-from cropnet_protocol import ALLOWED_STATES, PROTOCOL_MAX_STEPS  # noqa: E402
+from cropnet_protocol import ALLOWED_STATES, PROTOCOL_MAX_STEPS, protocol_metadata, validate_protocol_metadata  # noqa: E402
 
 from data import (  # noqa: E402   (TFT_model 数据管线)
     load_jsonl,
@@ -69,6 +69,10 @@ def build_dataset(cache_entries, meta_lines, soil_dict, states=STATES):
         if states is not None and state not in states:
             continue
         if e is None:
+            continue
+        if str(m["FIPS"]) not in soil_dict:
+            continue
+        if any(soil_dict[str(m["FIPS"])].get(f) is None for f in SOIL_FEATURES):
             continue
         feats = e["feats"].numpy()                 # (G, T, 11)
         coords = e["coords"].numpy()               # (G, 2)
@@ -122,18 +126,23 @@ def split_years(samples, val_year: int, test_year: int):
 
 
 def prepare(val_year: int = 2021, test_year: int = 2022, out_dir=None,
-            force: bool = False, gnn_k: int = 5):
+            force: bool = False, gnn_k: int = 5, jsonl_path=None,
+            grid_cache_path=None, soil_path=None):
     """构建/加载八州数据(缓存到 output/baselines_data.pt)。"""
     out_dir = Path(out_dir) if out_dir else OUT_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
     cache_path = out_dir / f"baselines_data_val{val_year}_test{test_year}.pt"
     if cache_path.exists() and not force:
+        cached = torch.load(cache_path, map_location="cpu", weights_only=False)
+        validate_protocol_metadata(cached, "baseline cache")
+        if cached.get("val_year") != val_year or cached.get("test_year") != test_year:
+            raise ValueError("baseline cache split years mismatch")
         print(f"[数据] 使用缓存 {cache_path}")
-        return torch.load(cache_path, map_location="cpu", weights_only=False)
+        return cached
 
-    meta = load_jsonl(DEFAULT_DATA_JSONL)
-    cache = load_grid_cache(DEFAULT_GRID_CACHE)
-    soil_dict = load_county_soil(DEFAULT_COUNTY_SOIL)
+    meta = load_jsonl(jsonl_path or DEFAULT_DATA_JSONL)
+    cache = load_grid_cache(grid_cache_path or DEFAULT_GRID_CACHE)
+    soil_dict = load_county_soil(soil_path or DEFAULT_COUNTY_SOIL)
     all_samples = build_dataset(cache["entries"], meta, soil_dict, STATES)
 
     tr, va, te = split_years(all_samples, val_year, test_year)
@@ -170,7 +179,8 @@ def prepare(val_year: int = 2021, test_year: int = 2022, out_dir=None,
     gmax = max(max(g.shape[0] for g in tr_p["grid_weather"]),
                max(g.shape[0] for g in va_p["grid_weather"]),
                max(g.shape[0] for g in te_p["grid_weather"]))
-    data = {"train": tr_p, "val": va_p, "test": te_p, "Gmax": gmax,
+    data = {**protocol_metadata(), "val_year": val_year, "test_year": test_year,
+            "train": tr_p, "val": va_p, "test": te_p, "Gmax": gmax,
             "stats": {"wmean": wm, "wstd": ws, "smean": sm, "sstd": ss,
                       "ymean": ym, "ystd": ys}}
     torch.save(data, cache_path)

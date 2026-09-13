@@ -116,6 +116,26 @@ def build_valid_samples(usda_dir: Path, weather_dir: Path, years: Sequence[int])
     return samples
 
 
+def build_samples_from_shared_jsonl(shared_jsonl: Path, years: Sequence[int] | None = None) -> list[dict]:
+    """Read the shared JSONL without independently changing its identity set."""
+    rows = []
+    with shared_jsonl.open(encoding="utf-8") as handle:
+        for line in handle:
+            if line.strip():
+                rows.append(json.loads(line))
+    allowed_years = None if years is None else {int(year) for year in years}
+    result = []
+    for row in rows:
+        year = int(row["Year"])
+        state = str(row["State"]).strip().lower()
+        if allowed_years is not None and year not in allowed_years:
+            continue
+        if state not in ALLOWED_STATES:
+            raise ValueError(f"shared JSONL contains unsupported state: {row.get('State')!r}")
+        result.append(dict(row))
+    return result
+
+
 def split_samples(samples: Sequence[dict]) -> dict[str, list[dict]]:
     """Partition samples into the fixed train/validation/test protocol."""
     splits = {name: [] for name in SPLIT_YEARS}
@@ -136,16 +156,15 @@ def write_jsonl(path: Path, rows: Iterable[dict]) -> None:
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--usda-dir", type=Path, required=True)
-    parser.add_argument("--weather-dir", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--years", type=int, nargs="+", default=sorted({*TRAIN_YEARS, VAL_YEAR, TEST_YEAR}))
+    parser.add_argument("--shared-jsonl", type=Path, required=True)
     return parser.parse_args()
 
 
 def main() -> None:
     args = _parse_args()
-    samples = build_valid_samples(args.usda_dir, args.weather_dir, args.years)
+    samples = build_samples_from_shared_jsonl(args.shared_jsonl, args.years)
     splits = split_samples(samples)
     output = args.output.with_name("valid-no-ia.jsonl")
     write_jsonl(output, samples)

@@ -75,6 +75,9 @@ def write_official_manifests(samples: Iterable[Mapping], output_dir: Path, data_
     from mmst_vit.manifest import split_samples
 
     sample_list = [dict(sample) for sample in samples]
+    identities = [(str(sample["FIPS"]), int(sample["Year"])) for sample in sample_list]
+    if len(set(identities)) != len(identities):
+        raise ValueError("samples contain duplicate (FIPS, Year) identities")
     for index, sample in enumerate(sample_list):
         state = str(sample.get("State", "")).strip().lower()
         if state not in ALLOWED_STATES:
@@ -110,17 +113,14 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--manifest-dir", type=Path, required=True)
     parser.add_argument("--data-root", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--shared-jsonl", type=Path, required=True)
     return parser.parse_args()
 
 
 def main() -> None:
     args = _parse_args()
-    samples = []
-    for split in ("train", "val", "test"):
-        path = args.manifest_dir / f"valid-no-ia.{split}.jsonl"
-        if not path.is_file():
-            raise FileNotFoundError(f"manifest file not found: {path}")
-        samples.extend(_read_jsonl(path))
+    from mmst_vit.manifest import build_samples_from_shared_jsonl
+    samples = build_samples_from_shared_jsonl(args.shared_jsonl)
     counts = write_official_manifests(samples, args.output_dir, args.data_root)
     print(json.dumps(counts, sort_keys=True))
 

@@ -40,6 +40,7 @@ from cropnet_protocol import (  # noqa: E402
     ALLOWED_STATES,
     DAYS_PER_MONTH,
     TIME_WINDOW,
+    protocol_metadata,
     validate_grid_entry,
 )
 
@@ -310,7 +311,7 @@ def process(jsonl_path=None, out_path=None, meta_path=None, data_dir=None):
     print(f"  T: min={min(ts)} median={_median(ts)} max={max(ts)}")
 
     payload = {
-        "version": 4,
+        **protocol_metadata(),
         "coord_type": "grid_center",
         "time_window": TIME_WINDOW,
         "days_per_month": DAYS_PER_MONTH,
@@ -322,7 +323,7 @@ def process(jsonl_path=None, out_path=None, meta_path=None, data_dir=None):
     print(f"  已保存: {OUT_PATH} ({round(os.path.getsize(OUT_PATH)/1e9, 2)} GB)")
 
     meta = {
-        "version": 4,
+        **protocol_metadata(),
         "coord_type": "grid_center",
         "time_window": TIME_WINDOW,
         "days_per_month": DAYS_PER_MONTH,

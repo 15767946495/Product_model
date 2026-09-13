@@ -33,6 +33,7 @@ from cropnet_protocol import (  # noqa: E402
     DAYS_PER_MONTH,
     PROTOCOL_MAX_STEPS,
     validate_calendar_fields,
+    validate_expected_calendar,
 )
 
 # ============================================================
@@ -189,6 +190,7 @@ def validate_sample_calendar(sample):
     if sample["l_enc"] != PROTOCOL_MAX_STEPS:
         raise ValueError("samples must have exactly 168 steps")
     validate_calendar_fields(sample["month"], sample["day"], sample["l_enc"])
+    validate_expected_calendar(sample["month"], sample["day"], prefix="sample calendar")
 
 
 def protocol_dry_run():

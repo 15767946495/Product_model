@@ -37,6 +37,7 @@ from cropnet_protocol import (  # noqa: E402
     PROTOCOL_MAX_STEPS,
     TIME_WINDOW,
     validate_grid_entry,
+    validate_protocol_metadata,
 )
 
 DEFAULT_DATA_JSONL = os.path.join(TRAIN_DATA_DIR, "dataset.jsonl")
@@ -823,8 +824,7 @@ def create_dataloader(
 def load_grid_cache(path: str = DEFAULT_GRID_CACHE) -> Dict:
     """加载 grid_cache.pt,返回 {"version", "feat_names", "entries"}。"""
     payload = torch.load(path, map_location="cpu")
-    if payload.get("version") != 4:
-        raise ValueError("grid_cache must use version 4")
+    validate_protocol_metadata(payload, "grid_cache")
     if payload.get("coord_type") != "grid_center":
         raise ValueError("grid_cache must use coord_type='grid_center'")
     if payload.get("time_window") != TIME_WINDOW:

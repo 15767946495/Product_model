@@ -11,7 +11,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from cropnet_protocol import ALLOWED_STATES, DAYS_PER_MONTH, PROTOCOL_MAX_STEPS, TIME_WINDOW  # noqa: E402
+from cropnet_protocol import ALLOWED_STATES, DAYS_PER_MONTH, EXPECTED_CALENDAR, PROTOCOL_MAX_STEPS, TIME_WINDOW  # noqa: E402
 
 
 # Official manifests store the parsed state as a full lowercase state value.
@@ -87,6 +87,8 @@ def _audit_jsonl(rows: list[dict]) -> dict:
             violations.append(f"dataset row {index}: len(month)={len(month) if isinstance(month, list) else None} != l_enc={l_enc}")
         elif any(not isinstance(value, int) or not 4 <= value <= 9 for value in month):
             violations.append(f"dataset row {index}: parsed month values are outside 4..9")
+        elif tuple(zip(month, day)) != EXPECTED_CALENDAR:
+            violations.append(f"dataset row {index}: calendar is not the exact protocol sequence")
         if l_enc != PROTOCOL_MAX_STEPS:
             violations.append(f"dataset row {index}: l_enc={l_enc}, expected {PROTOCOL_MAX_STEPS}")
     return {"row_count": len(rows), "violations": violations}
@@ -114,7 +116,7 @@ def _audit_cache_payload(cache: object, row_count: int, result: dict | None = No
     if not isinstance(cache, dict):
         result["violations"].append("cache payload is not a dict")
         return result
-    for field, expected in (("version", 4), ("max_steps", 168), ("time_window", TIME_WINDOW)):
+    for field, expected in (("version", 4), ("max_steps", 168), ("time_window", TIME_WINDOW), ("days_per_month", DAYS_PER_MONTH)):
         if cache.get(field) != expected:
             result["violations"].append(f"cache {field}={cache.get(field)!r}, expected {expected!r}")
     entries = cache.get("entries")
@@ -135,6 +137,11 @@ def _audit_cache_payload(cache: object, row_count: int, result: dict | None = No
                 if not isinstance(values, list) or len(values) != PROTOCOL_MAX_STEPS:
                     result["violations"].append(f"cache entry {index}: {field} is not 168 values")
                 else:
+                    if tuple(zip(
+                        entry.get("month").tolist() if hasattr(entry.get("month"), "tolist") else entry.get("month"),
+                        entry.get("day").tolist() if hasattr(entry.get("day"), "tolist") else entry.get("day"),
+                    )) != EXPECTED_CALENDAR:
+                        result["violations"].append(f"cache entry {index}: calendar is not the exact protocol sequence")
                     for value_index, value in enumerate(values):
                         if not isinstance(value, int) or isinstance(value, bool):
                             result["violations"].append(
@@ -349,6 +356,8 @@ def test_current_runtime_protocol_is_audited_read_only():
     assert not cache["violations"], cache["violations"]
     assert official_violation_count == 0, official
     assert official_missing_path_count == 0, official
+    assert dataset["status"] == "present"
+    assert cache["status"] == "present"
 
 
 def test_official_audit_reports_malformed_records_without_raising():
@@ -392,7 +401,7 @@ def test_audit_runtime_protocol_returns_machine_readable_report_without_writing(
     report = audit_runtime_protocol()
 
     assert set(report) >= {"dataset", "cache", "official", "counts"}
-    assert report["cache"]["status"] == "missing_shared_cache_after_task6_cleanup"
+    assert report["cache"]["status"] == "present"
     assert all(result["identity_keys_equal"] for result in report["official"].values())
     assert all("path_counts" in result for result in report["official"].values())
 
@@ -406,12 +415,12 @@ def test_cli_json_prints_audit_report():
     )
 
     report = json.loads(result.stdout)
-    assert report["cache"]["status"] == "missing_shared_cache_after_task6_cleanup"
+    assert report["cache"]["status"] == "present"
 
 
 def test_malformed_cache_entries_are_reported_without_raising():
     result = _audit_cache_payload(
-        {"version": 4, "max_steps": 168, "time_window": TIME_WINDOW, "entries": [None, "bad"]},
+        {"version": 4, "max_steps": 168, "time_window": TIME_WINDOW, "days_per_month": 28, "entries": [None, "bad"]},
         2,
     )
 
@@ -443,6 +452,19 @@ def test_cache_calendar_values_require_non_boolean_integers():
         )
         assert any("cache entry 0: day value 0 is not an integer" in violation for violation in result["violations"])
         entry["day"][0] = 1
+
+
+def test_runtime_audit_rejects_valid_but_reordered_calendar():
+    entry = {
+        "l_enc": 168,
+        "month": [4] * 168,
+        "day": [1] * 168,
+    }
+    result = _audit_cache_payload(
+        {"version": 4, "max_steps": 168, "time_window": TIME_WINDOW, "days_per_month": 28, "entries": [entry]},
+        1,
+    )
+    assert any("exact protocol sequence" in violation for violation in result["violations"])
 
 
 def test_malformed_jsonl_and_official_records_are_structured_and_continue():

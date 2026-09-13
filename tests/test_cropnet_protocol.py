@@ -23,6 +23,8 @@ from cropnet_protocol import (  # noqa: E402
     DAYS_PER_MONTH,
     PROTOCOL_MAX_STEPS,
     TIME_WINDOW,
+    EXPECTED_CALENDAR,
+    validate_expected_calendar,
 )
 import prepare_jsonl  # noqa: E402
 import prepare_grid  # noqa: E402
@@ -242,6 +244,13 @@ def test_calendar_validation_accepts_exact_168_steps_and_empty_input():
     prepare_jsonl.validate_calendar_fields([], [], 0)
 
 
+def test_expected_calendar_requires_ordered_protocol_sequence():
+    month, day = zip(*EXPECTED_CALENDAR)
+    validate_expected_calendar(list(month), list(day))
+    with pytest.raises(ValueError, match="exact"):
+        validate_expected_calendar(list(month[1:]) + [month[0]], list(day[1:]) + [day[0]])
+
+
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [
@@ -453,6 +462,12 @@ def test_shared_baseline_entry_filters_parsed_states_and_pads_to_protocol_length
     )
 
 
+def test_shared_baseline_entry_skips_missing_soil_counties():
+    entries = [{"feats": torch.ones(1, 168, baseline_data.N_FEATS), "coords": torch.zeros(1, 2)}]
+    metadata = [{"State": "ohio", "FIPS": "39001", "Year": 2020, "yield_per_acre": 1}]
+    assert baseline_data.build_dataset(entries, metadata, {}) == []
+
+
 def test_baseline_models_consume_the_rebuilt_168_step_shapes():
     weather = torch.zeros(2, PROTOCOL_MAX_STEPS, baseline_data.N_FEATS)
     soil = torch.zeros(2, baseline_data.SOIL_DIM)
@@ -474,3 +489,17 @@ def test_deepcropnet_weekly_features_start_at_protocol_day_zero():
     assert result[0] == sum(range(7))
     assert result[-1] == sum(range(133, 140))
     assert set(deepcropnet.REGIONS) == ALLOWED_STATES
+
+
+def test_baseline_prepare_rejects_old_protocol_cache(tmp_path):
+    path = tmp_path / "baselines_data_val2021_test2022.pt"
+    torch.save({"version": 3}, path)
+    with pytest.raises(ValueError, match="version 4 mismatch"):
+        baseline_data.prepare(out_dir=tmp_path)
+
+
+def test_deepcropnet_prepare_rejects_old_protocol_cache(tmp_path):
+    for split in ("train", "val", "test"):
+        torch.save({"version": 3}, tmp_path / f"{split}_dcn_data_val2021_test2022.pt")
+    with pytest.raises(ValueError, match="version 4 mismatch"):
+        deepcropnet.prepare_dcn(out_dir=tmp_path)
