@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
-import subprocess
+import argparse
 import json
+import subprocess
 from pathlib import Path
 from collections.abc import Iterable, Mapping
+
+from cropnet_protocol import ALLOWED_STATES
 
 OFFICIAL_REPOSITORY = "https://github.com/fudong03/MMST-ViT.git"
 OFFICIAL_REVISION = "615666c8d9fcd704acb662c13065703cbf2eab70"
@@ -60,7 +63,8 @@ def validate_official_records(records: Iterable[Mapping], data_root: Path) -> No
         raise FileNotFoundError("official manifest paths missing:\n" + "\n".join(missing))
 
 
-def write_official_split(path: Path, records: list[Mapping], data_root: Path) -> None:
+def write_official_split(path: Path, records: Iterable[Mapping], data_root: Path) -> None:
+    records = list(records)
     validate_official_records(records, data_root)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(records, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -71,6 +75,13 @@ def write_official_manifests(samples: Iterable[Mapping], output_dir: Path, data_
     from mmst_vit.manifest import split_samples
 
     sample_list = [dict(sample) for sample in samples]
+    for index, sample in enumerate(sample_list):
+        state = str(sample.get("State", "")).strip().lower()
+        if state not in ALLOWED_STATES:
+            raise ValueError(
+                f"sample {index} has unsupported state {sample.get('State')!r}; "
+                f"allowed states: {sorted(ALLOWED_STATES)}"
+            )
     records = {
         (sample["FIPS"], int(sample["Year"])): official_sample_record(
             sample["FIPS"], sample["Year"], sample["State"], sample["County"], data_root
@@ -78,8 +89,41 @@ def write_official_manifests(samples: Iterable[Mapping], output_dir: Path, data_
         for sample in sample_list
     }
     counts = {}
+    split_records_by_name = {}
     for name, split in split_samples(sample_list).items():
         split_records = [records[(row["FIPS"], int(row["Year"]))] for row in split]
+        split_records_by_name[name] = split_records
+        validate_official_records(split_records, data_root)
+    for name, split_records in split_records_by_name.items():
         write_official_split(output_dir / f"{name}.official.no-ia.json", split_records, data_root)
         counts[name] = len(split_records)
     return counts
+
+
+def _read_jsonl(path: Path) -> list[dict]:
+    with path.open(encoding="utf-8") as handle:
+        return [json.loads(line) for line in handle if line.strip()]
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--manifest-dir", type=Path, required=True)
+    parser.add_argument("--data-root", type=Path, required=True)
+    parser.add_argument("--output-dir", type=Path, required=True)
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = _parse_args()
+    samples = []
+    for split in ("train", "val", "test"):
+        path = args.manifest_dir / f"valid-no-ia.{split}.jsonl"
+        if not path.is_file():
+            raise FileNotFoundError(f"manifest file not found: {path}")
+        samples.extend(_read_jsonl(path))
+    counts = write_official_manifests(samples, args.output_dir, args.data_root)
+    print(json.dumps(counts, sort_keys=True))
+
+
+if __name__ == "__main__":
+    main()

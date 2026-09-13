@@ -2,7 +2,7 @@
 
 ## 状态
 
-已完成。MMST-ViT 清单已按项目八州协议重建，排除 Iowa；未训练模型，未修改 Sentinel 原始数据，未删除已有运行产物。
+已完成。MMST-ViT 清单已按项目八州协议重建，排除 Iowa；官方清单现在可通过 CLI 从三份 `valid-no-ia.*.jsonl` 重建；未训练模型，未修改 Sentinel 原始数据，未删除已有运行产物。
 
 ## 变更
 
@@ -16,9 +16,13 @@
   - Sentinel 固定生成 AG 和 NDVI 两类、4--6 月与 7--9 月两个季度，共 4 个路径；NDVI 文件名按运行目录实际格式使用 `Vegetation_*`。
 - `mmst_vit/official.py`
   - 增加逐记录路径收集和写入前文件存在性验证。
-  - 增加从过滤后 JSONL 样本生成 `train/val/test.official.no-ia.json` 的函数。
+  - `write_official_manifests()` 自身校验共享八州 allowlist，非法州抛出 `ValueError`。
+  - 增加 CLI：从指定 manifest 目录读取三份 `valid-no-ia.{train,val,test}.jsonl`，生成 `train/val/test.official.no-ia.json`。
+  - 三个 split 的所有路径在任何 official JSON 写入前统一验证，避免生成部分结果。
+- `mmst_vit/config.py`
+  - `official_sample_record()` 严格拒绝未知或不允许州名。
 - `tests/test_mmst_manifest_protocol.py`
-  - 增加州值过滤、6 个短期 HRRR、60 个长期月度上下文、4 个 Sentinel 路径以及写入前路径验证测试。
+  - 增加州值过滤、严格州名拒绝、6 个短期 HRRR、60 个长期月度上下文、4 个 Sentinel 精确路径集合、写入前路径验证和 CLI 端到端测试。
 
 ## 运行产物
 
@@ -37,15 +41,17 @@
 使用解释器 `/root/miniconda3/envs/hqx/bin/python`：
 
 - TDD RED：初次测试因 `ALLOWED_STATES` 和官方写入函数尚不存在而失败；随后修正 fixture 与路径断言，并实现最小功能。
-- `python -m pytest tests/test_mmst_manifest_protocol.py -q`：`4 passed`。
+- `python -m pytest tests/test_mmst_manifest_protocol.py -q`：`7 passed`。
+- `python -m pytest -q`：`70 passed`，仅有已有的 `pynvml` 弃用警告。
 - `python -m py_compile mmst_vit/manifest.py mmst_vit/config.py mmst_vit/official.py`：通过，退出码 0。
+- CLI 端到端测试仅使用临时目录和最小 fixture，不读取大运行数据。
 - 实际 JSONL 构建：3393 条，其中 train/val/test 为 2227/569/597。
 - 实际官方 JSON 构建：train/val/test 为 2227/569/597。
 - 最终验收：所有 JSONL 解析后州值均属于八州；所有官方记录均有 6 个短期 HRRR、1 个 60 月文件的长期上下文、4 个 Sentinel 路径；逐条路径存在性验证通过。
 
 ## 提交
 
-提交信息：`feat: rebuild MMST-ViT manifests for unified eight-state protocol`
+提交信息：`fix: close MMST-ViT manifest review gaps`
 
 ## Concerns
 

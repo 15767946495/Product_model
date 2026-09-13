@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from cropnet_protocol import ALLOWED_STATES
+
 SHORT_TERM_MONTHS = tuple(range(4, 10))
 LONG_TERM_YEARS = tuple(range(2017, 2022))
 SENTINEL_QUARTERS = (("04-01", "06-30"), ("07-01", "09-30"))
@@ -52,8 +54,10 @@ def official_sample_record(
     """
     fips = str(fips).zfill(5)
     state_ansi, county_ansi = fips[:2], fips[2:]
-    state_name = state.strip().lower()
-    state_abbr = STATE_ABBR.get(state_name, state.upper())
+    state_name = str(state).strip().lower()
+    if state_name not in ALLOWED_STATES:
+        raise ValueError(f"unsupported state for MMST-ViT manifest: {state!r}")
+    state_abbr = STATE_ABBR[state_name]
     weather_files = [
         f"cropnet_dataset/data/weather/{weather_year}/{state_abbr}/HRRR_{state_ansi}_{state_abbr}_{weather_year}-{month:02d}.csv"
         for weather_year in LONG_TERM_YEARS
