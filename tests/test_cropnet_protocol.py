@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "train_dataset"))
 sys.path.insert(0, str(ROOT / "TFT_model"))
 sys.path.insert(0, str(ROOT / "BaseLine_Model"))
+sys.path.insert(0, str(ROOT / "ablation"))
 sys.path.insert(0, str(ROOT))
 
 import cropnet_protocol as shared_protocol  # noqa: E402
@@ -27,6 +28,9 @@ import prepare_grid  # noqa: E402
 from common import data as baseline_data  # noqa: E402
 import data as tft_data  # noqa: E402
 from data import load_grid_cache  # noqa: E402
+import infer as tft_infer  # noqa: E402
+import train as tft_train  # noqa: E402
+import ablation as ablation_launcher  # noqa: E402
 
 
 def test_jsonl_dry_run_reports_protocol_without_writing(tmp_path, capsys, monkeypatch):
@@ -340,3 +344,32 @@ def test_build_entry_returns_none_for_empty_input():
     )
 
     assert prepare_grid.build_entry(empty, prepare_grid.WRF_COLS) is None
+
+
+def test_tft_entry_defaults_use_exact_protocol_states():
+    assert set(tft_train.ALLOWED_STATES) == ALLOWED_STATES
+    assert set(tft_infer.ALLOWED_STATES) == ALLOWED_STATES
+    assert ablation_launcher.STATES is ALLOWED_STATES
+    assert set(tft_train.DEFAULT_DYNAMIC_FEATURE_NAMES) == set(tft_infer.DEFAULT_DYNAMIC_FEATURE_NAMES)
+
+
+def test_constructed_features_use_april_one_as_doy_origin():
+    assert tft_data.hargreaves_pet.__defaults__ == (91,)
+
+
+def test_tft_final_index_is_last_valid_sequence_step():
+    assert tft_train.last_valid_index(torch.tensor([1, 3])).tolist() == [0, 2]
+    assert tft_infer.last_valid_index(torch.tensor([1, 3])).tolist() == [0, 2]
+
+
+def test_infer_cutoff_uses_calendar_fields_from_april_sequence():
+    month = torch.tensor([4] * 28 + [5] * 28)
+    day = torch.tensor(list(range(1, 29)) * 2)
+    assert tft_infer.cutoff_index(month, day, 56, (4, 15)) == 14
+    assert tft_infer.cutoff_index(month, day, 56, (5, 28)) == 55
+
+
+def test_ablation_filters_aligned_pairs_without_shifting_cache_entries():
+    pairs = [({"State": "iowa", "id": 1}, {"id": "iowa"}),
+             ({"State": "ohio", "id": 2}, {"id": "ohio"})]
+    assert ablation_launcher.filter_allowed_pairs(pairs) == [pairs[1]]

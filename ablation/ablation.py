@@ -53,6 +53,7 @@ from data import (
     DEFAULT_GRID_CACHE,
     DEFAULT_COUNTY_SOIL,
 )
+from cropnet_protocol import ALLOWED_STATES
 from train import (
     train_model,
     _split_pairs_by_year,
@@ -65,7 +66,11 @@ MODES = [
     {"name": "mean",       "spatial_mode": "mean",       "desc": "直接网格均值"},
     {"name": "attention",  "spatial_mode": "attention",  "desc": "空间注意力聚合(本文)"},
 ]
-STATES = "minnesota,wisconsin,michigan,iowa,illinois,indiana,ohio,missouri,kentucky"
+STATES = ALLOWED_STATES
+
+
+def filter_allowed_pairs(pairs):
+    return [p for p in pairs if str(p[0].get("State", "")).lower() in STATES]
 
 # 两种模式共用同一套固定超参（非网格搜索）
 HIDDEN_SIZE = 32
@@ -106,8 +111,7 @@ def load_and_build():
     soil_dict = load_county_soil(DEFAULT_COUNTY_SOIL)
     dynamic_feature_names = list(DEFAULT_DYNAMIC_FEATURE_NAMES)
     pairs = list(zip(meta_lines, cache_entries))
-    state_set = {s.strip().lower() for s in STATES.split(",")}
-    pairs = [p for p in pairs if str(p[0].get("State", "")).lower() in state_set]
+    pairs = filter_allowed_pairs(pairs)
 
     train_pairs, val_pairs = _split_pairs_by_year(pairs, [int(VAL_YEAR)])
     train_pairs, _ = filter_valid_label_pairs(train_pairs)

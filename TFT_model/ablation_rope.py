@@ -28,6 +28,13 @@ import sys
 from pathlib import Path
 
 _THIS_DIR = Path(__file__).resolve().parent
+_PROJECT_DIR = _THIS_DIR.parent
+if str(_PROJECT_DIR) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_DIR))
+from cropnet_protocol import ALLOWED_STATES
+
+_DATA_JSONL = _PROJECT_DIR / "train_dataset" / "dataset.jsonl"
+_GRID_CACHE = _PROJECT_DIR / "train_dataset" / "grid_cache.pt"
 
 
 def constructed_combo(i: int) -> dict:
@@ -133,6 +140,9 @@ def run_combo(
                "--early_stop_patience", str(args.early_stop_patience),
                "--batch_size", str(args.batch_size),
                "--lr", str(args.lr),
+               "--states", ",".join(sorted(ALLOWED_STATES)),
+               "--data_jsonl", str(_DATA_JSONL),
+               "--grid_cache", str(_GRID_CACHE),
                "--output_dir", str(combo_dir)]
         if args.constructed:
             cmd.append("--use_constructed")
@@ -152,6 +162,9 @@ def run_combo(
         print("  !! 无 checkpoint,无法推理", flush=True)
         return cn, {"no_checkpoint": True}
     cmd = [sys.executable, "infer.py", "--val_year", args.val_year,
+           "--states", ",".join(sorted(ALLOWED_STATES)),
+           "--data_jsonl", str(_DATA_JSONL),
+           "--grid_cache", str(_GRID_CACHE),
            "--output_dir", str(combo_dir)]
     print(f"[推理] {' '.join(cmd)} GPU={gpu_id or 'default'}", flush=True)
     rc = run(cmd, combo_dir / "infer.log", env=worker_env)

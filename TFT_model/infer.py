@@ -15,7 +15,6 @@ import json
 import math
 import os
 import sys
-from datetime import date as _date
 from pathlib import Path
 from typing import List, Dict, Tuple
 
@@ -48,7 +47,22 @@ from data import (
     GDD_FEATURE_NAME,
     CONSTRUCTED_FEATURES,
 )
+from cropnet_protocol import ALLOWED_STATES
 from error_report import metrics_by_group, prediction_records
+
+
+def last_valid_index(seq_lens: torch.Tensor) -> torch.Tensor:
+    """返回每条序列的最后一个有效位置。"""
+    return (seq_lens - 1).clamp_min(0)
+
+
+def cutoff_index(month: torch.Tensor, day: torch.Tensor, seq_len: int, cutoff: Tuple[int, int]) -> int:
+    """返回序列中不晚于 cutoff 的最后一个协议日位置。"""
+    mm, dd = cutoff
+    valid = torch.ones(seq_len, dtype=torch.bool, device=month.device)
+    valid &= (month[:seq_len] < mm) | ((month[:seq_len] == mm) & (day[:seq_len] <= dd))
+    indices = torch.nonzero(valid, as_tuple=False).flatten()
+    return int(indices[-1].item()) if indices.numel() else -1
 
 
 def infer():
@@ -58,8 +72,8 @@ def infer():
     parser.add_argument("--ckpt", type=str, default=None,
                         help="checkpoint 路径，默认 train_output/val_<val_year>/best_model.pth")
     parser.add_argument("--states", type=str,
-                        default="minnesota,wisconsin,michigan,iowa,illinois,indiana,ohio,missouri,kentucky",
-                        help="按州过滤(逗号分隔的小写全称)。默认 DeepCropNet 9 玉米带州,需与训练一致")
+                        default=",".join(sorted(ALLOWED_STATES)),
+                        help="按州过滤(逗号分隔的小写全称)，范围限定为协议八州")
     parser.add_argument("--grid_cache", type=str, default=None,
                         help="网格级气象缓存路径,默认 train_dataset/grid_cache.pt")
     parser.add_argument("--soil", type=str, default=None,
@@ -69,8 +83,9 @@ def infer():
                         help="输出目录，默认与 checkpoint 同目录")
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--batch_size", type=int, default=32)
-    parser.add_argument("--cutoffs", type=str, default="08-01,08-16,08-31,09-15,09-30,10-15,10-30,11-14,11-30",
-                        help="提前预报节点(MM-DD,逗号分隔)。默认自8月1日起每半个月一个节点直至11月30日")
+    parser.add_argument("--cutoffs", type=str,
+                        default="06-01,06-15,06-28,07-01,07-15,07-28,08-01,08-15,08-28,09-01,09-15,09-28",
+                        help="提前预报节点(MM-DD,逗号分隔)，必须位于协议日期窗口内")
     args = parser.parse_args()
 
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -111,9 +126,9 @@ def infer():
     val_years = [int(y) for y in args.val_year.split(",")]
     val_set = set(val_years)
     pairs = list(zip(meta_lines, cache_entries))
-    if args.states:
-        state_set = {s.strip().lower() for s in args.states.split(",") if s.strip()}
-        pairs = [p for p in pairs if str(p[0].get("State", "")).lower() in state_set]
+    requested_states = {s.strip().lower() for s in args.states.split(",") if s.strip()}
+    state_set = requested_states & ALLOWED_STATES
+    pairs = [p for p in pairs if str(p[0].get("State", "")).lower() in state_set]
     val_pairs = [(m, e) for m, e in pairs if int(m["Year"]) in val_set]
     print(f"    验证样本: {len(val_pairs)}")
 
@@ -220,11 +235,12 @@ def infer():
 
     with torch.no_grad():
         for batch in tqdm(val_loader, desc="Infer"):
-            grid_feats, grid_coords, grid_mask, month_ids, soil_feats, labels, seq_lens, states, years, fips, counties = batch
+            grid_feats, grid_coords, grid_mask, month_ids, day_ids, soil_feats, labels, seq_lens, states, years, fips, counties = batch
             grid_feats = grid_feats.to(device)
             grid_coords = grid_coords.to(device)
             grid_mask = grid_mask.to(device)
             month_ids = month_ids.to(device)
+            day_ids = day_ids.to(device)
             soil_feats = soil_feats.to(device)
             labels = labels.to(device)
             seq_lens = seq_lens.to(device)
@@ -243,19 +259,16 @@ def infer():
             pred_raw = pred_all.squeeze(-1)   # (B, T)
             label_raw = labels.expand(-1, T)  # labels 形状 (B,1) -> (B, T)
 
-            # 逐时间步收集（只取 >=8 月有效步，按 t 索引对齐）
+            # 逐时间步收集协议窗口内的有效步。
             pad_mask = torch.arange(T, device=device).unsqueeze(0) < seq_lens.unsqueeze(1)
-            month_mask = month_ids >= 8
-            valid_mask = pad_mask & month_mask  # (B, T)
+            valid_mask = pad_mask
 
             # 提前预报节点:每节点取"截至该日期前最后一个有效时间步"的预测。
-            # 序列锚定在 11 月 30 日结束,故位置 t 对应日历日 = 11/30 - (seq_len-1-t) 天。
             for b in range(B):
                 sl = int(seq_lens[b].item())
                 yr = int(years[b])
-                end_d = _date(yr, 11, 30)
                 lab = float(label_raw[b, 0].item())
-                final_idx = int((torch.arange(T, device=device) * valid_mask[b]).argmax().item())
+                final_idx = int(last_valid_index(seq_lens[b:b + 1])[0].item())
                 final_states.append(str(states[b]))
                 final_years.append(yr)
                 final_fips.append(str(fips[b]))
@@ -263,8 +276,8 @@ def infer():
                 final_preds.append(float(pred_raw[b, final_idx].item()))
                 final_labels.append(lab)
                 for (mm, dd) in cutoff_list:
-                    t_idx = sl - 1 - (end_d - _date(yr, mm, dd)).days
-                    if 0 <= t_idx < sl:
+                    t_idx = cutoff_index(month_ids[b], day_ids[b], sl, (mm, dd))
+                    if t_idx >= 0:
                         node_preds[(mm, dd)].append(float(pred_raw[b, t_idx].item()))
                         node_labels[(mm, dd)].append(lab)
 
@@ -279,7 +292,7 @@ def infer():
     # ========== 6. 计算逐时间步指标 ==========
     print(f"[6] 计算指标")
     if not step_preds:
-        print("[错误] 无有效时间步（month >= 8）")
+        print("[错误] 无有效协议时间步")
         sys.exit(1)
 
     # 按 t 排序
@@ -381,7 +394,7 @@ def infer():
 
     axes[0].plot(t_axis, rmse_list, color="#d62728", linewidth=1.5, marker=".")
     axes[0].set_ylabel("RMSE")
-    axes[0].set_title(f"Per-timestep Metrics (val_year={args.val_year}, ≥Aug, {steps} steps)")
+    axes[0].set_title(f"Per-timestep Metrics (val_year={args.val_year}, protocol window, {steps} steps)")
     axes[0].grid(True, alpha=0.3)
 
     axes[1].plot(t_axis, r2_list, color="#2ca02c", linewidth=1.5, marker=".")
@@ -391,7 +404,7 @@ def infer():
 
     axes[2].plot(t_axis, corr_list, color="#1f77b4", linewidth=1.5, marker=".")
     axes[2].set_ylabel("Corr (Pearson)")
-    axes[2].set_xlabel("Time Step (sequential, ≥Aug only)")
+    axes[2].set_xlabel("Time Step (sequential, protocol window)")
     axes[2].grid(True, alpha=0.3)
 
     # 标注最后一步数值

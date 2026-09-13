@@ -52,9 +52,15 @@ from data import (
     GDD_FEATURE_NAME,
     CONSTRUCTED_FEATURES,
 )
+from cropnet_protocol import ALLOWED_STATES, PROTOCOL_MAX_STEPS
 
 # ========== 常量 ==========
 EARLY_STOP_PATIENCE: int = 10
+
+
+def last_valid_index(seq_lens: torch.Tensor) -> torch.Tensor:
+    """返回每条序列的最后一个有效位置。"""
+    return (seq_lens - 1).clamp_min(0)
 
 
 # ============================================================
@@ -199,11 +205,12 @@ def train_model(
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs} [Train]")
         for batch in pbar:
             # batch: (grid_feats, grid_coords, grid_mask, month, static_bucket_ids, labels, seq_lens, states, years, fips, counties)
-            grid_feats, grid_coords, grid_mask, month_ids, soil_feats, labels, seq_lens, states, years, _, _ = batch
+            grid_feats, grid_coords, grid_mask, month_ids, day_ids, soil_feats, labels, seq_lens, states, years, _, _ = batch
             grid_feats = grid_feats.to(device)
             grid_coords = grid_coords.to(device)
             grid_mask = grid_mask.to(device)
             month_ids = month_ids.to(device)
+            day_ids = day_ids.to(device)
             soil_feats = soil_feats.to(device)
             labels = labels.to(device)
             seq_lens = seq_lens.to(device)
@@ -218,16 +225,10 @@ def train_model(
                 seq_lens=seq_lens,
             )
 
-            # === 损失：只取 >=8 月的时间步 ===
+            # 每条协议序列只取最后一个有效时间步计算损失。
             B, T, _ = pred_all.shape
-            pad_mask = torch.arange(T, device=device).unsqueeze(0) < seq_lens.unsqueeze(1)  # (B, T)
-            month_mask = month_ids >= 8                                    # (B, T)
-            both_mask = pad_mask & month_mask                              # (B, T)
-
-            # 每个样本只取最后一步有效步（>=8月且非padding）计算损失
-            has_valid = both_mask.any(dim=1)                              # (B,)
-            time_idx = torch.arange(T, device=device).unsqueeze(0)        # (1, T)
-            last_valid_idx = (time_idx * both_mask).argmax(dim=1)         # (B,)
+            has_valid = seq_lens > 0
+            last_valid_idx = last_valid_index(seq_lens)
             pred_last = pred_all[torch.arange(B, device=device), last_valid_idx]  # (B, 1)
             per_sample_mse = (pred_last - labels) ** 2                    # (B, 1)
             per_sample_mse = per_sample_mse * has_valid.unsqueeze(-1).float()  # 无效样本 loss = 0
@@ -259,11 +260,12 @@ def train_model(
             val_pbar = tqdm(val_loader, desc=f"Epoch {epoch+1}/{epochs} [Val]")
             with torch.no_grad():
                 for batch in val_pbar:
-                    grid_feats, grid_coords, grid_mask, month_ids, soil_feats, labels, seq_lens, states, years, _, _ = batch
+                    grid_feats, grid_coords, grid_mask, month_ids, day_ids, soil_feats, labels, seq_lens, states, years, _, _ = batch
                     grid_feats = grid_feats.to(device)
                     grid_coords = grid_coords.to(device)
                     grid_mask = grid_mask.to(device)
                     month_ids = month_ids.to(device)
+                    day_ids = day_ids.to(device)
                     soil_feats = soil_feats.to(device)
                     labels = labels.to(device)
                     seq_lens = seq_lens.to(device)
@@ -276,14 +278,9 @@ def train_model(
                         seq_lens=seq_lens,
                     )
 
-                    # 在每个样本 >=8 月的有效步中，取最后一步作为输出
+                    # 在每个样本的有效序列中取最后一步作为输出。
                     B, T, _ = pred_all.shape
-                    pad_mask = torch.arange(T, device=device).unsqueeze(0) < seq_lens.unsqueeze(1)
-                    month_mask = month_ids >= 8
-                    valid_mask = pad_mask & month_mask                     # (B, T)
-                    time_idx = torch.arange(T, device=device).unsqueeze(0)  # (1, T)
-                    last_valid_idx = torch.where(valid_mask, time_idx, -1).max(dim=1).values  # (B,)
-                    last_valid_idx = last_valid_idx.clamp(min=0)
+                    last_valid_idx = last_valid_index(seq_lens)
                     batch_idx = torch.arange(B, device=device)
                     pred_last = pred_all[batch_idx, last_valid_idx]        # (B, 1)
 
@@ -465,8 +462,8 @@ def main():
     parser.add_argument("--val_year", type=str, default="2022",
                         help="验证年份，可用逗号分隔多个年份，如 '2021,2022'")
     parser.add_argument("--states", type=str,
-                        default="minnesota,wisconsin,michigan,iowa,illinois,indiana,ohio,missouri,kentucky",
-                        help="按州过滤(逗号分隔的小写全称)。默认 DeepCropNet 9 玉米带州")
+                        default=",".join(sorted(ALLOWED_STATES)),
+                        help="按州过滤(逗号分隔的小写全称)，范围限定为协议八州")
     parser.add_argument("--grid_cache", type=str, default=None,
                         help="网格级气象缓存路径,默认 train_dataset/grid_cache.pt")
     parser.add_argument("--soil", type=str, default=None,
@@ -541,11 +538,10 @@ def main():
     soil_dict = load_county_soil(soil_path)
     print(f"    县级土壤: {soil_path} ({len(soil_dict)} 县, 连续 {SOIL_DIM} 维, 不分桶)")
 
-    # 可选的州过滤(对齐论文 MMST-ViT 的 4 州设置:MS/LA/IA/IL)
-    if args.states:
-        state_set = {s.strip().lower() for s in args.states.split(",") if s.strip()}
-        pairs = [p for p in pairs if str(p[0].get("State", "")).lower() in state_set]
-        print(f"  按州过滤 {sorted(state_set)} 后: {len(pairs)} 条")
+    requested_states = {s.strip().lower() for s in args.states.split(",") if s.strip()}
+    state_set = requested_states & ALLOWED_STATES
+    pairs = [p for p in pairs if str(p[0].get("State", "")).lower() in state_set]
+    print(f"  按协议八州过滤 {sorted(state_set)} 后: {len(pairs)} 条")
 
     # 目标 = yield_per_acre(单产, bu/ac),无归一化
     train_pairs, val_pairs = _split_pairs_by_year(pairs, val_years)

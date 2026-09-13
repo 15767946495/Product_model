@@ -2,7 +2,7 @@
 载入 cropnet 数据集（dataset.jsonl），构造 DataLoader。
 
 参考 Product_model/all_product/data.py，根据 cropnet 数据特点适配：
-  - 动态特征：WRF-HRRR 气象 11 维（无 MODIS 遥感）
+  - 动态特征：WRF-HRRR 气象 11 维（无 MODIS 遥感），每条序列最多 168 步
   - 静态特征：carbon_bucket + ph_bucket（来自土壤映射表）
   - 无 crop_phase、无 pred、无 prefix_month
 
@@ -107,12 +107,12 @@ def hargreaves_pet(
     tmax_c: torch.Tensor,
     tmin_c: torch.Tensor,
     lat_deg: torch.Tensor,
-    doy_start: int = 60,
+    doy_start: int = 91,
 ) -> torch.Tensor:
     """Hargreaves 参考蒸散 ET0（mm/day），逐网格逐日。
 
     参数均为 (G, T)：tmean/tmax/tmin 摄氏温度；lat_deg: (G,) 纬度（度）。
-    序列的 DOY 起点仍由调用方传入；本协议的日期范围为 4/1--9/28；
+    序列的 DOY 起点默认为 4 月 1 日（DOY 91）；本协议的日期范围为 4/1--9/28；
     忽略闰年差异（2020 为闰年，逐日太阳几何误差 <1%）。
     返回 (G, T) mm/day。
     """
@@ -141,10 +141,11 @@ def append_constructed_features(
     """在 feats（G,T,F0）末尾按 names 顺序追加构造通道，返回（G,T,F0+K）。
 
     构造通道（逐网格逐日）：
-      CumGDD     = Σ max(0, Tmean−8)           有效热量累积
-      KDD        = Σ max(0, Tmean−30)          极端高温（热害）累积
-      CumPRCP    = Σ max(0, precip)            水分供给累积
-      CumDeficit = CumPRCP − Σ ET0(Hargreaves) 累计水分亏缺（负值=干旱），需 coords 提供纬度
+       CumGDD     = Σ max(0, Tmean−8)           有效热量累积
+       KDD        = Σ max(0, Tmean−30)          极端高温（热害）累积
+       CumPRCP    = Σ max(0, precip)            水分供给累积
+       CumDeficit = CumPRCP − Σ ET0(Hargreaves) 累计水分亏缺（负值=干旱），需 coords 提供纬度
+     累计从序列首日 4 月 1 日开始。
     names 缺省为全部 CONSTRUCTED_FEATURES；只含 CumGDD 时与 append_cum_gdd 等价。
     """
     names = list(names or CONSTRUCTED_FEATURES)
@@ -178,7 +179,7 @@ def dynamic_names_from_hparams(hp, base=None):
 
     hp: model_hparams.json 的内容(dict,可能缺键)。
     use_constructed=True -> 11 原始 + 全部 CONSTRUCTED_FEATURES(15 维);
-    否则 use_gdd=True -> 11 原始 + CumGDD(12 维,旧口径);否则仅 11 原始。
+     否则 use_gdd=True -> 11 原始 + CumGDD(12 维);否则仅 11 原始。
     """
     names = list(base if base is not None else DEFAULT_DYNAMIC_FEATURE_NAMES)
     hp = hp or {}
@@ -840,7 +841,7 @@ def compute_grid_global_stats(
     eps: float = 1e-6,
 ) -> Dict[str, Tuple[torch.Tensor, torch.Tensor]]:
     """
-    在网格级样本对 (meta, entry) 上计算 11 维气象的全局 mean/std。
+    在网格级样本对 (meta, entry) 上计算动态气象特征的全局 mean/std。
     pairs 需已按训练年份过滤(避免验证集泄漏)。
     返回 {"dynamic": (mean (F,), std (F,))} —— 与 compute_global_dynamic_stats 同格式。
     """
@@ -936,6 +937,7 @@ def build_grid_samples(
             "grid_feats": feats,        # (G, T, F) f32
             "grid_coords": entry["coords"],      # (G, 2) f32 [lat, lon]
             "month": entry["month"],             # (T,) long
+            "day": entry["day"],                 # (T,) long
             "soil_feats": soil_vec,              # (7,) f32 连续土壤静态特征
             "yield_per_acre": torch.tensor([float(meta["yield_per_acre"])], dtype=torch.float32),
             "seq_len": int(entry["l_enc"]),
@@ -956,7 +958,7 @@ class GridTimeSeriesDataset(Dataset):
     每个样本一条 (县, 年):
       - grid_feats: (G, T, F) 该县覆盖 G 个 9×9km 网格的气象时序
       - grid_coords: (G, 2) 每个网格的 [lat, lon]
-      - month: (T,) 时间步月份 (4-9)
+       - month: (T,) 时间步月份 (4-9)，每条序列最多 168 步
       - static_bucket_ids: {"carbon_bucket": (1,), "ph_bucket": (1,)}
       - yield_per_acre: (1,) 单产 (bu/ac)
       - seq_len: 有效时间步数
@@ -974,6 +976,7 @@ class GridTimeSeriesDataset(Dataset):
             s["grid_feats"],        # (G, T, F)
             s["grid_coords"],       # (G, 2)
             s["month"],             # (T,)
+            s["day"],               # (T,)
             s["soil_feats"],        # (7,) 连续土壤静态特征
             s["yield_per_acre"],    # (1,)
             s["seq_len"],
@@ -997,7 +1000,7 @@ def make_grid_collate_fn(
     (π/180 转弧度)处理,无需外部统计量。
     返回元组:
       grid_feats (B,Gmax,Tmax,F), grid_coords (B,Gmax,2), grid_mask (B,Gmax) bool,
-      month (B,Tmax) long, soil_feats (B,7), labels (B,1), seq_lens (B,),
+       month/day (B,Tmax) long, soil_feats (B,7), labels (B,1), seq_lens (B,),
       states, years, fips_list, county_list
     """
     mean_d, std_d = global_stats["dynamic"]
@@ -1009,13 +1012,14 @@ def make_grid_collate_fn(
         grid_feats_list = [it[0] for it in batch]
         grid_coords_list = [it[1] for it in batch]
         month_list = [it[2] for it in batch]
-        soil_list = [it[3] for it in batch]
-        labels = [it[4] for it in batch]
-        seq_lens = torch.tensor([int(it[5]) for it in batch], dtype=torch.long)
-        states = [it[6] for it in batch]
-        years = [int(it[7]) for it in batch]
-        fips_list = [it[8] for it in batch]
-        county_list = [it[9] for it in batch]
+        day_list = [it[3] for it in batch]
+        soil_list = [it[4] for it in batch]
+        labels = [it[5] for it in batch]
+        seq_lens = torch.tensor([int(it[6]) for it in batch], dtype=torch.long)
+        states = [it[7] for it in batch]
+        years = [int(it[8]) for it in batch]
+        fips_list = [it[9] for it in batch]
+        county_list = [it[10] for it in batch]
 
         B = len(batch)
         Gmax = max(x.shape[0] for x in grid_feats_list)
@@ -1025,6 +1029,7 @@ def make_grid_collate_fn(
         grid_coords = torch.zeros(B, Gmax, 2, dtype=torch.float32)
         grid_mask = torch.zeros(B, Gmax, dtype=torch.bool)
         month_padded = torch.zeros(B, Tmax, dtype=torch.long)
+        day_padded = torch.zeros(B, Tmax, dtype=torch.long)
 
         for i in range(B):
             gf = _apply_standardize(grid_feats_list[i], mean_d, std_d, eps)  # (G,T,F)
@@ -1033,6 +1038,7 @@ def make_grid_collate_fn(
             grid_coords[i, :g] = grid_coords_list[i]             # 坐标保持原始度数,正余弦编码在模型内处理
             grid_mask[i, :g] = True
             month_padded[i, :t] = month_list[i]
+            day_padded[i, :t] = day_list[i]
 
         # 土壤静态特征标准化 (B, 7),只作静态上下文,不进网格注意力
         soil_feats = torch.stack(
@@ -1045,6 +1051,7 @@ def make_grid_collate_fn(
             grid_coords,     # (B, Gmax, 2)
             grid_mask,       # (B, Gmax) bool
             month_padded,    # (B, Tmax) long
+            day_padded,      # (B, Tmax) long
             soil_feats,      # (B, 7)
             labels,          # (B, 1)
             seq_lens,        # (B,)
