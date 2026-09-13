@@ -40,6 +40,7 @@ from cropnet_protocol import (  # noqa: E402
     ALLOWED_STATES,
     DAYS_PER_MONTH,
     TIME_WINDOW,
+    validate_grid_entry,
 )
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -148,30 +149,11 @@ def _entry_errors(meta_lines, entries):
     for index, (row, entry) in enumerate(zip(meta_lines, entries)):
         prefix = f"entry {index}"
         try:
-            if not isinstance(entry, dict):
-                raise ValueError("entry type must be dict")
-            feats = entry["feats"]
-            month = entry["month"]
-            day = entry["day"]
-            l_enc = int(entry["l_enc"])
-            if not hasattr(feats, "shape") or len(feats.shape) < 2:
-                raise ValueError("feats must have at least 2 dimensions")
-            time_steps = feats.shape[1]
-            if time_steps != PROTOCOL_MAX_STEPS or l_enc != PROTOCOL_MAX_STEPS:
-                raise ValueError("feats and l_enc must have exactly 168 steps")
+            validate_grid_entry(entry, index=index)
             if int(row["l_enc"]) != PROTOCOL_MAX_STEPS:
                 raise ValueError("JSONL l_enc must have exactly 168 steps")
-            for name, values, low, high in (
-                ("month", month, 4, 9), ("day", day, 1, 28)
-            ):
-                if not hasattr(values, "shape") or len(values.shape) != 1:
-                    raise ValueError(f"{name} shape must be 1-dimensional")
-                if values.shape[0] != time_steps:
-                    raise ValueError(f"{name} shape must equal feats.shape[1] (168)")
-                if not bool(((values >= low) & (values <= high)).all()):
-                    raise ValueError(f"{name} values must be within {low}..{high}")
         except (KeyError, TypeError, ValueError, AttributeError, IndexError) as error:
-            errors.append(f"{prefix} invalid: {error}")
+            errors.append(f"{prefix} invalid: {str(error).replace('grid cache ', '')}")
     return errors
 
 

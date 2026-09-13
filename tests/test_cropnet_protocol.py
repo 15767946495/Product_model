@@ -93,8 +93,8 @@ def _valid_grid_entry():
     "mutate, message",
     [
         (lambda entry: entry.pop("month"), "month"),
-        (lambda entry: entry.update(month=torch.zeros(167, dtype=torch.long)), "month shape"),
-        (lambda entry: entry.update(day=torch.zeros(167, dtype=torch.long)), "day shape"),
+        (lambda entry: entry.update(month=torch.zeros(167, dtype=torch.long)), "month (shape|length)"),
+        (lambda entry: entry.update(day=torch.zeros(167, dtype=torch.long)), "day (shape|length)"),
         (lambda entry: entry.update(month=torch.tensor([3] + [4] * 167)), "month values"),
         (lambda entry: entry.update(day=torch.tensor([0] + [1] * 167)), "day values"),
     ],
@@ -367,6 +367,53 @@ def test_infer_cutoff_uses_calendar_fields_from_april_sequence():
     day = torch.tensor(list(range(1, 29)) * 2)
     assert tft_infer.cutoff_index(month, day, 56, (4, 15)) == 14
     assert tft_infer.cutoff_index(month, day, 56, (5, 28)) == 55
+
+
+@pytest.mark.parametrize("cutoffs", ["03-31", "10-01", "09-29"])
+def test_infer_rejects_cutoff_outside_protocol_window(cutoffs):
+    with pytest.raises(ValueError, match=r"protocol window.*04-01.*09-28"):
+        tft_infer.parse_cutoffs(cutoffs)
+
+
+def test_infer_accepts_protocol_end_cutoff():
+    assert tft_infer.parse_cutoffs("09-28") == [(9, 28)]
+
+
+@pytest.mark.parametrize(
+    "mutate, message",
+    [
+        (lambda entry: entry.update(feats=torch.zeros(1, 167, len(prepare_grid.WRF_COLS))), "168"),
+        (lambda entry: entry.update(l_enc=167), "l_enc"),
+        (lambda entry: entry.update(month=torch.zeros(168, 1, dtype=torch.long)), "month shape"),
+        (lambda entry: entry.update(day=torch.zeros(167, dtype=torch.long)), "day (shape|length)"),
+        (lambda entry: entry.update(month=torch.tensor([3] + [4] * 167)), "month values"),
+        (lambda entry: entry.update(day=torch.tensor([29] + [1] * 167)), "day values"),
+    ],
+)
+def test_tft_loader_rejects_corrupt_grid_entry(tmp_path, mutate, message):
+    cache_path = tmp_path / "grid_cache.pt"
+    entry = {
+        "feats": torch.zeros(1, 168, len(prepare_grid.WRF_COLS)),
+        "coords": torch.zeros(1, 2),
+        "month": torch.tensor([4] * 168),
+        "day": torch.tensor([1] * 168),
+        "l_enc": 168,
+    }
+    mutate(entry)
+    torch.save(
+        {
+            "version": 4,
+            "coord_type": "grid_center",
+            "time_window": TIME_WINDOW,
+            "days_per_month": 28,
+            "max_steps": 168,
+            "entries": [entry],
+        },
+        cache_path,
+    )
+
+    with pytest.raises(ValueError, match=message):
+        tft_data.load_grid_cache(str(cache_path))
 
 
 def test_ablation_filters_aligned_pairs_without_shifting_cache_entries():

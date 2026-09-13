@@ -457,7 +457,7 @@ def main():
     parser.add_argument("--epochs", type=int, default=500)
     parser.add_argument("--lr", type=float, default=5e-4)
     parser.add_argument("--batch_size", type=int, default=8,
-                        help="随机采样的 batch 大小(9 州玉米带部分县 G≤134,取 8 防显存溢出)")
+                        help="随机采样的 batch 大小(八州协议部分县 G≤134,取 8 防显存溢出)")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--val_year", type=str, default="2022",
                         help="验证年份，可用逗号分隔多个年份，如 '2021,2022'")

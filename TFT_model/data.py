@@ -36,6 +36,7 @@ from cropnet_protocol import (  # noqa: E402
     PROTOCOL_DAYS_PER_MONTH,
     PROTOCOL_MAX_STEPS,
     TIME_WINDOW,
+    validate_grid_entry,
 )
 
 DEFAULT_DATA_JSONL = os.path.join(TRAIN_DATA_DIR, "dataset.jsonl")
@@ -832,6 +833,11 @@ def load_grid_cache(path: str = DEFAULT_GRID_CACHE) -> Dict:
         raise ValueError("grid_cache days_per_month mismatch")
     if payload.get("max_steps") != PROTOCOL_MAX_STEPS:
         raise ValueError("grid_cache max_steps mismatch")
+    entries = payload.get("entries")
+    if not isinstance(entries, list):
+        raise ValueError("grid_cache entries must be a list")
+    for index, entry in enumerate(entries):
+        validate_grid_entry(entry, index=index)
     return payload
 
 

@@ -47,7 +47,12 @@ from data import (
     GDD_FEATURE_NAME,
     CONSTRUCTED_FEATURES,
 )
-from cropnet_protocol import ALLOWED_STATES
+from cropnet_protocol import (
+    ALLOWED_STATES,
+    PROTOCOL_START_MONTH,
+    PROTOCOL_END_MONTH,
+    PROTOCOL_DAYS_PER_MONTH,
+)
 from error_report import metrics_by_group, prediction_records
 
 
@@ -63,6 +68,34 @@ def cutoff_index(month: torch.Tensor, day: torch.Tensor, seq_len: int, cutoff: T
     valid &= (month[:seq_len] < mm) | ((month[:seq_len] == mm) & (day[:seq_len] <= dd))
     indices = torch.nonzero(valid, as_tuple=False).flatten()
     return int(indices[-1].item()) if indices.numel() else -1
+
+
+def parse_cutoffs(value: str) -> List[Tuple[int, int]]:
+    """Parse cutoff dates and reject dates outside the 4/1--9/28 protocol window."""
+    cutoffs = []
+    for raw in value.split(","):
+        text = raw.strip()
+        if not text:
+            continue
+        try:
+            parts = text.split("-")
+            if len(parts) != 2:
+                raise ValueError
+            mm, dd = (int(part) for part in parts)
+        except ValueError as error:
+            raise ValueError(
+                f"invalid cutoff '{text}'; expected MM-DD within protocol window 04-01--09-28"
+            ) from error
+        if not (
+            PROTOCOL_START_MONTH <= mm <= PROTOCOL_END_MONTH
+            and 1 <= dd <= PROTOCOL_DAYS_PER_MONTH
+            and (mm, dd) <= (PROTOCOL_END_MONTH, PROTOCOL_DAYS_PER_MONTH)
+        ):
+            raise ValueError(
+                f"cutoff '{text}' is outside protocol window 04-01--09-28"
+            )
+        cutoffs.append((mm, dd))
+    return cutoffs
 
 
 def infer():
@@ -94,12 +127,7 @@ def infer():
     os.makedirs(output_dir, exist_ok=True)
 
     # 提前预报节点(MM-DD) -> [(month, day), ...]
-    cutoff_list = []
-    for s in args.cutoffs.split(","):
-        s = s.strip()
-        if s:
-            mm, dd = (int(x) for x in s.split("-"))
-            cutoff_list.append((mm, dd))
+    cutoff_list = parse_cutoffs(args.cutoffs)
 
     ckpt_path = args.ckpt or os.path.join(output_dir, "best_model.pth")
     if not os.path.exists(ckpt_path):
