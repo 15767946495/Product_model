@@ -2,7 +2,7 @@
 GNN-RNN 基线(MMST-ViT 复现,去遥感):县为图节点(kNN 邻接,按县质心距离),
 GCN 一次性聚合邻县天气(einsum 向量化)+ LSTM 学时间依赖,末态 + 土壤 -> 单产。
 
-数据/指标口径与 TFT 一致:DeepCropNet 9 玉米带州,逐日 275 步,
+数据/指标口径与 TFT 一致:DeepCropNet 八州,逐日 168 步,
 训练 <2021,验证 2021,原始单产。图要求全批训练(邻接关系需整图)。
 
 注:训练图(训练县)与验证图(验证县)各自独立建图。
@@ -28,7 +28,7 @@ from common.train import run_training
 
 
 class GNNRNN(nn.Module):
-    """GCN 聚合 + LSTM。输入 (N,275,11) + 归一化邻接 (N,N) + (N,7)。全批训练。"""
+    """GCN 聚合 + LSTM。输入 (N,168,11) + 归一化邻接 (N,N) + (N,7)。全批训练。"""
 
     def __init__(self, hidden=64, soil_dim=D.SOIL_DIM, gnn_hidden=32):
         super().__init__()

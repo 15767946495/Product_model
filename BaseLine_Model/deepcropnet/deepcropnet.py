@@ -3,13 +3,13 @@ DeepCropNet(DCN)基线(Lin et al 2020, ERL):AT-LSTM + MTL 区域输出层。
 
 特征工程(对齐论文, B&H 2015):
   - 逐日县均值 -> GDD_d=max(0,Tmean-8°C), KDD_d=max(0,Tmax-30°C), PRCP=日降水
-  - 从 4 月 1 日起连续 20 周,周累积 x_t=[GDD_t, KDD_t, PRCP_t]
+   - 从 4 月 1 日起连续 20 周,周累积 x_t=[GDD_t, KDD_t, PRCP_t]
   - 输入 z-score(训练集统计);目标 = 原始单产 bu/ac(可 --target anomaly 用趋势残差)
 
 模型:3 层 LSTM(hidden=32)+ 单层 FC 时间注意力(H=Σ a_t·h_t)+ 按论文高温分区的
      3 个区域输出层(北 MN/WI/MI, 中 IA/IL/IN/OH, 南 MO/KY)。
 
-数据/口径与 TFT 一致:DeepCropNet 9 玉米带州,训练 <2021,验证 2021。
+数据/口径与 TFT 一致:DeepCropNet 八州,训练 <2021,验证 2021。
 
 用法:
   python deepcropnet.py                 # 原始单产目标
@@ -37,9 +37,9 @@ OUT_DIR = _ROOT / "output"
 # GDD/KDD 特征工程(B&H 2015;DCN 论文引用)
 IDX_TMAX, IDX_TMIN, IDX_PRCP = 1, 2, 3
 GDD_BASE, KDD_THRESH = 8.0, 30.0     # °C
-START_DAY, N_WEEKS = 31, 20          # 4 月 1 日起 20 周
+START_DAY, N_WEEKS = 0, 20            # 协议序列起点(4 月 1 日)起 20 周
 REGIONS = {"minnesota": 0, "wisconsin": 0, "michigan": 0,
-           "iowa": 1, "illinois": 1, "indiana": 1, "ohio": 1,
+           "illinois": 1, "indiana": 1, "ohio": 1,
            "missouri": 2, "kentucky": 2}
 
 

@@ -1,8 +1,8 @@
 """
 CNN-RNN 基线(MMST-ViT 复现,去遥感):天气 1D CNN(局部时间模式)+ LSTM(长程依赖)+ 土壤。
-输入: 逐日 275 步 × 11 特征(县均值,与 TFT 同粒度)+ 7 维土壤 → 单产 bu/ac。
+输入: 逐日 168 步 × 11 特征(县均值,与 TFT 同粒度)+ 7 维土壤 → 单产 bu/ac。
 
-数据/指标口径与 TFT 一致:DeepCropNet 9 玉米带州,训练 <2021,验证 2021,原始单产。
+数据/指标口径与 TFT 一致:DeepCropNet 八州,训练 <2021,验证 2021,原始单产。
 
 用法:
   python cnn_rnn.py
@@ -26,24 +26,24 @@ from common.train import run_training
 
 
 class CNNRNN(nn.Module):
-    """天气 1D CNN(时间)+ LSTM + 土壤。输入 (B,275,11) + (B,7)。"""
+    """天气 1D CNN(时间)+ LSTM + 土壤。输入 (B,168,11) + (B,7)。"""
 
     def __init__(self, hidden=64, soil_dim=D.SOIL_DIM):
         super().__init__()
         self.conv1 = nn.Conv1d(D.N_FEATS, 32, kernel_size=3, padding=1)
         self.conv2 = nn.Conv1d(32, 64, kernel_size=3, padding=1)
-        self.pool = nn.MaxPool1d(2)          # 275 -> 137 -> 68
+        self.pool = nn.MaxPool1d(2)          # 168 -> 84 -> 42
         self.lstm = nn.LSTM(64, hidden, batch_first=True)
         self.head = nn.Sequential(nn.Linear(hidden + soil_dim, 32), nn.ReLU(),
                                   nn.Linear(32, 1))
 
     def forward(self, weather, soil):
-        x = weather.transpose(1, 2)          # (B,11,275)
+        x = weather.transpose(1, 2)          # (B,11,168)
         x = F.relu(self.conv1(x))
         x = self.pool(x)
         x = F.relu(self.conv2(x))
-        x = self.pool(x)                     # (B,64,68)
-        x = x.transpose(1, 2)                # (B,68,64)
+        x = self.pool(x)                     # (B,64,42)
+        x = x.transpose(1, 2)                # (B,42,64)
         out, _ = self.lstm(x)
         h = out[:, -1]                       # (B,64)
         return self.head(torch.cat([h, soil], dim=-1))

@@ -2,7 +2,7 @@
 BaseLine_Model 共享数据模块。
 
 从 TFT 数据管线(grid_cache.pt + dataset.jsonl + DataSrc 土壤)构建
-DeepCropNet 9 玉米带州的 weather / soil / yield 张量,供
+DeepCropNet 八州的 weather / soil / yield 张量,供
 CNNRNN / ConvLSTM / GNNRNN 三个基线共用。
 
 要点:
@@ -137,7 +137,7 @@ def prepare(val_year: int = 2021, test_year: int = 2022, out_dir=None,
     all_samples = build_dataset(cache["entries"], meta, soil_dict, STATES)
 
     tr, va, te = split_years(all_samples, val_year, test_year)
-    print(f"[数据] 训练 {len(tr)} / 验证 {len(va)} / 测试 {len(te)} (9 玉米带州)")
+    print(f"[数据] 训练 {len(tr)} / 验证 {len(va)} / 测试 {len(te)} (八州)")
 
     def pack(samples):
         W = np.stack([s["weather"] for s in samples])

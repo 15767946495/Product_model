@@ -2,7 +2,7 @@
 ConvLSTM 基线(MMST-ViT 复现,去遥感):县内网格(按经纬度排序)为 1D 空间场,
 ConvLSTM 单元(卷积门控)沿时间推进,末态按有效网格掩码平均 + 土壤 -> 单产。
 
-数据/指标口径与 TFT 一致:DeepCropNet 9 玉米带州,逐日 275 步,网格不截断,
+数据/指标口径与 TFT 一致:DeepCropNet 八州,逐日 168 步,网格不截断,
 训练 <2021,验证 2021,原始单产。
 
 用法:
@@ -45,7 +45,7 @@ class ConvLSTMCell(nn.Module):
 
 
 class ConvLSTM(nn.Module):
-    """输入 (B,G,275,11) + 掩码 (B,G) + (B,7)。"""
+    """输入 (B,G,168,11) + 掩码 (B,G) + (B,7)。"""
 
     def __init__(self, hidden=32, soil_dim=D.SOIL_DIM, kernel=3):
         super().__init__()

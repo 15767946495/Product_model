@@ -3,6 +3,7 @@ import sys
 import hashlib
 import json
 
+import numpy as np
 import pytest
 import torch
 import pandas as pd
@@ -31,6 +32,10 @@ from data import load_grid_cache  # noqa: E402
 import infer as tft_infer  # noqa: E402
 import train as tft_train  # noqa: E402
 import ablation as ablation_launcher  # noqa: E402
+from CNNRNN.cnn_rnn import CNNRNN  # noqa: E402
+from ConvLSTM.convlstm import ConvLSTM  # noqa: E402
+from GNNRNN.gnn_rnn import GNNRNN  # noqa: E402
+from deepcropnet import deepcropnet  # noqa: E402
 
 
 def test_jsonl_dry_run_reports_protocol_without_writing(tmp_path, capsys, monkeypatch):
@@ -420,3 +425,52 @@ def test_ablation_filters_aligned_pairs_without_shifting_cache_entries():
     pairs = [({"State": "iowa", "id": 1}, {"id": "iowa"}),
              ({"State": "ohio", "id": 2}, {"id": "ohio"})]
     assert ablation_launcher.filter_allowed_pairs(pairs) == [pairs[1]]
+
+
+def test_shared_baseline_entry_filters_parsed_states_and_pads_to_protocol_length():
+    entries = [
+        {
+            "feats": torch.ones(1, 160, baseline_data.N_FEATS),
+            "coords": torch.zeros(1, 2),
+        },
+        {
+            "feats": torch.ones(1, 168, baseline_data.N_FEATS),
+            "coords": torch.zeros(1, 2),
+        },
+    ]
+    metadata = [
+        {"State": "ohio", "FIPS": "39001", "Year": 2020, "yield_per_acre": 1},
+        {"State": "iowa", "FIPS": "19001", "Year": 2020, "yield_per_acre": 1},
+    ]
+    soil = {"39001": {feature: 1 for feature in baseline_data.SOIL_FEATURES}}
+
+    samples = baseline_data.build_dataset(entries, metadata, soil)
+
+    assert [sample["state"] for sample in samples] == ["ohio"]
+    assert samples[0]["weather"].shape == (baseline_data.N_STEPS, baseline_data.N_FEATS)
+    assert samples[0]["grid_weather"].shape == (
+        1, baseline_data.N_STEPS, baseline_data.N_FEATS
+    )
+
+
+def test_baseline_models_consume_the_rebuilt_168_step_shapes():
+    weather = torch.zeros(2, PROTOCOL_MAX_STEPS, baseline_data.N_FEATS)
+    soil = torch.zeros(2, baseline_data.SOIL_DIM)
+    assert CNNRNN()(weather, soil).shape == (2, 1)
+    assert GNNRNN()(weather, torch.eye(2), soil).shape == (2, 1)
+
+    grid_weather = torch.zeros(2, 3, PROTOCOL_MAX_STEPS, baseline_data.N_FEATS)
+    grid_mask = torch.ones(2, 3)
+    assert ConvLSTM()(grid_weather, grid_mask, soil).shape == (2, 1)
+
+
+def test_deepcropnet_weekly_features_start_at_protocol_day_zero():
+    daily = np.arange(168, dtype=np.float64)
+
+    result = deepcropnet.weekly_accumulate(daily, deepcropnet.START_DAY, deepcropnet.N_WEEKS)
+
+    assert deepcropnet.START_DAY == 0
+    assert result.shape == (20,)
+    assert result[0] == sum(range(7))
+    assert result[-1] == sum(range(133, 140))
+    assert set(deepcropnet.REGIONS) == ALLOWED_STATES
