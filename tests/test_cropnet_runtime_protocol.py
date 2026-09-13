@@ -134,8 +134,16 @@ def _audit_cache_payload(cache: object, row_count: int, result: dict | None = No
                 values = values.tolist() if hasattr(values, "tolist") else values
                 if not isinstance(values, list) or len(values) != PROTOCOL_MAX_STEPS:
                     result["violations"].append(f"cache entry {index}: {field} is not 168 values")
-                elif any(not low <= value <= high for value in values):
-                    result["violations"].append(f"cache entry {index}: {field} outside {low}..{high}")
+                else:
+                    for value_index, value in enumerate(values):
+                        if not isinstance(value, int) or isinstance(value, bool):
+                            result["violations"].append(
+                                f"cache entry {index}: {field} value {value_index} is not an integer"
+                            )
+                        elif not low <= value <= high:
+                            result["violations"].append(
+                                f"cache entry {index}: {field} value {value_index} outside {low}..{high}"
+                            )
     return result
 
 
@@ -409,6 +417,32 @@ def test_malformed_cache_entries_are_reported_without_raising():
 
     assert len(result["violations"]) == 2
     assert all("cache entry" in violation for violation in result["violations"])
+
+
+def test_cache_calendar_values_require_non_boolean_integers():
+    entry = {
+        "l_enc": 168,
+        "month": [4] * 168,
+        "day": [1] * 168,
+    }
+    invalid_values = ["4", {"month": 4}, 4.0, None, True]
+    for field, value in (("month", invalid_values[0]), ("day", invalid_values[1])):
+        entry[field][0] = value
+        result = _audit_cache_payload(
+            {"version": 4, "max_steps": 168, "time_window": TIME_WINDOW, "entries": [entry]},
+            1,
+        )
+        assert any(f"cache entry 0: {field} value 0 is not an integer" in violation for violation in result["violations"])
+        entry[field][0] = 4 if field == "month" else 1
+
+    for value in invalid_values[2:]:
+        entry["day"][0] = value
+        result = _audit_cache_payload(
+            {"version": 4, "max_steps": 168, "time_window": TIME_WINDOW, "entries": [entry]},
+            1,
+        )
+        assert any("cache entry 0: day value 0 is not an integer" in violation for violation in result["violations"])
+        entry["day"][0] = 1
 
 
 def test_malformed_jsonl_and_official_records_are_structured_and_continue():
