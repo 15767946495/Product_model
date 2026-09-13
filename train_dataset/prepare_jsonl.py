@@ -185,6 +185,12 @@ def _load_soil_map(soil_path):
     return soil_df.set_index("State")[["carbon_bucket", "ph_bucket"]].to_dict("index")
 
 
+def validate_sample_calendar(sample):
+    if sample["l_enc"] != PROTOCOL_MAX_STEPS:
+        raise ValueError("samples must have exactly 168 steps")
+    validate_calendar_fields(sample["month"], sample["day"], sample["l_enc"])
+
+
 def protocol_dry_run():
     return {
         "allowed_states": sorted(ALLOWED_STATES),
@@ -301,7 +307,7 @@ def process_all(output_path=None, data_dir=None, soil_path=None):
             sample["month"] = resampled["month"][:min_len]
             sample["day"] = resampled["day"][:min_len]
             sample["l_enc"] = min_len
-            validate_calendar_fields(sample["month"], sample["day"], min_len)
+            validate_sample_calendar(sample)
 
             all_samples.append(sample)
 

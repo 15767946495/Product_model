@@ -20,6 +20,8 @@ import os
 import json
 import sys
 import argparse
+import hashlib
+import collections
 import numpy as np
 import pandas as pd
 import torch
@@ -56,6 +58,15 @@ def validate_jsonl_states(meta_lines):
     invalid = sorted({str(row.get("State", "")).lower() for row in meta_lines} - ALLOWED_STATES)
     if invalid:
         raise ValueError(f"JSONL contains states outside allowed states: {invalid}")
+
+
+def validate_jsonl_rows(meta_lines):
+    validate_jsonl_states(meta_lines)
+    for index, row in enumerate(meta_lines):
+        try:
+            prepare_jsonl.validate_sample_calendar(row)
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError(f"JSONL line {index} is invalid: {error}") from error
 
 
 def center_coords(row):
@@ -95,6 +106,8 @@ def build_entry(county_df, feats):
     T = len(common)
     if T == 0:
         return None
+    if T != PROTOCOL_MAX_STEPS:
+        raise ValueError("grid entries must have exactly 168 steps")
 
     F = len(feats)
     feats_arr = np.empty((G, T, F), dtype=np.float32)
@@ -115,6 +128,96 @@ def build_entry(county_df, feats):
         "l_enc": int(T),
         "G": int(G),
     }
+
+
+def validate_entries(meta_lines, entries, n_ok, mismatch):
+    n_none = sum(entry is None for entry in entries)
+    if n_none:
+        raise ValueError(f"cache is incomplete: {n_none} None entries")
+    if n_ok != len(meta_lines):
+        raise ValueError(f"cache is incomplete: n_ok={n_ok}, expected {len(meta_lines)}")
+    if mismatch != 0:
+        raise ValueError(f"cache is not aligned: l_enc_mismatch={mismatch}")
+    for index, (row, entry) in enumerate(zip(meta_lines, entries)):
+        if int(row["l_enc"]) != PROTOCOL_MAX_STEPS or int(entry["l_enc"]) != PROTOCOL_MAX_STEPS:
+            raise ValueError(f"cache is not aligned: line {index} must have exactly 168 steps")
+        if entry["feats"].shape[1] != PROTOCOL_MAX_STEPS:
+            raise ValueError(f"cache is not aligned: line {index} feature length is not 168")
+
+
+def _sha256(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def audit_artifacts(jsonl_path, cache_path, report_path=None):
+    rows = [json.loads(line) for line in open(jsonl_path, encoding="utf-8") if line.strip()]
+    cache = torch.load(cache_path, map_location="cpu", weights_only=False)
+    years = collections.Counter(int(row.get("Year", 0)) for row in rows)
+    states = collections.Counter(str(row.get("State", "")).lower() for row in rows)
+    lengths = collections.Counter(int(row.get("l_enc", -1)) for row in rows)
+    jsonl_errors = []
+    for index, row in enumerate(rows, 1):
+        try:
+            if str(row["State"]).lower() not in ALLOWED_STATES:
+                raise ValueError("state outside allowlist")
+            prepare_jsonl.validate_sample_calendar(row)
+        except (KeyError, TypeError, ValueError) as error:
+            jsonl_errors.append(f"row {index}: {error}")
+    entries = cache.get("entries", [])
+    n_none = sum(entry is None for entry in entries)
+    alignment = {
+        "entries_equal_rows": len(entries) == len(rows),
+        "entry_l_enc_equal_row": True,
+        "entry_shapes_valid": True,
+    }
+    for row, entry in zip(rows, entries):
+        if entry is None:
+            alignment["entry_shapes_valid"] = False
+            continue
+        if entry.get("l_enc") != row.get("l_enc"):
+            alignment["entry_l_enc_equal_row"] = False
+        if entry["feats"].shape[1] != PROTOCOL_MAX_STEPS:
+            alignment["entry_shapes_valid"] = False
+    errors = list(jsonl_errors)
+    errors.extend(
+        f"alignment: {name} assertion failed"
+        for name, passed in alignment.items()
+        if not passed
+    )
+    assertions = {
+        "states_allowed": not (set(states) - ALLOWED_STATES),
+        "calendar_valid": not jsonl_errors,
+        "cache_version": cache.get("version") == 4,
+        "cache_time_window": cache.get("time_window") == TIME_WINDOW,
+        "cache_max_steps": cache.get("max_steps") == PROTOCOL_MAX_STEPS,
+        "no_none_entries": n_none == 0,
+        **alignment,
+    }
+    errors.extend(
+        f"cache: {name} assertion failed"
+        for name, passed in assertions.items()
+        if not passed and f"alignment: {name} assertion failed" not in errors
+    )
+    result = {
+        "assertions": assertions,
+        "errors": errors,
+        "error_count": len(errors),
+        "rows": len(rows),
+        "n_none": n_none,
+        "years": dict(sorted(years.items())),
+        "states": dict(sorted(states.items())),
+        "l_enc": dict(sorted(lengths.items())),
+        "alignment": alignment,
+        "sha256": {"jsonl": _sha256(jsonl_path), "cache": _sha256(cache_path)},
+    }
+    if report_path:
+        with open(report_path, "w", encoding="utf-8") as stream:
+            json.dump(result, stream, ensure_ascii=False, indent=2)
+    return result
 
 
 def process(jsonl_path=None, out_path=None, meta_path=None, data_dir=None):
@@ -141,7 +244,7 @@ def process(jsonl_path=None, out_path=None, meta_path=None, data_dir=None):
             line = line.strip()
             if line:
                 meta_lines.append(json.loads(line))
-    validate_jsonl_states(meta_lines)
+    validate_jsonl_rows(meta_lines)
     print(f"  jsonl 行数: {len(meta_lines)}")
 
     # ---- 2. 按 (year, state_abbr) 分组,逐组加载气象 ----
@@ -181,9 +284,11 @@ def process(jsonl_path=None, out_path=None, meta_path=None, data_dir=None):
         if e is not None and e["l_enc"] != int(meta_lines[i]["l_enc"])
     )
     print(f"  有效样本: {n_ok}/{len(meta_lines)}")
+    print(f"  与 jsonl l_enc 不一致条数: {mismatch}")
+
+    validate_entries(meta_lines, entries, n_ok, mismatch)
     print(f"  G: min={min(gs)} median={_median(gs)} max={max(gs)}")
     print(f"  T: min={min(ts)} median={_median(ts)} max={max(ts)}")
-    print(f"  与 jsonl l_enc 不一致条数: {mismatch}")
 
     payload = {
         "version": 4,

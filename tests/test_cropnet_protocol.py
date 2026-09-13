@@ -1,5 +1,7 @@
 from pathlib import Path
 import sys
+import hashlib
+import json
 
 import pytest
 import torch
@@ -33,12 +35,12 @@ def test_jsonl_dry_run_reports_protocol_without_writing(tmp_path, capsys, monkey
 
     prepare_jsonl.main(["--dry-run"])
 
-    captured = capsys.readouterr().out
-    assert '"allowed_states": [' in captured
-    assert '"start_month": 4' in captured
-    assert '"end_month": 9' in captured
-    assert '"days_per_month": 28' in captured
-    assert '"max_steps": 168' in captured
+    protocol = json.loads(capsys.readouterr().out)
+    assert set(protocol["allowed_states"]) == ALLOWED_STATES
+    assert protocol["start_month"] == 4
+    assert protocol["end_month"] == 9
+    assert protocol["days_per_month"] == 28
+    assert protocol["max_steps"] == 168
     assert not output.exists()
 
 
@@ -58,6 +60,50 @@ def test_soil_loader_skips_non_state_mapping(tmp_path, capsys):
 
     assert prepare_jsonl._load_soil_map(str(soil_path)) == {}
     assert "州级土壤映射字段不完整" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("length", [0, 167, 169])
+def test_jsonl_calendar_requires_exactly_168_steps(length):
+    with pytest.raises(ValueError, match="exactly 168|at most 168"):
+        prepare_jsonl.validate_sample_calendar(
+            {"month": [4] * length, "day": [1] * length, "l_enc": length}
+        )
+
+
+@pytest.mark.parametrize("entries,n_ok,mismatch", [([None], 0, 0), ([{}], 0, 0), ([{}], 1, 1)])
+def test_grid_validation_rejects_incomplete_cache_before_saving(entries, n_ok, mismatch):
+    with pytest.raises(ValueError, match="incomplete|aligned"):
+        prepare_grid.validate_entries([{"l_enc": 168}], entries, n_ok, mismatch)
+
+
+def test_grid_build_entry_rejects_non_168_steps():
+    dates = pd.date_range("2020-04-01", periods=167, freq="D")
+    frame = pd.DataFrame(
+        {
+            "Grid Index": [1] * len(dates), "date": dates,
+            "Lat (llcrnr)": [40.0] * len(dates), "Lat (urcrnr)": [41.0] * len(dates),
+            "Lon (llcrnr)": [-90.0] * len(dates), "Lon (urcrnr)": [-89.0] * len(dates),
+            **{feature: [1.0] * len(dates) for feature in prepare_grid.WRF_COLS},
+        }
+    )
+    with pytest.raises(ValueError, match="exactly 168"):
+        prepare_grid.build_entry(frame, prepare_grid.WRF_COLS)
+
+
+def test_runtime_artifacts_regression_if_present():
+    root = Path(__import__("os").environ.get(
+        "CROPNET_RUNTIME_TRAIN_DATASET", "/data/raid0/hqx/Product_model_runtime/train_dataset"
+    ))
+    required = [root / "dataset.jsonl", root / "grid_cache.pt", root / "grid_cache_meta.json"]
+    if not all(path.exists() for path in required):
+        pytest.skip("运行时产物不存在")
+    result = prepare_grid.audit_artifacts(str(required[0]), str(required[1]))
+    assert result["error_count"] == 0
+    assert result["errors"] == []
+    assert result["n_none"] == 0
+    assert result["alignment"]["entries_equal_rows"] is True
+    assert result["sha256"]["jsonl"] == hashlib.sha256(required[0].read_bytes()).hexdigest()
+    assert result["sha256"]["cache"] == hashlib.sha256(required[1].read_bytes()).hexdigest()
 
 
 def test_shared_protocol_values():
@@ -204,6 +250,13 @@ def test_grid_input_accepts_multiple_allowed_states():
     ]
 
     prepare_grid.validate_jsonl_states(rows)
+
+
+def test_grid_input_rejects_non_168_length():
+    row = {"State": "minnesota", "month": [4] * 167, "day": [1] * 167, "l_enc": 167}
+
+    with pytest.raises(ValueError, match="exactly 168"):
+        prepare_grid.validate_jsonl_rows([row])
 
 
 def test_build_entry_aligns_calendar_fields_with_features_and_caps_at_168():
