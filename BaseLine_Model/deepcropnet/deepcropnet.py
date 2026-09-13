@@ -7,7 +7,7 @@ DeepCropNet(DCN)基线(Lin et al 2020, ERL):AT-LSTM + MTL 区域输出层。
   - 输入 z-score(训练集统计);目标 = 原始单产 bu/ac(可 --target anomaly 用趋势残差)
 
 模型:3 层 LSTM(hidden=32)+ 单层 FC 时间注意力(H=Σ a_t·h_t)+ 按论文高温分区的
-     3 个区域输出层(北 MN/WI/MI, 中 IA/IL/IN/OH, 南 MO/KY)。
+     3 个区域输出层(北 MN/WI/MI, 中 IL/IN/OH, 南 MO/KY)。
 
 数据/口径与 TFT 一致:DeepCropNet 八州,训练 <2021,验证 2021。
 
