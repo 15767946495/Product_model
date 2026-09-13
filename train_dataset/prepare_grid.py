@@ -138,11 +138,41 @@ def validate_entries(meta_lines, entries, n_ok, mismatch):
         raise ValueError(f"cache is incomplete: n_ok={n_ok}, expected {len(meta_lines)}")
     if mismatch != 0:
         raise ValueError(f"cache is not aligned: l_enc_mismatch={mismatch}")
+    errors = _entry_errors(meta_lines, entries)
+    if errors:
+        raise ValueError(errors[0])
+
+
+def _entry_errors(meta_lines, entries):
+    errors = []
     for index, (row, entry) in enumerate(zip(meta_lines, entries)):
-        if int(row["l_enc"]) != PROTOCOL_MAX_STEPS or int(entry["l_enc"]) != PROTOCOL_MAX_STEPS:
-            raise ValueError(f"cache is not aligned: line {index} must have exactly 168 steps")
-        if entry["feats"].shape[1] != PROTOCOL_MAX_STEPS:
-            raise ValueError(f"cache is not aligned: line {index} feature length is not 168")
+        prefix = f"entry {index}"
+        try:
+            if not isinstance(entry, dict):
+                raise ValueError("entry type must be dict")
+            feats = entry["feats"]
+            month = entry["month"]
+            day = entry["day"]
+            l_enc = int(entry["l_enc"])
+            if not hasattr(feats, "shape") or len(feats.shape) < 2:
+                raise ValueError("feats must have at least 2 dimensions")
+            time_steps = feats.shape[1]
+            if time_steps != PROTOCOL_MAX_STEPS or l_enc != PROTOCOL_MAX_STEPS:
+                raise ValueError("feats and l_enc must have exactly 168 steps")
+            if int(row["l_enc"]) != PROTOCOL_MAX_STEPS:
+                raise ValueError("JSONL l_enc must have exactly 168 steps")
+            for name, values, low, high in (
+                ("month", month, 4, 9), ("day", day, 1, 28)
+            ):
+                if not hasattr(values, "shape") or len(values.shape) != 1:
+                    raise ValueError(f"{name} shape must be 1-dimensional")
+                if values.shape[0] != time_steps:
+                    raise ValueError(f"{name} shape must equal feats.shape[1] (168)")
+                if not bool(((values >= low) & (values <= high)).all()):
+                    raise ValueError(f"{name} values must be within {low}..{high}")
+        except (KeyError, TypeError, ValueError, AttributeError, IndexError) as error:
+            errors.append(f"{prefix} invalid: {error}")
+    return errors
 
 
 def _sha256(path):
@@ -178,11 +208,17 @@ def audit_artifacts(jsonl_path, cache_path, report_path=None):
         if entry is None:
             alignment["entry_shapes_valid"] = False
             continue
+        if not isinstance(entry, dict):
+            alignment["entry_shapes_valid"] = False
+            continue
         if entry.get("l_enc") != row.get("l_enc"):
             alignment["entry_l_enc_equal_row"] = False
-        if entry["feats"].shape[1] != PROTOCOL_MAX_STEPS:
+        feats = entry.get("feats")
+        if not hasattr(feats, "shape") or len(feats.shape) < 2 or feats.shape[1] != PROTOCOL_MAX_STEPS:
             alignment["entry_shapes_valid"] = False
     errors = list(jsonl_errors)
+    entry_errors = _entry_errors(rows, entries)
+    errors.extend(entry_errors)
     errors.extend(
         f"alignment: {name} assertion failed"
         for name, passed in alignment.items()
@@ -195,6 +231,7 @@ def audit_artifacts(jsonl_path, cache_path, report_path=None):
         "cache_time_window": cache.get("time_window") == TIME_WINDOW,
         "cache_max_steps": cache.get("max_steps") == PROTOCOL_MAX_STEPS,
         "no_none_entries": n_none == 0,
+        "entry_calendar_valid": not entry_errors,
         **alignment,
     }
     errors.extend(

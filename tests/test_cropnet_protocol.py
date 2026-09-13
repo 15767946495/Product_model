@@ -76,6 +76,55 @@ def test_grid_validation_rejects_incomplete_cache_before_saving(entries, n_ok, m
         prepare_grid.validate_entries([{"l_enc": 168}], entries, n_ok, mismatch)
 
 
+def _valid_grid_entry():
+    return {
+        "feats": torch.zeros(1, 168, len(prepare_grid.WRF_COLS)),
+        "month": torch.tensor([4] * 168),
+        "day": torch.tensor([1] * 168),
+        "l_enc": 168,
+    }
+
+
+@pytest.mark.parametrize(
+    "mutate, message",
+    [
+        (lambda entry: entry.pop("month"), "month"),
+        (lambda entry: entry.update(month=torch.zeros(167, dtype=torch.long)), "month shape"),
+        (lambda entry: entry.update(day=torch.zeros(167, dtype=torch.long)), "day shape"),
+        (lambda entry: entry.update(month=torch.tensor([3] + [4] * 167)), "month values"),
+        (lambda entry: entry.update(day=torch.tensor([0] + [1] * 167)), "day values"),
+    ],
+)
+def test_grid_validation_rejects_corrupt_calendar_fields(mutate, message):
+    entry = _valid_grid_entry()
+    mutate(entry)
+
+    with pytest.raises(ValueError, match=message):
+        prepare_grid.validate_entries([{"l_enc": 168}], [entry], 1, 0)
+
+
+@pytest.mark.parametrize("entry", ["not-an-entry", 3, {"feats": torch.zeros(1, 168, 1)}])
+def test_grid_validation_rejects_bad_entry_type_or_fields(entry):
+    with pytest.raises(ValueError, match="entry 0|entry type|month"):
+        prepare_grid.validate_entries([{"l_enc": 168}], [entry], 1, 0)
+
+
+def test_grid_audit_reports_corrupt_entry_calendar(tmp_path):
+    jsonl = tmp_path / "dataset.jsonl"
+    cache = tmp_path / "cache.pt"
+    row = {"State": "minnesota", "Year": 2020, "FIPS": "27001", "month": [4] * 168, "day": [1] * 168, "l_enc": 168}
+    jsonl.write_text(json.dumps(row) + "\n", encoding="utf-8")
+    entry = _valid_grid_entry()
+    entry["month"][0] = 3
+    torch.save({"version": 4, "time_window": TIME_WINDOW, "max_steps": 168, "entries": [entry]}, cache)
+
+    result = prepare_grid.audit_artifacts(str(jsonl), str(cache))
+
+    assert result["error_count"] > 0
+    assert result["assertions"]["entry_calendar_valid"] is False
+    assert any("entry 0" in error for error in result["errors"])
+
+
 def test_grid_build_entry_rejects_non_168_steps():
     dates = pd.date_range("2020-04-01", periods=167, freq="D")
     frame = pd.DataFrame(
