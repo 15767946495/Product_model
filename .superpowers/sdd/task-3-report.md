@@ -31,11 +31,12 @@
 - 已对 12 个实际涉及的季度 HDF5 文件记录 SHA256
 - AG 日期：`04-01, 04-15, 05-01, 05-15, 06-01, 06-15, 07-01, 07-15, 08-01, 08-15, 09-01, 09-15`
 - 审计逐样本记录输入元数据和 HDF5 结构错误；无效样本不写入 split manifest。
+- `ag_integrity.json` 的 `split_counts` 分别记录每个协议 split 的 `input_count`、`valid_manifest_count` 和 `invalid_count`；不具备合法年份的输入另计入 `invalid_split_count`。
 
 ## 验证
 
-- `/root/miniconda3/envs/hqx/bin/python -m pytest tests/test_tft_ag_data.py -q`: 修复后 58 passed
-- `/root/miniconda3/envs/hqx/bin/python -m pytest -q`: 修复后 161 passed
+- `/root/miniconda3/envs/hqx/bin/python -m pytest tests/test_tft_ag_data.py -q`: 修复后 59 passed
+- `/root/miniconda3/envs/hqx/bin/python -m pytest -q`: 修复后 162 passed
 - `/root/miniconda3/envs/hqx/bin/python -m py_compile tools/audit_tft_ag_data.py mmst_vit/config.py mmst_vit/manifest.py TFT_model/data.py tests/test_tft_ag_data.py`: 通过
 - 真实 CLI 扫描完成并生成上述 manifest/audit/protocol 文件
 - 本次修复补充了共享 AG 日期组解析、重复日期和错误年份拒绝、输入级非法样本逐条记录、严格 AG 年份校验，以及单次审计结果复用。

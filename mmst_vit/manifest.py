@@ -150,8 +150,10 @@ def split_samples(samples: Sequence[dict]) -> dict[str, list[dict]]:
 def five_state_shared_rows(rows: Sequence[dict]) -> list[dict]:
     """Filter a shared bundle to the five-state protocol without mutating it."""
     return [
-        dict(row) for row in rows
-        if str(row.get("State", "")).strip().lower() in CROPNET_FIVE_STATES
+        dict(row) if isinstance(row, dict) else row
+        for row in rows
+        if not isinstance(row, dict)
+        or str(row.get("State", "")).strip().lower() in CROPNET_FIVE_STATES
     ]
 
 

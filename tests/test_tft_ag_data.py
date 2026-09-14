@@ -473,3 +473,23 @@ def test_manifest_generation_uses_one_audit_result_per_input_sample(ag_fixture, 
     monkeypatch.setattr(audit_module, "_audit_one", wrapped)
     build_tft_ag_manifest([sample], root, tmp_path / "runtime")
     assert calls == [0]
+
+
+def test_manifest_records_non_dict_shared_rows_and_reports_split_input_counts(ag_fixture, tmp_path):
+    root, sample = ag_fixture
+    output = tmp_path / "runtime"
+    result = build_tft_ag_manifest([None, ["bad"], sample], root, output)
+
+    assert result == {"train": 1, "val": 0, "test": 0}
+    train_rows = (output / "manifests" / "train.jsonl").read_text().splitlines()
+    assert len(train_rows) == 1
+    audit = json.loads((output / "audit" / "ag_integrity.json").read_text())
+    assert audit["valid_count"] == 1
+    assert audit["invalid_count"] == 2
+    assert audit["split_counts"] == {
+        "train": {"input_count": 1, "valid_manifest_count": 1, "invalid_count": 0},
+        "val": {"input_count": 0, "valid_manifest_count": 0, "invalid_count": 0},
+        "test": {"input_count": 0, "valid_manifest_count": 0, "invalid_count": 0},
+    }
+    assert len(audit["invalid_samples"]) == 2
+    assert audit["invalid_split_count"] == 2

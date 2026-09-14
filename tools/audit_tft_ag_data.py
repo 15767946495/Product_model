@@ -97,9 +97,11 @@ def _audit_ag_samples_with_results(samples, ag_root) -> tuple[dict, list]:
         "train": (2017, 2018, 2019, 2020), "val": (2021,), "test": (2022,)
     }.items() for year in years}
     split_state_year = Counter()
+    split_counts = Counter()
+    invalid_split_count = 0
     for index, sample in enumerate(samples):
-        if not isinstance(sample, dict):
-            sample = {}
+        original_sample = sample
+        sample = sample if isinstance(sample, dict) else {}
         state = str(sample.get("State", "")).strip().lower()
         year = sample.get("Year")
         states[state] += 1
@@ -107,6 +109,10 @@ def _audit_ag_samples_with_results(samples, ag_root) -> tuple[dict, list]:
         ok, paths, error = _audit_one(sample, root, index, cache)
         split = split_by_year.get(year, "unknown") if isinstance(year, int) else "unknown"
         split_state_year[(split, state, str(year), "valid" if ok else "invalid")] += 1
+        split_counts[(split, "input")] += 1
+        split_counts[(split, "valid" if ok else "invalid")] += 1
+        if split == "unknown":
+            invalid_split_count += 1
         results.append((ok, paths, error))
         for path in paths:
             if path.is_file() and str(path) not in file_hashes:
@@ -118,6 +124,7 @@ def _audit_ag_samples_with_results(samples, ag_root) -> tuple[dict, list]:
             reasons[reason.split(": ", 1)[-1]] += 1
             invalid_samples.append({
                 "FIPS": sample.get("FIPS"), "Year": year, "State": state,
+                "raw_type": type(original_sample).__name__,
                 "paths": [str(path) for path in paths], "error": reason,
             })
     audit = {
@@ -130,6 +137,15 @@ def _audit_ag_samples_with_results(samples, ag_root) -> tuple[dict, list]:
         "split_state_year_counts": {
             "/".join(key): value for key, value in sorted(split_state_year.items())
         },
+        "split_counts": {
+            split: {
+                "input_count": split_counts[(split, "input")],
+                "valid_manifest_count": split_counts[(split, "valid")],
+                "invalid_count": split_counts[(split, "invalid")],
+            }
+            for split in ("train", "val", "test")
+        },
+        "invalid_split_count": invalid_split_count,
     }
     return audit, results
 
@@ -165,7 +181,6 @@ def build_tft_ag_manifest(shared_rows, ag_root, output_dir) -> dict[str, int]:
                 valid_rows.append(row)
         write_jsonl(manifest_dir / f"{split}.jsonl", valid_rows)
         counts[split] = len(valid_rows)
-    audit["split_counts"] = counts
     audit_dir.mkdir(parents=True, exist_ok=True)
     (audit_dir / "ag_integrity.json").write_text(json.dumps(audit, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return counts
@@ -184,12 +199,14 @@ def main() -> None:
     with args.shared_jsonl.open(encoding="utf-8") as handle:
         rows = [json.loads(line) for line in handle if line.strip()]
     counts = build_tft_ag_manifest(rows, args.ag_root, args.output_dir)
+    audit = json.loads((args.output_dir / "audit" / "ag_integrity.json").read_text(encoding="utf-8"))
     protocol = {
         "states": sorted(CROPNET_FIVE_STATES),
         "split": {"train": [2017, 2018, 2019, 2020], "val": [2021], "test": [2022]},
         "modality": "AG-only", "ag_dates": AG_DATES, "ag_path_count": 2,
         "source_shared_jsonl": str(args.shared_jsonl), "ag_root": str(args.ag_root),
         "manifest_counts": counts,
+        "split_counts": audit["split_counts"],
     }
     audit_dir = args.output_dir / "audit"
     audit_dir.mkdir(parents=True, exist_ok=True)
