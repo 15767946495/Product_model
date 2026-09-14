@@ -112,7 +112,8 @@ def build_ag_paths(sample: Dict, ag_root: str | Path) -> list[Path]:
     if not isinstance(sample, dict):
         raise ValueError("sample must be a dict")
     _reject_non_ag_paths(sample, 0)
-    fips = str(sample.get("FIPS", "")).strip().zfill(5)
+    raw_fips = sample.get("FIPS", "")
+    fips = str(raw_fips).strip()
     if len(fips) != 5 or not fips.isdigit():
         raise ValueError(f"invalid FIPS in sample: {sample.get('FIPS')!r}")
     try:
@@ -124,6 +125,13 @@ def build_ag_paths(sample: Dict, ag_root: str | Path) -> list[Path]:
     if state_abbr is None:
         raise ValueError(f"unsupported AG state: {sample.get('State')!r}")
     state_ansi = fips[:2]
+    expected_state_ansi = {
+        "IL": "17", "IA": "19", "LA": "22", "MS": "28", "NY": "36"
+    }[state_abbr]
+    if state_ansi != expected_state_ansi:
+        raise ValueError(
+            f"FIPS {fips} does not match state {state!r} (expected {expected_state_ansi})"
+        )
     root = Path(ag_root)
     return [
         root / "data" / "AG" / str(year) / state_abbr /
@@ -142,6 +150,22 @@ def select_ag_dates(group) -> list[str]:
             f"AG date groups mismatch; missing={missing}, unexpected={unexpected}"
         )
     return list(AG_DATES)
+
+
+def _ag_date_names(group, dates):
+    names = list(group.keys())
+    mapping = {}
+    for name in names:
+        suffix = str(name)[-5:]
+        if suffix in dates:
+            if suffix in mapping:
+                raise ValueError(f"duplicate AG date group for {suffix}")
+            mapping[suffix] = name
+    missing = [date for date in dates if date not in mapping]
+    unexpected = sorted(set(names) - set(mapping.values()))
+    if missing or unexpected:
+        raise ValueError(f"AG date groups mismatch; missing={missing}, unexpected={unexpected}")
+    return mapping
 
 
 def _sample_ag_dates(paths, sample, context):
@@ -214,18 +238,9 @@ class AgricultureImageDataset(Dataset):
                     if fips not in handle:
                         raise ValueError(f"{context}: missing FIPS group {fips}")
                     county = handle[fips]
-                    actual_dates = set(county.keys())
-                    expected_dates = set(dates)
-                    if actual_dates != expected_dates:
-                        raise ValueError(
-                            f"{context}: date groups mismatch; "
-                            f"missing={sorted(expected_dates - actual_dates)}, "
-                            f"unexpected={sorted(actual_dates - expected_dates)}"
-                        )
+                    date_names = _ag_date_names(county, dates)
                     for date in dates:
-                        if date not in county:
-                            raise ValueError(f"{context}: missing date group {date}")
-                        date_group = county[date]
+                        date_group = county[date_names[date]]
                         if "data" not in date_group:
                             raise ValueError(f"{context}: missing data dataset at {date}")
                         dataset = date_group["data"]
@@ -259,18 +274,9 @@ class AgricultureImageDataset(Dataset):
                     if fips not in handle:
                         raise ValueError(f"{context}: missing FIPS group {fips}")
                     county = handle[fips]
-                    actual_dates = set(county.keys())
-                    expected_dates = set(dates)
-                    if actual_dates != expected_dates:
-                        raise ValueError(
-                            f"{context}: date groups mismatch; "
-                            f"missing={sorted(expected_dates - actual_dates)}, "
-                            f"unexpected={sorted(actual_dates - expected_dates)}"
-                        )
+                    date_names = _ag_date_names(county, dates)
                     for date in dates:
-                        if date not in county:
-                            raise ValueError(f"{context}: missing date group {date}")
-                        date_group = county[date]
+                        date_group = county[date_names[date]]
                         if "data" not in date_group:
                             raise ValueError(f"{context}: missing data dataset at {date}")
                         dataset = date_group["data"]

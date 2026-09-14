@@ -5,6 +5,7 @@ import h5py
 import numpy as np
 import pytest
 import torch
+import json
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -19,6 +20,7 @@ from data import (  # noqa: E402
     validate_five_state_sample,
 )
 import data as data_module  # noqa: E402
+from tools.audit_tft_ag_data import audit_ag_samples, build_tft_ag_manifest  # noqa: E402
 
 
 AG_DATES = [
@@ -320,3 +322,39 @@ def test_five_state_constant_contains_only_required_states():
         "mississippi",
         "new york",
     }
+
+
+def test_build_tft_ag_manifest_writes_only_valid_ag_rows(ag_fixture, tmp_path):
+    root, sample = ag_fixture
+    invalid = dict(sample, FIPS="17003")
+
+    result = build_tft_ag_manifest([sample, invalid], root, tmp_path / "runtime")
+
+    assert sum(result.values()) == 1
+    train_rows = [
+        json.loads(line)
+        for line in (tmp_path / "runtime" / "manifests" / "train.jsonl").read_text().splitlines()
+        if line
+    ]
+    assert len(train_rows) == 1
+    assert len(train_rows[0]["ag_paths"]) == 2
+    assert all("NDVI" not in path and "Vegetation" not in path for path in train_rows[0]["ag_paths"])
+
+    audit = json.loads((tmp_path / "runtime" / "audit" / "ag_integrity.json").read_text())
+    assert audit["valid_count"] == 1
+    assert audit["invalid_count"] == 1
+    assert audit["invalid_samples"][0]["FIPS"] == "17003"
+    assert audit["invalid_samples"][0]["paths"]
+
+
+def test_audit_ag_samples_reports_invalid_hdf5_structure(ag_fixture):
+    root, sample = ag_fixture
+    path = build_ag_paths(sample, root)[0]
+    with h5py.File(path, "a") as handle:
+        del handle["17001"]["04-01"]["data"]
+
+    audit = audit_ag_samples([sample], root)
+
+    assert audit["valid_count"] == 0
+    assert audit["invalid_count"] == 1
+    assert "data" in audit["invalid_samples"][0]["error"]

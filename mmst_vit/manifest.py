@@ -12,7 +12,7 @@ from typing import Iterable, Sequence
 
 import pandas as pd
 
-from cropnet_protocol import ALLOWED_STATES
+from cropnet_protocol import ALLOWED_STATES, CROPNET_FIVE_STATES
 
 TRAIN_YEARS = tuple(range(2017, 2021))
 VAL_YEAR = 2021
@@ -145,6 +145,14 @@ def split_samples(samples: Sequence[dict]) -> dict[str, list[dict]]:
         if destination is not None:
             splits[destination].append(dict(sample))
     return splits
+
+
+def five_state_shared_rows(rows: Sequence[dict]) -> list[dict]:
+    """Filter a shared bundle to the five-state protocol without mutating it."""
+    return [
+        dict(row) for row in rows
+        if str(row.get("State", "")).strip().lower() in CROPNET_FIVE_STATES
+    ]
 
 
 def write_jsonl(path: Path, rows: Iterable[dict]) -> None:

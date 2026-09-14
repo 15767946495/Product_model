@@ -15,6 +15,29 @@ STATE_NAMES = {
     "MN": "Minnesota", "MO": "Missouri", "OH": "Ohio", "WI": "Wisconsin",
 }
 STATE_ABBR = {name.lower(): abbr for abbr, name in STATE_NAMES.items()}
+TFT_AG_STATE_ABBR = {
+    "illinois": "IL", "iowa": "IA", "louisiana": "LA",
+    "mississippi": "MS", "new york": "NY",
+}
+
+
+def tft_ag_quarter_paths(fips: str, year: int, state: str, ag_root: Path) -> list[Path]:
+    """Return exactly the two AG quarterly files used by TFT preparation."""
+    fips = str(fips).strip()
+    state_name = str(state).strip().lower()
+    if len(fips) != 5 or not fips.isdigit():
+        raise ValueError(f"invalid FIPS: {fips!r}")
+    abbr = TFT_AG_STATE_ABBR.get(state_name)
+    if abbr is None:
+        raise ValueError(f"unsupported TFT AG state: {state!r}")
+    expected = {"IL": "17", "IA": "19", "LA": "22", "MS": "28", "NY": "36"}[abbr]
+    if fips[:2] != expected:
+        raise ValueError(f"FIPS {fips} does not match state {state_name!r}")
+    return [
+        Path(ag_root) / "data" / "AG" / str(int(year)) / abbr /
+        f"Agriculture_{fips[:2]}_{abbr}_{int(year)}-{start}_{int(year)}-{end}.h5"
+        for start, end in SENTINEL_QUARTERS
+    ]
 
 
 def make_config(output_dir: Path, data_root: Path, source_dir: Path, train_file: Path, val_file: Path, test_file: Path, target_fips: Path) -> dict:
