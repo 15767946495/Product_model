@@ -20,6 +20,9 @@ import sys
 import torch
 from torch.utils.data import Dataset, DataLoader, Sampler
 import numpy as np
+import h5py
+from pathlib import Path
+from torchvision import transforms
 from typing import Any, List, Dict, Optional, Tuple, Iterator
 
 # ============================================================
@@ -52,6 +55,203 @@ SOIL_DIM = len(SOIL_FEATURES)
 
 DEFAULT_CARBON_BUCKET_ID_PATH = os.path.join(TRAIN_DATA_DIR, "us_carbon_bucket_id.json")
 DEFAULT_PH_BUCKET_ID_PATH = os.path.join(TRAIN_DATA_DIR, "us_ph_bucket_id.json")
+
+AG_DATES = [
+    "04-01", "04-15", "05-01", "05-15", "06-01", "06-15",
+    "07-01", "07-15", "08-01", "08-15", "09-01", "09-15",
+]
+AG_QUARTERS = (("04-01", "06-30"), ("07-01", "09-30"))
+AG_STATE_ABBR = {
+    "illinois": "IL",
+    "iowa": "IA",
+    "louisiana": "LA",
+    "mississippi": "MS",
+    "new york": "NY",
+}
+
+
+def _ag_sample_context(sample_index: int, sample: Dict) -> str:
+    return (
+        f"sample {sample_index} (FIPS={sample.get('FIPS')!r}, "
+        f"Year={sample.get('Year')!r}, State={sample.get('State')!r})"
+    )
+
+
+def _reject_non_ag_paths(sample: Dict, sample_index: int) -> None:
+    for key, value in sample.items():
+        if "path" not in str(key).lower() and "sentinel" not in str(key).lower():
+            continue
+        values = value if isinstance(value, (list, tuple)) else [value]
+        for path in values:
+            text = str(path)
+            if "ndvi" in text.lower() or "vegetation" in text.lower():
+                raise ValueError(f"{_ag_sample_context(sample_index, sample)} contains NDVI/Vegetation path")
+
+
+def build_ag_paths(sample: Dict, ag_root: str | Path) -> list[Path]:
+    """构造一个样本对应的两个、且仅两个 Agriculture 季度文件路径。"""
+    if not isinstance(sample, dict):
+        raise ValueError("sample must be a dict")
+    _reject_non_ag_paths(sample, 0)
+    fips = str(sample.get("FIPS", "")).strip().zfill(5)
+    if len(fips) != 5 or not fips.isdigit():
+        raise ValueError(f"invalid FIPS in sample: {sample.get('FIPS')!r}")
+    try:
+        year = int(sample["Year"])
+        state = str(sample["State"]).strip().lower()
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError(f"invalid AG sample metadata: {sample!r}") from error
+    state_abbr = AG_STATE_ABBR.get(state)
+    if state_abbr is None:
+        raise ValueError(f"unsupported AG state: {sample.get('State')!r}")
+    state_ansi = fips[:2]
+    root = Path(ag_root)
+    return [
+        root / "data" / "AG" / str(year) / state_abbr /
+        f"Agriculture_{state_ansi}_{state_abbr}_{year}-{start}_{year}-{end}.h5"
+        for start, end in AG_QUARTERS
+    ]
+
+
+def select_ag_dates(group) -> list[str]:
+    """返回固定的 4 月 1 日至 9 月 15 日双时相日期。"""
+    names = set(group.keys())
+    missing = [date for date in AG_DATES if date not in names]
+    unexpected = sorted(names - set(AG_DATES))
+    if missing or unexpected:
+        raise ValueError(
+            f"AG date groups mismatch; missing={missing}, unexpected={unexpected}"
+        )
+    return list(AG_DATES)
+
+
+class AgricultureImageDataset(Dataset):
+    """严格读取五州 Agriculture HDF5 的 12 个 Sentinel 时相。"""
+
+    def __init__(self, samples, ag_root: str | Path, train: bool, image_size=224, seed=0):
+        self.samples = [dict(sample) for sample in samples]
+        self.ag_root = Path(ag_root)
+        self.train = bool(train)
+        self.image_size = int(image_size)
+        self.seed = int(seed)
+        normalize = transforms.Normalize([0.466, 0.471, 0.380], [0.195, 0.194, 0.192])
+        if self.train:
+            self.transform = transforms.Compose([
+                transforms.RandomResizedCrop(self.image_size),
+                transforms.RandomHorizontalFlip(),
+                transforms.RandomApply([transforms.ColorJitter(0.8, 0.8, 0.8, 0.2)], p=0.8),
+                transforms.RandomGrayscale(p=0.2),
+                transforms.GaussianBlur(kernel_size=9),
+                normalize,
+            ])
+        else:
+            self.transform = transforms.Compose([
+                transforms.CenterCrop(self.image_size),
+                normalize,
+            ])
+        for index, sample in enumerate(self.samples):
+            _reject_non_ag_paths(sample, index)
+            self._validate_sample_files(sample, index)
+
+    def _validate_sample_files(self, sample, index):
+        context = _ag_sample_context(index, sample)
+        paths = build_ag_paths(sample, self.ag_root)
+        grid_count = None
+        for path, dates in zip(paths, (AG_DATES[:6], AG_DATES[6:])):
+            if not path.is_file():
+                raise ValueError(f"{context}: missing AG file {path}")
+            try:
+                with h5py.File(path, "r") as handle:
+                    fips = str(sample["FIPS"]).strip().zfill(5)
+                    if fips not in handle:
+                        raise ValueError(f"{context}: missing FIPS group {fips}")
+                    county = handle[fips]
+                    actual_dates = set(county.keys())
+                    expected_dates = set(dates)
+                    if actual_dates != expected_dates:
+                        raise ValueError(
+                            f"{context}: date groups mismatch; "
+                            f"missing={sorted(expected_dates - actual_dates)}, "
+                            f"unexpected={sorted(actual_dates - expected_dates)}"
+                        )
+                    for date in dates:
+                        if date not in county:
+                            raise ValueError(f"{context}: missing date group {date}")
+                        date_group = county[date]
+                        if "data" not in date_group:
+                            raise ValueError(f"{context}: missing data dataset at {date}")
+                        dataset = date_group["data"]
+                        if dataset.dtype != np.uint8 or dataset.shape[1:] != (224, 224, 3):
+                            raise ValueError(f"{context}: invalid data shape or dtype at {date}")
+                        if grid_count is None:
+                            grid_count = int(dataset.shape[0])
+                        elif int(dataset.shape[0]) != grid_count:
+                            raise ValueError(f"{context}: inconsistent grid counts at {date}")
+            except ValueError:
+                raise
+            except (OSError, KeyError, TypeError) as error:
+                raise ValueError(f"{context}: invalid AG HDF5 structure: {error}") from error
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, index):
+        sample = self.samples[index]
+        context = _ag_sample_context(index, sample)
+        try:
+            paths = build_ag_paths(sample, self.ag_root)
+            tensors = []
+            grid_count = None
+            quarter_dates = (AG_DATES[:6], AG_DATES[6:])
+            for path, dates in zip(paths, quarter_dates):
+                if not path.is_file():
+                    raise ValueError(f"{context}: missing AG file {path}")
+                with h5py.File(path, "r") as handle:
+                    fips = str(sample["FIPS"]).strip().zfill(5)
+                    if fips not in handle:
+                        raise ValueError(f"{context}: missing FIPS group {fips}")
+                    county = handle[fips]
+                    actual_dates = set(county.keys())
+                    expected_dates = set(dates)
+                    if actual_dates != expected_dates:
+                        raise ValueError(
+                            f"{context}: date groups mismatch; "
+                            f"missing={sorted(expected_dates - actual_dates)}, "
+                            f"unexpected={sorted(actual_dates - expected_dates)}"
+                        )
+                    for date in dates:
+                        if date not in county:
+                            raise ValueError(f"{context}: missing date group {date}")
+                        date_group = county[date]
+                        if "data" not in date_group:
+                            raise ValueError(f"{context}: missing data dataset at {date}")
+                        array = date_group["data"][...]
+                        if array.dtype != np.uint8 or array.ndim != 4 or array.shape[1:] != (224, 224, 3):
+                            raise ValueError(f"{context}: invalid data shape or dtype at {date}")
+                        if grid_count is None:
+                            grid_count = int(array.shape[0])
+                        elif int(array.shape[0]) != grid_count:
+                            raise ValueError(f"{context}: inconsistent grid counts at {date}")
+                        images = torch.from_numpy(array).permute(0, 3, 1, 2).float().div(255.0)
+                        transformed = []
+                        for image in images:
+                            with torch.random.fork_rng(devices=[]):
+                                torch.manual_seed(self.seed + index * len(AG_DATES) + AG_DATES.index(date))
+                                transformed.append(self.transform(image))
+                        tensors.append(torch.stack(transformed))
+            return {
+                "ag_images": torch.stack(tensors),
+                "ag_dates": list(AG_DATES),
+                "FIPS": str(sample["FIPS"]).strip().zfill(5),
+                "Year": int(sample["Year"]),
+                "State": str(sample["State"]).strip().lower(),
+                "County": str(sample.get("County", "")),
+                "grid_count": grid_count,
+            }
+        except ValueError:
+            raise
+        except (KeyError, OSError, TypeError) as error:
+            raise ValueError(f"{context}: invalid AG HDF5 structure: {error}") from error
 
 
 def validate_five_state_sample(sample) -> None:
