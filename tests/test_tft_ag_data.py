@@ -58,7 +58,7 @@ def test_split_rejects_protocol_external_custom_year_group():
 
 
 def test_validate_five_state_sample_accepts_normalized_state_and_protocol_year():
-    validate_five_state_sample({"State": " Louisiana ", "Year": "2021"})
+    validate_five_state_sample({"State": " Louisiana ", "Year": 2021})
 
 
 @pytest.mark.parametrize(
@@ -71,6 +71,29 @@ def test_validate_five_state_sample_accepts_normalized_state_and_protocol_year()
 def test_validate_five_state_sample_rejects_protocol_violations(sample, message):
     with pytest.raises(ValueError, match=message):
         validate_five_state_sample(sample)
+
+
+@pytest.mark.parametrize("year", [2017.9, 2022.1, "2021", True, None])
+def test_validate_five_state_sample_rejects_non_integer_years(year):
+    with pytest.raises(ValueError, match="invalid year"):
+        validate_five_state_sample({"State": "illinois", "Year": year})
+
+
+@pytest.mark.parametrize("year", [2017.9, 2022.1, "2021", True])
+def test_split_rejects_non_integer_sample_years(year):
+    with pytest.raises(ValueError, match="unsupported year"):
+        split_samples_by_year([{"State": "illinois", "Year": year}])
+
+
+@pytest.mark.parametrize("years", [(2017.9,), ("2021",), (True,)])
+def test_split_rejects_non_integer_custom_year_groups(years):
+    with pytest.raises(ValueError, match="invalid year"):
+        split_samples_by_year([], train_years=years)
+
+
+def test_split_rejects_overlapping_year_groups():
+    with pytest.raises(ValueError, match="overlap"):
+        split_samples_by_year([], train_years=(2017,), val_years=(2017,))
 
 
 def test_five_state_constant_contains_only_required_states():

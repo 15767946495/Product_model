@@ -63,10 +63,9 @@ def validate_five_state_sample(sample) -> None:
     if state not in CROPNET_FIVE_STATES:
         raise ValueError(f"unsupported state: {sample.get('State')!r}")
 
-    try:
-        year = int(sample.get("Year", -1))
-    except (TypeError, ValueError) as error:
-        raise ValueError(f"unsupported year: {sample.get('Year')!r}") from error
+    year = sample.get("Year")
+    if type(year) is not int:
+        raise ValueError(f"invalid year: {year!r}")
     if year not in {2017, 2018, 2019, 2020, 2021, 2022}:
         raise ValueError(f"unsupported year: {year}")
 
@@ -79,14 +78,16 @@ def split_samples_by_year(
 ) -> dict[str, list[dict]]:
     """Validate and split five-state samples into train, validation, and test."""
     splits = {"train": [], "val": [], "test": []}
-    protocol_state = next(iter(CROPNET_FIVE_STATES))
-    for years in (train_years, val_years, test_years):
+    year_groups = (train_years, val_years, test_years)
+    for years in year_groups:
         for year in years:
-            validate_five_state_sample({"State": protocol_state, "Year": year})
+            validate_five_state_sample({"State": "illinois", "Year": year})
+    if set(train_years) & set(val_years) or set(train_years) & set(test_years) or set(val_years) & set(test_years):
+        raise ValueError("year groups overlap")
     year_to_split = {
-        **{int(year): "train" for year in train_years},
-        **{int(year): "val" for year in val_years},
-        **{int(year): "test" for year in test_years},
+        **{year: "train" for year in train_years},
+        **{year: "val" for year in val_years},
+        **{year: "test" for year in test_years},
     }
     for index, sample in enumerate(samples):
         if not isinstance(sample, dict):
@@ -101,7 +102,7 @@ def split_samples_by_year(
             raise ValueError(
                 f"sample {index} has unsupported year: {sample.get('Year')!r}"
             ) from error
-        year = int(sample["Year"])
+        year = sample["Year"]
         if year not in year_to_split:
             raise ValueError(f"sample {index} has unsupported year: {year}")
         splits[year_to_split[year]].append(dict(sample))
