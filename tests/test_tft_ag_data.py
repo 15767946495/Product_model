@@ -18,6 +18,7 @@ from data import (  # noqa: E402
     split_samples_by_year,
     validate_five_state_sample,
 )
+import data as data_module  # noqa: E402
 
 
 AG_DATES = [
@@ -88,6 +89,54 @@ def test_ag_dataset_rejects_ndvi_path(tmp_path):
         AgricultureImageDataset([sample], ag_root=tmp_path, train=False)
 
 
+@pytest.mark.parametrize(
+    "sentinel",
+    [
+        ["data/Other/2020/IL/Other_17_IL_2020.h5"],
+        {"nested": ["data/AG/2020/IL/not_agriculture.h5"]},
+    ],
+)
+def test_ag_dataset_rejects_any_non_ag_sentinel_path(tmp_path, sentinel):
+    sample = {
+        "FIPS": "17001", "Year": 2020, "State": "illinois",
+        "data": {"sentinel": sentinel},
+    }
+
+    with pytest.raises(ValueError, match="sample 0.*AG|Agriculture"):
+        AgricultureImageDataset([sample], ag_root=tmp_path, train=False)
+
+
+def test_ag_dataset_rejects_data_group(ag_fixture):
+    root, sample = ag_fixture
+    path = build_ag_paths(sample, root)[0]
+    with h5py.File(path, "a") as handle:
+        del handle["17001"]["04-01"]["data"]
+        handle["17001"]["04-01"].create_group("data")
+
+    with pytest.raises(ValueError, match="sample 0.*data"):
+        AgricultureImageDataset([sample], ag_root=root, train=False)
+
+
+@pytest.mark.parametrize(
+    "data_kwargs",
+    [
+        {"shape": (2, 224, 224, 4), "dtype": np.uint8},
+        {"shape": (2, 224, 224, 3), "dtype": np.float32},
+    ],
+)
+def test_ag_dataset_rejects_invalid_data_shape_or_dtype(ag_fixture, data_kwargs):
+    root, sample = ag_fixture
+    path = build_ag_paths(sample, root)[0]
+    with h5py.File(path, "a") as handle:
+        del handle["17001"]["04-01"]["data"]
+        handle["17001"]["04-01"].create_dataset(
+            "data", data=np.zeros(data_kwargs["shape"], dtype=data_kwargs["dtype"])
+        )
+
+    with pytest.raises(ValueError, match="sample 0.*shape or dtype"):
+        AgricultureImageDataset([sample], ag_root=root, train=False)
+
+
 @pytest.mark.parametrize("missing", ["file", "FIPS", "date", "data"])
 def test_ag_dataset_rejects_missing_hdf5_structure(ag_fixture, missing):
     root, sample = ag_fixture
@@ -128,6 +177,54 @@ def test_ag_dataset_constructor_does_not_change_global_rng_state(ag_fixture):
     AgricultureImageDataset([sample], ag_root=root, train=True, seed=0)
 
     assert torch.equal(torch.random.get_rng_state(), before)
+
+
+def test_ag_dataset_calls_select_ag_dates_for_loading(ag_fixture, monkeypatch):
+    root, sample = ag_fixture
+    calls = []
+    original = data_module.select_ag_dates
+
+    def wrapped(group):
+        calls.append(tuple(sorted(group.keys())))
+        return original(group)
+
+    monkeypatch.setattr(data_module, "select_ag_dates", wrapped)
+    AgricultureImageDataset([sample], ag_root=root, train=False)[0]
+
+    assert calls
+    assert set(calls[0]) == set(AG_DATES)
+
+
+def test_ag_dataset_seed_zero_is_deterministic_across_instances(ag_fixture):
+    root, sample = ag_fixture
+    first = AgricultureImageDataset([sample], ag_root=root, train=True, seed=0)[0]
+    second = AgricultureImageDataset([sample], ag_root=root, train=True, seed=0)[0]
+
+    assert torch.equal(first["ag_images"], second["ag_images"])
+
+
+def test_ag_dataset_getitem_does_not_change_cpu_rng_state(ag_fixture):
+    root, sample = ag_fixture
+    dataset = AgricultureImageDataset([sample], ag_root=root, train=True, seed=0)
+    torch.manual_seed(123)
+    before = torch.random.get_rng_state()
+
+    dataset[0]
+
+    assert torch.equal(torch.random.get_rng_state(), before)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+def test_ag_dataset_getitem_does_not_change_cuda_rng_state(ag_fixture):
+    root, sample = ag_fixture
+    dataset = AgricultureImageDataset([sample], ag_root=root, train=True, seed=0)
+    torch.cuda.manual_seed_all(123)
+    before = [torch.cuda.get_rng_state(device) for device in range(torch.cuda.device_count())]
+
+    dataset[0]
+
+    after = [torch.cuda.get_rng_state(device) for device in range(torch.cuda.device_count())]
+    assert all(torch.equal(before_state, after_state) for before_state, after_state in zip(before, after))
 
 
 def test_split_samples_by_year_uses_five_state_protocol():

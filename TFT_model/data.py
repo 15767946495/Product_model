@@ -23,6 +23,7 @@ import numpy as np
 import h5py
 from pathlib import Path
 from torchvision import transforms
+from collections.abc import Mapping
 from typing import Any, List, Dict, Optional, Tuple, Iterator
 
 # ============================================================
@@ -78,14 +79,32 @@ def _ag_sample_context(sample_index: int, sample: Dict) -> str:
 
 
 def _reject_non_ag_paths(sample: Dict, sample_index: int) -> None:
-    for key, value in sample.items():
-        if "path" not in str(key).lower() and "sentinel" not in str(key).lower():
-            continue
-        values = value if isinstance(value, (list, tuple)) else [value]
-        for path in values:
-            text = str(path)
-            if "ndvi" in text.lower() or "vegetation" in text.lower():
-                raise ValueError(f"{_ag_sample_context(sample_index, sample)} contains NDVI/Vegetation path")
+    context = _ag_sample_context(sample_index, sample)
+
+    def visit(value, declared_path=False):
+        if isinstance(value, Mapping):
+            for key, child in value.items():
+                key_text = str(key).lower()
+                visit(child, declared_path or "path" in key_text or "sentinel" in key_text)
+            return
+        if isinstance(value, (list, tuple)):
+            for child in value:
+                visit(child, declared_path)
+            return
+        if not declared_path:
+            return
+        text = str(value).replace("\\", "/")
+        parts = text.split("/")
+        try:
+            modality_index = next(index for index, part in enumerate(parts) if part.lower() == "data")
+            modality = parts[modality_index + 1].upper()
+            filename = parts[-1]
+        except (StopIteration, IndexError):
+            raise ValueError(f"{context} contains invalid AG path {value!r}")
+        if modality != "AG" or not filename.startswith("Agriculture_") or not filename.endswith(".h5"):
+            raise ValueError(f"{context} contains non-AG path {value!r}; expected data/AG/.../Agriculture_*.h5")
+
+    visit(sample)
 
 
 def build_ag_paths(sample: Dict, ag_root: str | Path) -> list[Path]:
@@ -125,6 +144,34 @@ def select_ag_dates(group) -> list[str]:
     return list(AG_DATES)
 
 
+def _sample_ag_dates(paths, sample, context):
+    all_dates = set()
+    fips = str(sample["FIPS"]).strip().zfill(5)
+    for path in paths:
+        if not path.is_file():
+            raise ValueError(f"{context}: missing AG file {path}")
+        try:
+            with h5py.File(path, "r") as handle:
+                if fips not in handle:
+                    raise ValueError(f"{context}: missing FIPS group {fips}")
+                all_dates.update(handle[fips].keys())
+        except ValueError:
+            raise
+        except (OSError, KeyError, TypeError) as error:
+            raise ValueError(f"{context}: invalid AG HDF5 structure: {error}") from error
+    try:
+        return select_ag_dates({date: None for date in all_dates})
+    except ValueError as error:
+        raise ValueError(f"{context}: {error}") from error
+
+
+def _validate_ag_dataset(dataset, context, date):
+    if not isinstance(dataset, h5py.Dataset):
+        raise ValueError(f"{context}: data is not an HDF5 dataset at {date}")
+    if dataset.dtype != np.uint8 or dataset.ndim != 4 or dataset.shape[1:] != (224, 224, 3):
+        raise ValueError(f"{context}: invalid data shape or dtype at {date}")
+
+
 class AgricultureImageDataset(Dataset):
     """严格读取五州 Agriculture HDF5 的 12 个 Sentinel 时相。"""
 
@@ -156,8 +203,9 @@ class AgricultureImageDataset(Dataset):
     def _validate_sample_files(self, sample, index):
         context = _ag_sample_context(index, sample)
         paths = build_ag_paths(sample, self.ag_root)
+        selected_dates = _sample_ag_dates(paths, sample, context)
         grid_count = None
-        for path, dates in zip(paths, (AG_DATES[:6], AG_DATES[6:])):
+        for path, dates in zip(paths, (selected_dates[:6], selected_dates[6:])):
             if not path.is_file():
                 raise ValueError(f"{context}: missing AG file {path}")
             try:
@@ -181,8 +229,7 @@ class AgricultureImageDataset(Dataset):
                         if "data" not in date_group:
                             raise ValueError(f"{context}: missing data dataset at {date}")
                         dataset = date_group["data"]
-                        if dataset.dtype != np.uint8 or dataset.shape[1:] != (224, 224, 3):
-                            raise ValueError(f"{context}: invalid data shape or dtype at {date}")
+                        _validate_ag_dataset(dataset, context, date)
                         if grid_count is None:
                             grid_count = int(dataset.shape[0])
                         elif int(dataset.shape[0]) != grid_count:
@@ -200,9 +247,10 @@ class AgricultureImageDataset(Dataset):
         context = _ag_sample_context(index, sample)
         try:
             paths = build_ag_paths(sample, self.ag_root)
+            selected_dates = _sample_ag_dates(paths, sample, context)
             tensors = []
             grid_count = None
-            quarter_dates = (AG_DATES[:6], AG_DATES[6:])
+            quarter_dates = (selected_dates[:6], selected_dates[6:])
             for path, dates in zip(paths, quarter_dates):
                 if not path.is_file():
                     raise ValueError(f"{context}: missing AG file {path}")
@@ -225,9 +273,9 @@ class AgricultureImageDataset(Dataset):
                         date_group = county[date]
                         if "data" not in date_group:
                             raise ValueError(f"{context}: missing data dataset at {date}")
-                        array = date_group["data"][...]
-                        if array.dtype != np.uint8 or array.ndim != 4 or array.shape[1:] != (224, 224, 3):
-                            raise ValueError(f"{context}: invalid data shape or dtype at {date}")
+                        dataset = date_group["data"]
+                        _validate_ag_dataset(dataset, context, date)
+                        array = dataset[...]
                         if grid_count is None:
                             grid_count = int(array.shape[0])
                         elif int(array.shape[0]) != grid_count:
@@ -235,7 +283,8 @@ class AgricultureImageDataset(Dataset):
                         images = torch.from_numpy(array).permute(0, 3, 1, 2).float().div(255.0)
                         transformed = []
                         for image in images:
-                            with torch.random.fork_rng(devices=[]):
+                            devices = list(range(torch.cuda.device_count())) if torch.cuda.is_available() else []
+                            with torch.random.fork_rng(devices=devices):
                                 torch.manual_seed(self.seed + index * len(AG_DATES) + AG_DATES.index(date))
                                 transformed.append(self.transform(image))
                         tensors.append(torch.stack(transformed))
