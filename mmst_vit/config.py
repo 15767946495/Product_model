@@ -10,6 +10,7 @@ from cropnet_protocol import ALLOWED_STATES
 SHORT_TERM_MONTHS = tuple(range(4, 10))
 LONG_TERM_YEARS = tuple(range(2017, 2022))
 SENTINEL_QUARTERS = (("04-01", "06-30"), ("07-01", "09-30"))
+AG_PROTOCOL_YEARS = frozenset(range(2017, 2023))
 STATE_NAMES = {
     "IL": "Illinois", "IN": "Indiana", "KY": "Kentucky", "MI": "Michigan",
     "MN": "Minnesota", "MO": "Missouri", "OH": "Ohio", "WI": "Wisconsin",
@@ -23,6 +24,8 @@ TFT_AG_STATE_ABBR = {
 
 def tft_ag_quarter_paths(fips: str, year: int, state: str, ag_root: Path) -> list[Path]:
     """Return exactly the two AG quarterly files used by TFT preparation."""
+    if type(year) is not int or year not in AG_PROTOCOL_YEARS:
+        raise ValueError(f"invalid AG year: {year!r}; expected integer 2017--2022")
     fips = str(fips).strip()
     state_name = str(state).strip().lower()
     if len(fips) != 5 or not fips.isdigit():
@@ -34,8 +37,8 @@ def tft_ag_quarter_paths(fips: str, year: int, state: str, ag_root: Path) -> lis
     if fips[:2] != expected:
         raise ValueError(f"FIPS {fips} does not match state {state_name!r}")
     return [
-        Path(ag_root) / "data" / "AG" / str(int(year)) / abbr /
-        f"Agriculture_{fips[:2]}_{abbr}_{int(year)}-{start}_{int(year)}-{end}.h5"
+        Path(ag_root) / "data" / "AG" / str(year) / abbr /
+        f"Agriculture_{fips[:2]}_{abbr}_{year}-{start}_{year}-{end}.h5"
         for start, end in SENTINEL_QUARTERS
     ]
 

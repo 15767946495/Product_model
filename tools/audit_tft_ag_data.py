@@ -16,7 +16,7 @@ if str(ROOT) not in sys.path:
 
 from cropnet_protocol import CROPNET_FIVE_STATES
 from mmst_vit.manifest import five_state_shared_rows, write_jsonl
-from TFT_model.data import AG_DATES, build_ag_paths, split_samples_by_year
+from TFT_model.data import AG_DATES, build_ag_paths, resolve_ag_date_names
 
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
@@ -26,7 +26,7 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _audit_file(path: Path, dates: list[str], fips: str, cache: dict) -> int:
+def _audit_file(path: Path, dates: list[str], fips: str, year: int, cache: dict) -> int:
     file_cache = cache.setdefault("files", {})
     if str(path) not in file_cache:
         result = {}
@@ -38,20 +38,13 @@ def _audit_file(path: Path, dates: list[str], fips: str, cache: dict) -> int:
                     for candidate_fips in handle.keys():
                         try:
                             county = handle[candidate_fips]
-                            actual_names = set(county.keys())
-                            actual_dates = {name[-5:] if len(name) >= 5 else name for name in actual_names}
-                            expected_dates = set(dates)
-                            if actual_dates != expected_dates:
-                                raise ValueError(
-                                    f"date groups mismatch; missing={sorted(expected_dates - actual_dates)}, "
-                                    f"unexpected={sorted(actual_dates - expected_dates)}"
-                                )
+                            date_names = resolve_ag_date_names(county, dates, year)
                             local_grid = None
                             for date in dates:
-                                actual_name = next(name for name in actual_names if name[-5:] == date)
-                                if "data" not in county[actual_name]:
+                                date_group = county[date_names[date]]
+                                if "data" not in date_group:
                                     raise ValueError(f"missing data dataset at {date}")
-                                dataset = county[actual_name]["data"]
+                                dataset = date_group["data"]
                                 if dataset.dtype != "uint8" or dataset.ndim != 4 or dataset.shape[1:] != (224, 224, 3):
                                     raise ValueError(f"invalid data shape or dtype at {date}")
                                 if local_grid is None:
@@ -80,7 +73,7 @@ def _audit_one(sample: dict, ag_root: Path, index: int, cache: dict) -> tuple[bo
         fips = str(sample["FIPS"]).strip()
         grid_count = None
         for path, dates in zip(paths, (AG_DATES[:6], AG_DATES[6:])):
-            local_grid = _audit_file(path, dates, fips, cache)
+            local_grid = _audit_file(path, dates, fips, int(sample["Year"]), cache)
             if grid_count is None:
                 grid_count = local_grid
             elif grid_count != local_grid:
@@ -90,8 +83,7 @@ def _audit_one(sample: dict, ag_root: Path, index: int, cache: dict) -> tuple[bo
         return False, paths, f"sample {index}: {error}"
 
 
-def audit_ag_samples(samples, ag_root) -> dict:
-    """Audit every sample and return counts, reasons, identities, and file hashes."""
+def _audit_ag_samples_with_results(samples, ag_root) -> tuple[dict, list]:
     root = Path(ag_root)
     invalid_samples = []
     valid_count = 0
@@ -100,18 +92,22 @@ def audit_ag_samples(samples, ag_root) -> dict:
     years = Counter()
     file_hashes = {}
     cache = {}
+    results = []
     split_by_year = {year: split for split, years in {
         "train": (2017, 2018, 2019, 2020), "val": (2021,), "test": (2022,)
     }.items() for year in years}
     split_state_year = Counter()
     for index, sample in enumerate(samples):
+        if not isinstance(sample, dict):
+            sample = {}
         state = str(sample.get("State", "")).strip().lower()
         year = sample.get("Year")
         states[state] += 1
         years[str(year)] += 1
         ok, paths, error = _audit_one(sample, root, index, cache)
-        split = split_by_year.get(year, "unknown")
+        split = split_by_year.get(year, "unknown") if isinstance(year, int) else "unknown"
         split_state_year[(split, state, str(year), "valid" if ok else "invalid")] += 1
+        results.append((ok, paths, error))
         for path in paths:
             if path.is_file() and str(path) not in file_hashes:
                 file_hashes[str(path)] = _sha256(path)
@@ -124,7 +120,7 @@ def audit_ag_samples(samples, ag_root) -> dict:
                 "FIPS": sample.get("FIPS"), "Year": year, "State": state,
                 "paths": [str(path) for path in paths], "error": reason,
             })
-    return {
+    audit = {
         "states": sorted(states), "years": dict(sorted(years.items())),
         "state_counts": dict(sorted(states.items())),
         "valid_count": valid_count, "invalid_count": len(invalid_samples),
@@ -135,22 +131,34 @@ def audit_ag_samples(samples, ag_root) -> dict:
             "/".join(key): value for key, value in sorted(split_state_year.items())
         },
     }
+    return audit, results
+
+
+def audit_ag_samples(samples, ag_root) -> dict:
+    """Audit every sample and return counts, reasons, identities, and file hashes."""
+    audit, _ = _audit_ag_samples_with_results(samples, ag_root)
+    return audit
 
 
 def build_tft_ag_manifest(shared_rows, ag_root, output_dir) -> dict[str, int]:
     """Write valid AG-only split rows and an audit report to ``output_dir``."""
     rows = five_state_shared_rows(shared_rows)
-    splits = split_samples_by_year(rows)
-    audit = audit_ag_samples(rows, ag_root)
+    audit, results = _audit_ag_samples_with_results(rows, ag_root)
     output = Path(output_dir)
     manifest_dir = output / "manifests"
     audit_dir = output / "audit"
     counts = {}
-    validation_cache = {}
-    for split, split_rows in splits.items():
+    split_indices = {"train": [], "val": [], "test": []}
+    for index, sample in enumerate(rows):
+        year = sample.get("Year") if isinstance(sample, dict) else None
+        split = {2017: "train", 2018: "train", 2019: "train", 2020: "train", 2021: "val", 2022: "test"}.get(year)
+        if split is not None:
+            split_indices[split].append(index)
+    for split, indices in split_indices.items():
         valid_rows = []
-        for sample in split_rows:
-            ok, paths, _ = _audit_one(sample, Path(ag_root), rows.index(sample), validation_cache)
+        for index in indices:
+            sample = rows[index]
+            ok, paths, _ = results[index]
             if ok:
                 row = dict(sample)
                 row["ag_paths"] = [str(path) for path in paths]

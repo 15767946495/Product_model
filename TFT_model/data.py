@@ -16,6 +16,7 @@ import json
 import math
 import os
 import random
+import re
 import sys
 import torch
 from torch.utils.data import Dataset, DataLoader, Sampler
@@ -69,6 +70,7 @@ AG_STATE_ABBR = {
     "mississippi": "MS",
     "new york": "NY",
 }
+AG_PROTOCOL_YEARS = frozenset(range(2017, 2023))
 
 
 def _ag_sample_context(sample_index: int, sample: Dict) -> str:
@@ -117,10 +119,11 @@ def build_ag_paths(sample: Dict, ag_root: str | Path) -> list[Path]:
     if len(fips) != 5 or not fips.isdigit():
         raise ValueError(f"invalid FIPS in sample: {sample.get('FIPS')!r}")
     try:
-        year = int(sample["Year"])
+        raw_year = sample["Year"]
         state = str(sample["State"]).strip().lower()
     except (KeyError, TypeError, ValueError) as error:
         raise ValueError(f"invalid AG sample metadata: {sample!r}") from error
+    year = _validate_ag_year(raw_year)
     state_abbr = AG_STATE_ABBR.get(state)
     if state_abbr is None:
         raise ValueError(f"unsupported AG state: {sample.get('State')!r}")
@@ -140,6 +143,12 @@ def build_ag_paths(sample: Dict, ag_root: str | Path) -> list[Path]:
     ]
 
 
+def _validate_ag_year(value) -> int:
+    if type(value) is not int or value not in AG_PROTOCOL_YEARS:
+        raise ValueError(f"invalid AG year: {value!r}; expected integer 2017--2022")
+    return value
+
+
 def select_ag_dates(group) -> list[str]:
     """返回固定的 4 月 1 日至 9 月 15 日双时相日期。"""
     names = {str(name)[-5:] for name in group.keys()}
@@ -152,11 +161,27 @@ def select_ag_dates(group) -> list[str]:
     return list(AG_DATES)
 
 
-def _ag_date_names(group, dates):
+def resolve_ag_date_names(group, dates, year: int) -> dict[str, str]:
+    """严格解析 MM-DD 或与样本年份一致的 YYYY-MM-DD 日期组。"""
+    year = _validate_ag_year(year)
+    dates = list(dates)
+    if len(dates) != len(set(dates)):
+        raise ValueError("AG target dates must be unique")
+    if not hasattr(group, "keys"):
+        raise ValueError("AG FIPS node must be an HDF5 group")
     names = list(group.keys())
     mapping = {}
     for name in names:
-        suffix = str(name)[-5:]
+        text = str(name)
+        if re.fullmatch(r"\d{2}-\d{2}", text):
+            suffix = text
+        else:
+            match = re.fullmatch(r"(\d{4})-(\d{2}-\d{2})", text)
+            if not match:
+                raise ValueError(f"invalid AG date group name {text!r}")
+            if int(match.group(1)) != year:
+                raise ValueError(f"AG date group {text!r} has wrong year; expected {year}")
+            suffix = match.group(2)
         if suffix in dates:
             if suffix in mapping:
                 raise ValueError(f"duplicate AG date group for {suffix}")
@@ -169,24 +194,25 @@ def _ag_date_names(group, dates):
 
 
 def _sample_ag_dates(paths, sample, context):
-    all_dates = set()
+    year = _validate_ag_year(sample["Year"])
     fips = str(sample["FIPS"]).strip().zfill(5)
-    for path in paths:
+    for path, dates in zip(paths, (AG_DATES[:6], AG_DATES[6:])):
         if not path.is_file():
             raise ValueError(f"{context}: missing AG file {path}")
         try:
             with h5py.File(path, "r") as handle:
                 if fips not in handle:
                     raise ValueError(f"{context}: missing FIPS group {fips}")
-                all_dates.update(handle[fips].keys())
+                try:
+                    resolve_ag_date_names(handle[fips], dates, year)
+                except ValueError as error:
+                    raise ValueError(f"{context}: {error}") from error
         except ValueError:
             raise
         except (OSError, KeyError, TypeError) as error:
-            raise ValueError(f"{context}: invalid AG HDF5 structure: {error}") from error
-    try:
-        return select_ag_dates({date: None for date in all_dates})
-    except ValueError as error:
-        raise ValueError(f"{context}: {error}") from error
+                raise ValueError(f"{context}: invalid AG HDF5 structure: {error}") from error
+    select_ag_dates({date: None for date in AG_DATES})
+    return list(AG_DATES)
 
 
 def _validate_ag_dataset(dataset, context, date):
@@ -238,7 +264,7 @@ class AgricultureImageDataset(Dataset):
                     if fips not in handle:
                         raise ValueError(f"{context}: missing FIPS group {fips}")
                     county = handle[fips]
-                    date_names = _ag_date_names(county, dates)
+                    date_names = resolve_ag_date_names(county, dates, sample["Year"])
                     for date in dates:
                         date_group = county[date_names[date]]
                         if "data" not in date_group:
@@ -274,7 +300,7 @@ class AgricultureImageDataset(Dataset):
                     if fips not in handle:
                         raise ValueError(f"{context}: missing FIPS group {fips}")
                     county = handle[fips]
-                    date_names = _ag_date_names(county, dates)
+                    date_names = resolve_ag_date_names(county, dates, sample["Year"])
                     for date in dates:
                         date_group = county[date_names[date]]
                         if "data" not in date_group:

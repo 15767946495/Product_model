@@ -15,12 +15,14 @@ from cropnet_protocol import CROPNET_FIVE_STATES  # noqa: E402
 from data import (  # noqa: E402
     AgricultureImageDataset,
     build_ag_paths,
+    resolve_ag_date_names,
     select_ag_dates,
     split_samples_by_year,
     validate_five_state_sample,
 )
 import data as data_module  # noqa: E402
 from tools.audit_tft_ag_data import audit_ag_samples, build_tft_ag_manifest  # noqa: E402
+from mmst_vit.config import tft_ag_quarter_paths  # noqa: E402
 
 
 AG_DATES = [
@@ -78,6 +80,31 @@ def test_ag_dataset_accepts_real_year_prefixed_date_groups(ag_fixture):
     assert item["ag_images"].shape == (12, 2, 3, 224, 224)
 
 
+def test_ag_date_parser_rejects_duplicate_suffix_and_wrong_year(ag_fixture):
+    root, sample = ag_fixture
+    path = build_ag_paths(sample, root)[0]
+    with h5py.File(path, "a") as handle:
+        county = handle[sample["FIPS"]]
+        county.copy("04-01", "2020-04-01")
+        with pytest.raises(ValueError, match="duplicate"):
+            resolve_ag_date_names(county, AG_DATES[:6], sample["Year"])
+
+        del county["2020-04-01"]
+        county.move("04-01", "2019-04-01")
+        with pytest.raises(ValueError, match="year"):
+            resolve_ag_date_names(county, AG_DATES[:6], sample["Year"])
+
+
+def test_ag_date_parser_rejects_extra_date_group(ag_fixture):
+    root, sample = ag_fixture
+    path = build_ag_paths(sample, root)[0]
+    with h5py.File(path, "a") as handle:
+        county = handle[sample["FIPS"]]
+        county.create_group("06-30")
+        with pytest.raises(ValueError, match="unexpected"):
+            resolve_ag_date_names(county, AG_DATES[:6], sample["Year"])
+
+
 def test_build_ag_paths_returns_two_ag_quarter_paths(ag_fixture):
     root, sample = ag_fixture
 
@@ -88,6 +115,23 @@ def test_build_ag_paths_returns_two_ag_quarter_paths(ag_fixture):
     assert all("Agriculture" in str(path) for path in paths)
     assert paths[0].name.endswith("2020-04-01_2020-06-30.h5")
     assert paths[1].name.endswith("2020-07-01_2020-09-30.h5")
+
+
+@pytest.mark.parametrize("year", [2016, 2023, "2020", 2020.0, True])
+def test_ag_path_helpers_reject_non_protocol_years(ag_fixture, year):
+    root, sample = ag_fixture
+    bad_sample = dict(sample, Year=year)
+    with pytest.raises(ValueError, match="year"):
+        build_ag_paths(bad_sample, root)
+    with pytest.raises(ValueError, match="year"):
+        tft_ag_quarter_paths(sample["FIPS"], year, sample["State"], root)
+
+
+def test_tft_ag_quarter_paths_returns_only_two_ag_paths(ag_fixture):
+    root, sample = ag_fixture
+    paths = tft_ag_quarter_paths(sample["FIPS"], sample["Year"], sample["State"], root)
+    assert len(paths) == 2
+    assert all("/AG/" in str(path) and "NDVI" not in str(path) for path in paths)
 
 
 def test_select_ag_dates_requires_the_fixed_twelve_dates():
@@ -371,3 +415,61 @@ def test_audit_ag_samples_reports_invalid_hdf5_structure(ag_fixture):
     assert audit["valid_count"] == 0
     assert audit["invalid_count"] == 1
     assert "data" in audit["invalid_samples"][0]["error"]
+
+
+def test_audit_ag_samples_records_non_group_fips_and_continues(ag_fixture):
+    root, sample = ag_fixture
+    path = build_ag_paths(sample, root)[0]
+    with h5py.File(path, "a") as handle:
+        del handle[sample["FIPS"]]
+        handle.create_dataset(sample["FIPS"], data=np.zeros((1,), dtype=np.uint8))
+
+    valid = dict(sample, Year=2021)
+    for valid_path, dates in zip(build_ag_paths(valid, root), (AG_DATES[:6], AG_DATES[6:])):
+        valid_path.parent.mkdir(parents=True, exist_ok=True)
+        with h5py.File(valid_path, "w") as handle:
+            county = handle.create_group(valid["FIPS"])
+            for date in dates:
+                county.create_group(date).create_dataset(
+                    "data", data=np.zeros((2, 224, 224, 3), dtype=np.uint8)
+                )
+
+    audit = audit_ag_samples([sample, valid], root)
+    assert audit["valid_count"] == 1
+    assert audit["invalid_count"] == 1
+    assert "HDF5 group" in audit["invalid_samples"][0]["error"]
+
+
+def test_audit_ag_samples_records_invalid_metadata_and_continues(ag_fixture):
+    root, sample = ag_fixture
+    invalid = dict(sample, State="texas")
+    audit = audit_ag_samples([invalid, sample], root)
+    assert audit["valid_count"] == 1
+    assert audit["invalid_count"] == 1
+    assert audit["invalid_samples"][0]["FIPS"] == sample["FIPS"]
+    assert "unsupported AG state" in audit["invalid_samples"][0]["error"]
+
+
+@pytest.mark.parametrize("sample", [None, {"State": "illinois"}, {"State": "illinois", "Year": 2023}])
+def test_audit_ag_samples_records_invalid_input_rows_and_continues(ag_fixture, sample):
+    root, valid = ag_fixture
+    audit = audit_ag_samples([sample, valid], root)
+    assert audit["valid_count"] == 1
+    assert audit["invalid_count"] == 1
+    assert len(audit["invalid_samples"]) == 1
+
+
+def test_manifest_generation_uses_one_audit_result_per_input_sample(ag_fixture, tmp_path, monkeypatch):
+    root, sample = ag_fixture
+    import tools.audit_tft_ag_data as audit_module
+
+    calls = []
+    original = audit_module._audit_one
+
+    def wrapped(sample, ag_root, index, cache):
+        calls.append(index)
+        return original(sample, ag_root, index, cache)
+
+    monkeypatch.setattr(audit_module, "_audit_one", wrapped)
+    build_tft_ag_manifest([sample], root, tmp_path / "runtime")
+    assert calls == [0]

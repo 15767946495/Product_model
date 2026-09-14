@@ -11,9 +11,10 @@
 
 输出目录：`/data/raid0/hqx/Product_model_runtime/cropnet-five-state/`
 
-- `manifests/train.jsonl`: 355 行
-- `manifests/val.jsonl`: 78 行
-- `manifests/test.jsonl`: 93 行
+- 输入样本：532 行
+- `manifests/train.jsonl`: 355 行有效样本
+- `manifests/val.jsonl`: 78 行有效样本
+- `manifests/test.jsonl`: 93 行有效样本
 - `audit/ag_integrity.json`: 526 个有效样本、6 个无效样本
 - `audit/protocol.json`: 五州、2017--2020/2021/2022 split、AG-only、12 日期和两季度协议
 
@@ -23,19 +24,21 @@
 
 输入为 task8-active 的共享 `dataset.jsonl`，经五州过滤后共 532 个 Illinois 样本；共享输入中没有 Iowa、Louisiana、Mississippi、New York 行，因此没有伪造或补齐这些州。
 
-- train：355 有效，5 无效
-- val：78 有效，1 无效
-- test：93 有效，1 无效
+- train：359 输入，355 有效，4 无效
+- val：79 输入，78 有效，1 无效
+- test：94 输入，93 有效，1 无效
 - 无效原因：4 个样本缺少目标日期组，2 个样本缺少 FIPS group
 - 已对 12 个实际涉及的季度 HDF5 文件记录 SHA256
 - AG 日期：`04-01, 04-15, 05-01, 05-15, 06-01, 06-15, 07-01, 07-15, 08-01, 08-15, 09-01, 09-15`
+- 审计逐样本记录输入元数据和 HDF5 结构错误；无效样本不写入 split manifest。
 
 ## 验证
 
-- `/root/miniconda3/envs/hqx/bin/python -m pytest tests/test_tft_ag_data.py -q`: 44 passed
-- `/root/miniconda3/envs/hqx/bin/python -m pytest -q`: 147 passed
+- `/root/miniconda3/envs/hqx/bin/python -m pytest tests/test_tft_ag_data.py -q`: 修复后 58 passed
+- `/root/miniconda3/envs/hqx/bin/python -m pytest -q`: 修复后 161 passed
 - `/root/miniconda3/envs/hqx/bin/python -m py_compile tools/audit_tft_ag_data.py mmst_vit/config.py mmst_vit/manifest.py TFT_model/data.py tests/test_tft_ag_data.py`: 通过
 - 真实 CLI 扫描完成并生成上述 manifest/audit/protocol 文件
+- 本次修复补充了共享 AG 日期组解析、重复日期和错误年份拒绝、输入级非法样本逐条记录、严格 AG 年份校验，以及单次审计结果复用。
 
 ## Concerns
 
