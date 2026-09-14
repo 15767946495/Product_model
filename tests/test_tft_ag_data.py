@@ -1,4 +1,5 @@
 from pathlib import Path
+import inspect
 import sys
 
 import h5py
@@ -23,12 +24,26 @@ from data import (  # noqa: E402
 import data as data_module  # noqa: E402
 from tools.audit_tft_ag_data import audit_ag_samples, build_tft_ag_manifest  # noqa: E402
 from mmst_vit.config import tft_ag_quarter_paths  # noqa: E402
+from models import TFTEncoderForYieldPrediction  # noqa: E402
 
 
 AG_DATES = [
     "04-01", "04-15", "05-01", "05-15", "06-01", "06-15",
     "07-01", "07-15", "08-01", "08-15", "09-01", "09-15",
 ]
+AG_ROOT = Path("/data/raid0/hqx/Product_model_runtime/DataSrc/mmst_vit/download/Sentinel-2 Imagery")
+FIVE_STATE_RUNTIME = Path("/data/raid0/hqx/Product_model_runtime/cropnet-five-state")
+
+
+def _first_real_ag_row():
+    for split in ("train", "val", "test"):
+        manifest = FIVE_STATE_RUNTIME / "manifests" / f"{split}.jsonl"
+        with manifest.open(encoding="utf-8") as handle:
+            for line in handle:
+                row = json.loads(line)
+                if row.get("State", "").strip().lower() in CROPNET_FIVE_STATES:
+                    return split, row
+    raise AssertionError("five-state runtime contains no real AG manifest row")
 
 
 @pytest.fixture
@@ -65,6 +80,46 @@ def test_ag_dataset_loads_two_quarters_and_returns_mmst_shape(ag_fixture):
     assert item["State"] == "illinois"
     assert item["County"] == "Adams"
     assert item["ag_images"].dtype == torch.float32
+
+
+def test_ag_dataset_is_independent_of_tft_model_construction(ag_fixture, monkeypatch):
+    root, sample = ag_fixture
+    sample = dict(sample, weather={"must_not_load": True}, label=123)
+
+    def fail_if_constructed(*args, **kwargs):
+        raise AssertionError("TFT model construction is outside the AG dataset contract")
+
+    monkeypatch.setattr("models.TFTEncoderForYieldPrediction", fail_if_constructed)
+    item = AgricultureImageDataset([sample], ag_root=root, train=False, seed=0)[0]
+
+    assert set(item) == {"ag_images", "ag_dates", "FIPS", "Year", "State", "County", "grid_count"}
+    assert "weather" not in item
+    assert "label" not in item
+
+
+def test_tft_encoder_forward_signature_remains_unchanged_without_forward_call():
+    assert list(inspect.signature(TFTEncoderForYieldPrediction.forward).parameters) == [
+        "self", "grid_feats", "grid_coords", "grid_mask", "soil_feats", "seq_lens"
+    ]
+    assert not hasattr(TFTEncoderForYieldPrediction, "_ag_images")
+
+
+def test_real_five_state_ag_sample_has_twelve_dates_shape_and_metadata():
+    split, row = _first_real_ag_row()
+    dataset_row = {key: value for key, value in row.items() if key != "ag_paths"}
+    item = AgricultureImageDataset([dataset_row], ag_root=AG_ROOT, train=False, seed=0)[0]
+
+    assert split in {"train", "val", "test"}
+    assert item["ag_images"].shape[0] == 12
+    assert item["ag_images"].shape[2:] == (3, 224, 224)
+    assert item["ag_dates"] == AG_DATES
+    assert item["FIPS"] == str(row["FIPS"]).zfill(5)
+    assert item["Year"] == row["Year"]
+    assert item["State"] == row["State"].strip().lower()
+    assert item["County"] == row.get("County", "")
+    assert item["grid_count"] == item["ag_images"].shape[1]
+    assert "weather" not in item
+    assert "label" not in item
 
 
 def test_ag_dataset_accepts_real_year_prefixed_date_groups(ag_fixture):
