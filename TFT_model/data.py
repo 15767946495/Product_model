@@ -142,7 +142,7 @@ def build_ag_paths(sample: Dict, ag_root: str | Path) -> list[Path]:
 
 def select_ag_dates(group) -> list[str]:
     """返回固定的 4 月 1 日至 9 月 15 日双时相日期。"""
-    names = set(group.keys())
+    names = {str(name)[-5:] for name in group.keys()}
     missing = [date for date in AG_DATES if date not in names]
     unexpected = sorted(names - set(AG_DATES))
     if missing or unexpected:

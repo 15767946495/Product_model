@@ -65,6 +65,19 @@ def test_ag_dataset_loads_two_quarters_and_returns_mmst_shape(ag_fixture):
     assert item["ag_images"].dtype == torch.float32
 
 
+def test_ag_dataset_accepts_real_year_prefixed_date_groups(ag_fixture):
+    root, sample = ag_fixture
+    for path in build_ag_paths(sample, root):
+        with h5py.File(path, "a") as handle:
+            county = handle[sample["FIPS"]]
+            for date in list(county.keys()):
+                county.move(date, f"{sample['Year']}-{date}")
+
+    item = AgricultureImageDataset([sample], ag_root=root, train=False, seed=0)[0]
+
+    assert item["ag_images"].shape == (12, 2, 3, 224, 224)
+
+
 def test_build_ag_paths_returns_two_ag_quarter_paths(ag_fixture):
     root, sample = ag_fixture
 

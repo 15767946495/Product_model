@@ -32,8 +32,8 @@
 
 ## 验证
 
-- `/root/miniconda3/envs/hqx/bin/python -m pytest tests/test_tft_ag_data.py -q`: 43 passed
-- `/root/miniconda3/envs/hqx/bin/python -m pytest -q`: 146 passed
+- `/root/miniconda3/envs/hqx/bin/python -m pytest tests/test_tft_ag_data.py -q`: 44 passed
+- `/root/miniconda3/envs/hqx/bin/python -m pytest -q`: 147 passed
 - `/root/miniconda3/envs/hqx/bin/python -m py_compile tools/audit_tft_ag_data.py mmst_vit/config.py mmst_vit/manifest.py TFT_model/data.py tests/test_tft_ag_data.py`: 通过
 - 真实 CLI 扫描完成并生成上述 manifest/audit/protocol 文件
 
