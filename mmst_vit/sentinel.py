@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
 import json
+import os
 import random
 import re
+import shutil
+import tempfile
 import time
+from datetime import datetime, timezone
 import urllib.error
 import urllib.request
 from collections import Counter
@@ -31,10 +36,310 @@ DEFAULT_OSS_BUCKET = "alisg-tec-chi-pai-oss-prod-01"
 DEFAULT_OSS_ACCESS_KEY_ID = ""
 DEFAULT_OSS_ACCESS_KEY_SECRET = ""
 
+FIVE_STATE_NAMES = frozenset({"illinois", "iowa", "louisiana", "mississippi", "new york"})
+FIVE_STATE_ANSI = {"17", "19", "22", "28", "36"}
+FIVE_STATE_YEARS = tuple(range(2017, 2023))
+STATE_NAME_TO_ANSI = {
+    "illinois": "17", "iowa": "19", "louisiana": "22", "mississippi": "28", "new york": "36",
+}
+STATE_ABBR_TO_ANSI = {"IL": "17", "IA": "19", "LA": "22", "MS": "28", "NY": "36"}
+
 
 def _matched_fips(path: str, target_fips: set[str]) -> set[str]:
     found = {match.group("fips") for match in FIPS_RE.finditer(path)}
     return found & target_fips
+
+
+def normalize_state_name(value: object) -> str:
+    return " ".join(str(value or "").strip().lower().split())
+
+
+def _parsed_state_ansi(value: object) -> str:
+    text = normalize_state_name(value)
+    if text in STATE_NAME_TO_ANSI:
+        return STATE_NAME_TO_ANSI[text]
+    return STATE_ABBR_TO_ANSI.get(str(value or "").strip().upper(), str(value or "").strip().zfill(2) if str(value or "").strip().isdigit() else "") or ""
+
+
+def is_five_state_fips(fips: object, county_ansi: object = "", state: object = "") -> bool:
+    text = str(fips or "").strip()
+    if text.endswith(".0"):
+        text = text[:-2]
+    if text.isdigit() and len(text) == 5:
+        return text.zfill(5)[:2] in FIVE_STATE_ANSI
+    state_ansi = _parsed_state_ansi(state if state else (text if len(text) <= 2 else ""))
+    if state_ansi in FIVE_STATE_ANSI and county_ansi != "":
+        county = str(county_ansi).strip()
+        if county.endswith(".0"):
+            county = county[:-2]
+        return county.isdigit()
+    return state_ansi in FIVE_STATE_ANSI
+
+
+def _row_fips(row: dict) -> str | None:
+    for key in ("FIPS", "fips", "FIPS Code"):
+        value = row.get(key)
+        if value not in (None, ""):
+            text = str(value).strip()
+            if text.endswith(".0"):
+                text = text[:-2]
+            if text.isdigit():
+                return text.zfill(5)
+    state = _parsed_state_ansi(row.get("state_ansi", row.get("State ANSI", row.get("state"))))
+    county = str(row.get("county_ansi", row.get("County ANSI", row.get("county"))) or "").strip()
+    if county.endswith(".0"):
+        county = county[:-2]
+    if state.isdigit() and county.isdigit():
+        return state.zfill(2) + county.zfill(3)
+    return None
+
+
+def filter_usda_rows(rows: Iterable[dict]) -> list[dict]:
+    kept = []
+    for row in rows:
+        fips = _row_fips(row)
+        if fips and is_five_state_fips(fips):
+            kept.append(row)
+    return kept
+
+
+def _usda_sample_rows(rows: Iterable[dict]) -> list[dict]:
+    return [
+        row for row in rows
+        if str(row.get("commodity_desc", "")).strip().upper() == "CORN"
+        and str(row.get("reference_period_desc", "")).strip().upper() == "YEAR"
+        and _row_fips(row)
+        and is_five_state_fips(_row_fips(row))
+    ]
+
+
+def _row_is_five_state(row: dict) -> bool:
+    fips = _row_fips(row)
+    if fips:
+        return is_five_state_fips(fips)
+    return is_five_state_fips("", state=row.get("state", row.get("state_name", row.get("state_ansi"))))
+
+
+def classify_url_rows(rows: Sequence[dict]) -> dict[str, list[dict]]:
+    keep, delete = [], []
+    for row in rows:
+        image_type = str(row.get("image_type", "")).strip().upper()
+        if image_type == "AG" and _row_is_five_state(row):
+            keep.append(row)
+        else:
+            delete.append(row)
+    return {"keep": keep, "delete": delete}
+
+
+def _read_jsonl(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def _weather_fips(weather_dir: Path, years: Iterable[int]) -> set[str]:
+    result = set()
+    for year in years:
+        for path in sorted((weather_dir / str(year)).glob("**/*.csv")):
+            state_dir = next((parent for parent in path.parents if parent.parent == weather_dir / str(year)), None)
+            if state_dir is not None and _parsed_state_ansi(state_dir.name) not in FIVE_STATE_ANSI:
+                continue
+            try:
+                with path.open(newline="", encoding="utf-8-sig") as handle:
+                    for row in csv.DictReader(handle):
+                        value = _row_fips(row)
+                        if value:
+                            result.add(value)
+            except (OSError, UnicodeError):
+                continue
+    return result
+
+
+def _usda_rows_by_year(usda_dir: Path, years: Iterable[int]) -> dict[int, tuple[list[str], list[dict]]]:
+    result = {}
+    for year in sorted(years):
+        path = usda_dir / f"USDA_Corn_County_{year}.csv"
+        if not path.exists():
+            continue
+        with path.open(newline="", encoding="utf-8-sig") as handle:
+            reader = csv.DictReader(handle)
+            result[year] = (reader.fieldnames or [], list(reader))
+    return result
+
+
+def _valid_target_fips(usda_dir: Path, weather_dir: Path, years: Iterable[int]) -> set[str]:
+    usda = set()
+    for rows in _usda_rows_by_year(usda_dir, years).values():
+        usda.update(fips for row in _usda_sample_rows(rows[1]) if (fips := _row_fips(row)))
+    weather_states = set()
+    for year in years:
+        year_dir = weather_dir / str(year)
+        if year_dir.exists():
+            weather_states.update(
+                _parsed_state_ansi(path.name)
+                for path in year_dir.iterdir()
+                if path.is_dir() and _parsed_state_ansi(path.name) in FIVE_STATE_ANSI
+            )
+    return {fips for fips in usda if fips[:2] in weather_states}
+
+
+def _weather_directories_to_delete(weather_dir: Path, years: Iterable[int]) -> list[str]:
+    deleted = []
+    for year in sorted(years):
+        year_dir = weather_dir / str(year)
+        if not year_dir.exists():
+            continue
+        for state_dir in sorted(path for path in year_dir.iterdir() if path.is_dir()):
+            state_ansi = _parsed_state_ansi(state_dir.name)
+            if state_ansi not in FIVE_STATE_ANSI:
+                deleted.append(str(state_dir))
+    return deleted
+
+
+def build_sync_plan(
+    usda_dir: Path,
+    weather_dir: Path,
+    url_manifest: Path,
+    years: Iterable[int] = FIVE_STATE_YEARS,
+    source_entries: Sequence[dict] = (),
+    extract_root: Path | None = None,
+) -> dict:
+    years = tuple(sorted({int(year) for year in years}))
+    if set(years) != set(FIVE_STATE_YEARS):
+        raise ValueError("five-state sync requires years 2017--2022")
+    target_fips = sorted(_valid_target_fips(usda_dir, weather_dir, years))
+    usda_plan = {}
+    for year, (fieldnames, rows) in _usda_rows_by_year(usda_dir, years).items():
+        kept = [row for row in rows if _row_is_five_state(row)]
+        usda_plan[str(year)] = {"keep": len(kept), "delete": len(rows) - len(kept), "path": str(usda_dir / f"USDA_Corn_County_{year}.csv")}
+    url_classification = classify_url_rows(_read_jsonl(url_manifest))
+    entries = [dict(entry) for entry in source_entries if str(entry.get("image_type", "AG")).upper() == "AG"]
+    county_paths = []
+    if extract_root:
+        county_paths = [str(extract_root / "AG" / str(entry["year"]) / fips / Path(entry["path"]).name) for entry in entries for fips in entry.get("fips", []) if fips in target_fips]
+    return {
+        "protocol": {"states": sorted(FIVE_STATE_NAMES), "ansi": sorted(FIVE_STATE_ANSI), "years": list(years), "image_types": ["AG"]},
+        "target_fips": target_fips,
+        "usda": usda_plan,
+        "weather_state_directories_to_delete": _weather_directories_to_delete(weather_dir, years),
+        "old_url_manifest_to_delete": [{"oss_key": row.get("oss_key"), "path": row.get("path"), "reason": "non-five-state-or-NDVI"} for row in url_classification["delete"]],
+        "old_url_manifest_to_keep": len(url_classification["keep"]),
+        "oss_objects_to_delete": [row.get("oss_key") for row in url_classification["delete"] if row.get("oss_key")],
+        "ag_source_files_to_download": [entry.get("path") for entry in entries],
+        "county_files_to_upload": county_paths,
+    }
+
+
+def backup_usda_files(usda_dir: Path, years: Iterable[int], backup_root: Path) -> list[dict]:
+    report = []
+    backup_root.mkdir(parents=True, exist_ok=True)
+    for year in sorted(years):
+        source = usda_dir / f"USDA_Corn_County_{year}.csv"
+        if not source.exists():
+            continue
+        target = backup_root / source.name
+        shutil.copy2(source, target)
+        report.append({"source": str(source), "backup": str(target), "sha256": sha256(source), "lines": sum(1 for _ in source.open(encoding="utf-8"))})
+    return report
+
+
+def delete_oss_objects(rows: Sequence[dict], bucket) -> dict:
+    deleted, failed = [], []
+    for row in rows:
+        key = row.get("oss_key") if isinstance(row, dict) else str(row)
+        if not key:
+            continue
+        try:
+            bucket.delete_object(key)
+            deleted.append(key)
+        except Exception as exc:
+            failed.append({"oss_key": key, "error": str(exc)})
+    if failed:
+        raise RuntimeError(f"OSS deletion failed: {json.dumps(failed, sort_keys=True)}")
+    return {"deleted": deleted, "failed": failed}
+
+
+def _rewrite_usda_files(usda_dir: Path, years: Iterable[int]) -> dict:
+    result = {}
+    for year in sorted(years):
+        path = usda_dir / f"USDA_Corn_County_{year}.csv"
+        if not path.exists():
+            continue
+        with path.open(newline="", encoding="utf-8-sig") as handle:
+            reader = csv.DictReader(handle)
+            fieldnames = reader.fieldnames or []
+            rows = list(reader)
+        kept = [row for row in rows if _row_is_five_state(row)]
+        text_lines = ["\ufeff" + ",".join(fieldnames)]
+        text_lines.extend(",".join(row.get(field, "") for field in fieldnames) for row in kept)
+        atomic_write_text(path, "\n".join(text_lines) + "\n")
+        result[str(year)] = {"keep": len(kept), "delete": len(rows) - len(kept)}
+    return result
+
+
+def sync_cropnet_five_state(
+    usda_dir: Path,
+    weather_dir: Path,
+    years: Iterable[int] = FIVE_STATE_YEARS,
+    url_manifest: Path = DEFAULT_URL_MANIFEST,
+    run_root: Path = DEFAULT_RUNTIME_ROOT / "sync-runs",
+    download_root: Path = DEFAULT_DOWNLOAD_ROOT,
+    extract_root: Path = DEFAULT_EXTRACT_ROOT,
+    url_output: Path | None = None,
+    bucket=None,
+    oss_prefix: str = "sentinel",
+    execute: bool = False,
+    tree_payload: Sequence[dict] | None = None,
+) -> dict:
+    years = tuple(sorted({int(year) for year in years}))
+    target_fips = _valid_target_fips(usda_dir, weather_dir, years)
+    entries = parse_hf_tree(tree_payload, target_fips, set(years), {"AG"}) if tree_payload is not None else (fetch_hf_files(target_fips, set(years), {"AG"}) if target_fips else [])
+    plan = build_sync_plan(usda_dir, weather_dir, url_manifest, years, entries, extract_root)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    run_dir = run_root / timestamp
+    run_dir.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(run_dir / "plan.json", json.dumps(plan, indent=2, sort_keys=True) + "\n")
+    result = {"dry_run": not execute, "run_dir": str(run_dir), "plan": plan, "status": []}
+    if not execute:
+        atomic_write_text(run_dir / "status.json", json.dumps(result, indent=2, sort_keys=True) + "\n")
+        return result
+    if bucket is None:
+        raise ValueError("execute requires an authenticated OSS bucket")
+    backup = backup_usda_files(usda_dir, years, run_dir / "usda-backup")
+    result["status"].append({"step": "backup-usda", "report": backup})
+    download_result = sync_counties_to_oss(entries, download_root, extract_root, bucket, run_dir / "sentinel_urls_cropnet5_ag.jsonl", oss_prefix)
+    if download_result["failed"]:
+        result["status"].append({"step": "ag-sync", "result": download_result})
+        atomic_write_text(run_dir / "status.json", json.dumps(result, indent=2, sort_keys=True) + "\n")
+        raise RuntimeError("AG synchronization failed")
+    result["status"].append({"step": "ag-sync", "result": download_result})
+    delete_result = delete_oss_objects([{"oss_key": key} for key in plan["oss_objects_to_delete"]], bucket)
+    result["status"].append({"step": "delete-oss", "result": delete_result})
+    for directory in plan["weather_state_directories_to_delete"]:
+        shutil.rmtree(directory)
+    result["status"].append({"step": "delete-weather", "count": len(plan["weather_state_directories_to_delete"])})
+    result["status"].append({"step": "rewrite-usda", "result": _rewrite_usda_files(usda_dir, years)})
+    new_rows = [*classify_url_rows(_read_jsonl(url_manifest))["keep"], *_read_jsonl(run_dir / "sentinel_urls_cropnet5_ag.jsonl")]
+    new_rows = [row for row in new_rows if str(row.get("image_type", "")).upper() == "AG" and _row_is_five_state(row)]
+    url_output = url_output or url_manifest.with_name("sentinel_urls_cropnet5_ag.jsonl")
+    atomic_write_text(url_output, "".join(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n" for row in new_rows))
+    result["status"].append({"step": "rewrite-url-manifest", "count": len(new_rows), "path": str(url_output)})
+    atomic_write_text(run_dir / "status.json", json.dumps(result, indent=2, sort_keys=True) + "\n")
+    return result
+
+
+def atomic_write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent), text=True)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except Exception:
+        Path(temporary).unlink(missing_ok=True)
+        raise
 
 
 def parse_hf_tree(payload: Sequence[dict], target_fips: set[str], years: set[int], image_types: set[str]) -> list[dict]:
@@ -156,6 +461,7 @@ def download_one(entry: dict, destination: Path, resume: bool = True,
                 time.sleep(random.uniform(1, 3))
                 continue
             raise
+    raise RuntimeError(f"download retries exhausted for {entry.get('path')}")
 
 
 def download_url_manifest(url_manifest: Path, cache_root: Path, resume: bool = True) -> dict:
@@ -393,14 +699,49 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--download", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--upload-oss", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--url-manifest", type=Path, default=DEFAULT_URL_MANIFEST)
+    parser.add_argument("--cropnet5-url-manifest", type=Path, default=None)
     parser.add_argument("--oss-prefix", default="sentinel")
     parser.add_argument("--oss-endpoint", default=DEFAULT_OSS_ENDPOINT)
     parser.add_argument("--oss-bucket", default=DEFAULT_OSS_BUCKET)
+    parser.add_argument("--sync-cropnet-five-state", action="store_true")
+    parser.add_argument("--execute", action="store_true", help="Execute destructive five-state cleanup; otherwise dry-run")
+    parser.add_argument("--usda-dir", type=Path, default=Path("/data/raid0/hqx/Product_model_runtime/train_dataset/cropnet_dataset/data/usda_corn"))
+    parser.add_argument("--weather-dir", type=Path, default=Path("/data/raid0/hqx/Product_model_runtime/train_dataset/cropnet_dataset/data/weather"))
+    parser.add_argument("--sync-run-root", type=Path, default=DEFAULT_RUNTIME_ROOT / "sync-runs")
     return parser.parse_args()
 
 
 def main() -> None:
     args = _parse_args()
+    if args.sync_cropnet_five_state:
+        bucket = None
+        if args.execute:
+            required = {
+                "OSS_ENDPOINT": os.environ.get("OSS_ENDPOINT", args.oss_endpoint),
+                "OSS_BUCKET": os.environ.get("OSS_BUCKET", args.oss_bucket),
+                "OSS_ACCESS_KEY_ID": os.environ.get("OSS_ACCESS_KEY_ID", DEFAULT_OSS_ACCESS_KEY_ID),
+                "OSS_ACCESS_KEY_SECRET": os.environ.get("OSS_ACCESS_KEY_SECRET", DEFAULT_OSS_ACCESS_KEY_SECRET),
+            }
+            missing = [name for name, value in required.items() if not value]
+            if missing:
+                raise SystemExit("missing OSS environment variables: " + ", ".join(missing))
+            bucket = create_oss_bucket(required["OSS_ENDPOINT"], required["OSS_BUCKET"], required["OSS_ACCESS_KEY_ID"], required["OSS_ACCESS_KEY_SECRET"])
+        result = sync_cropnet_five_state(
+            usda_dir=args.usda_dir,
+            weather_dir=args.weather_dir,
+            years=FIVE_STATE_YEARS,
+            url_manifest=args.url_manifest,
+            run_root=args.sync_run_root,
+            download_root=args.destination,
+            extract_root=args.extract_root,
+            url_output=args.cropnet5_url_manifest,
+            bucket=bucket,
+            oss_prefix=args.oss_prefix,
+            execute=args.execute,
+            tree_payload=json.loads(args.tree_json.read_text(encoding="utf-8")) if args.tree_json else None,
+        )
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return
     if args.use_manifest:
         entries = [json.loads(line) for line in args.use_manifest.read_text(encoding="utf-8").splitlines() if line.strip()]
     else:
@@ -414,8 +755,6 @@ def main() -> None:
     args.output_manifest.write_text("\n".join(json.dumps(item, sort_keys=True) for item in entries) + "\n", encoding="utf-8")
     print(json.dumps(summarize_manifest(entries), indent=2))
     if args.download and args.upload_oss:
-        import os
-
         required = {
             "OSS_ENDPOINT": args.oss_endpoint,
             "OSS_BUCKET": args.oss_bucket,
