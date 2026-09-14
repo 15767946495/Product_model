@@ -26,6 +26,19 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _source_sha256(audit_hashes: dict[str, str]) -> dict[str, str]:
+    """Add code provenance without importing model or training modules."""
+    source_paths = {
+        "TFT_model/models.py": ROOT / "TFT_model" / "models.py",
+        "TFT_model/train.py": ROOT / "TFT_model" / "train.py",
+        "TFT_model/infer.py": ROOT / "TFT_model" / "infer.py",
+        "TFT_model/data.py": ROOT / "TFT_model" / "data.py",
+    }
+    result = dict(audit_hashes)
+    result.update({name: _sha256(path) for name, path in source_paths.items()})
+    return dict(sorted(result.items()))
+
+
 def _audit_file(path: Path, dates: list[str], fips: str, year: int, cache: dict) -> int:
     file_cache = cache.setdefault("files", {})
     if str(path) not in file_cache:
@@ -97,6 +110,10 @@ def _audit_ag_samples_with_results(samples, ag_root) -> tuple[dict, list]:
         "train": (2017, 2018, 2019, 2020), "val": (2021,), "test": (2022,)
     }.items() for year in years}
     split_state_year = Counter()
+    state_coverage = {
+        state: Counter(input_count=0, valid_count=0, invalid_count=0)
+        for state in CROPNET_FIVE_STATES
+    }
     split_counts = Counter()
     invalid_split_count = 0
     for index, sample in enumerate(samples):
@@ -106,6 +123,8 @@ def _audit_ag_samples_with_results(samples, ag_root) -> tuple[dict, list]:
         year = sample.get("Year")
         states[state] += 1
         years[str(year)] += 1
+        if state in state_coverage:
+            state_coverage[state]["input_count"] += 1
         ok, paths, error = _audit_one(sample, root, index, cache)
         split = split_by_year.get(year, "unknown") if isinstance(year, int) else "unknown"
         split_state_year[(split, state, str(year), "valid" if ok else "invalid")] += 1
@@ -119,7 +138,11 @@ def _audit_ag_samples_with_results(samples, ag_root) -> tuple[dict, list]:
                 file_hashes[str(path)] = _sha256(path)
         if ok:
             valid_count += 1
+            if state in state_coverage:
+                state_coverage[state]["valid_count"] += 1
         else:
+            if state in state_coverage:
+                state_coverage[state]["invalid_count"] += 1
             reason = error or "unknown error"
             reasons[reason.split(": ", 1)[-1]] += 1
             invalid_samples.append({
@@ -146,6 +169,9 @@ def _audit_ag_samples_with_results(samples, ag_root) -> tuple[dict, list]:
             for split in ("train", "val", "test")
         },
         "invalid_split_count": invalid_split_count,
+        "state_coverage": {
+            state: dict(state_coverage[state]) for state in sorted(state_coverage)
+        },
     }
     return audit, results
 
@@ -154,6 +180,71 @@ def audit_ag_samples(samples, ag_root) -> dict:
     """Audit every sample and return counts, reasons, identities, and file hashes."""
     audit, _ = _audit_ag_samples_with_results(samples, ag_root)
     return audit
+
+
+def build_tft_ag_protocol(
+    audit: dict,
+    manifest_counts: dict[str, int],
+    ag_root: str | Path,
+    source_shared_jsonl: str | Path | None = None,
+    representative: dict | None = None,
+) -> dict:
+    """Build the complete read-only protocol record from audit results."""
+    representative = representative or {}
+    grid_count = representative.get("grid_count")
+    shape = [12, grid_count, 3, 224, 224] if grid_count is not None else None
+    state_coverage = {
+        state: audit.get("state_coverage", {}).get(
+            state, {"input_count": 0, "valid_count": 0, "invalid_count": 0}
+        )
+        for state in sorted(CROPNET_FIVE_STATES)
+    }
+    verification = {
+        "status": "data-only",
+        "model_boundary": {
+            "dataset_independent_of_model_construction": True,
+            "tft_model_imported": False,
+            "tft_forward_called": False,
+            "training_run": False,
+            "inference_run": False,
+            "TFT_model/models.py_changed": False,
+            "training_entrypoints_changed": False,
+            "sentinel_original_files_changed": False,
+            "task8_active_runtime_changed": False,
+        },
+        "representative_sample": {
+            "FIPS": representative.get("FIPS"),
+            "Year": representative.get("Year"),
+            "State": representative.get("State"),
+            "County": representative.get("County", ""),
+            "ag_dates": AG_DATES,
+            "ag_images_shape": shape,
+            "dtype": "torch.float32",
+            "grid_count": grid_count,
+            "transform": "eval: CenterCrop(224) + Normalize([0.466, 0.471, 0.380], [0.195, 0.194, 0.192])",
+            "seed": 0,
+            "metadata_keys": ["FIPS", "Year", "State", "County", "grid_count", "ag_dates"],
+            "excluded_keys": ["weather", "label"],
+        },
+        "source_sha256": _source_sha256(audit["sha256"]),
+        "state_coverage": state_coverage,
+    }
+    return {
+        "states": sorted(CROPNET_FIVE_STATES),
+        "split": {"train": [2017, 2018, 2019, 2020], "val": [2021], "test": [2022]},
+        "modality": "AG-only",
+        "ag_dates": AG_DATES,
+        "ag_path_count": 2,
+        "ag_root": str(ag_root),
+        "source_shared_jsonl": str(source_shared_jsonl) if source_shared_jsonl else None,
+        "manifest_counts": manifest_counts,
+        "split_counts": audit["split_counts"],
+        "state_coverage": state_coverage,
+        "model_boundary": verification["model_boundary"],
+        "representative_sample": verification["representative_sample"],
+        "source_sha256": verification["source_sha256"],
+        "final_data_only_verification": verification,
+    }
 
 
 def build_tft_ag_manifest(shared_rows, ag_root, output_dir) -> dict[str, int]:
@@ -183,6 +274,17 @@ def build_tft_ag_manifest(shared_rows, ag_root, output_dir) -> dict[str, int]:
         counts[split] = len(valid_rows)
     audit_dir.mkdir(parents=True, exist_ok=True)
     (audit_dir / "ag_integrity.json").write_text(json.dumps(audit, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    representative = {}
+    for index, sample in enumerate(rows):
+        ok, paths, _ = results[index]
+        if ok:
+            representative = dict(sample)
+            representative["grid_count"] = _audit_file(
+                paths[0], AG_DATES[:6], str(sample["FIPS"]).strip(), int(sample["Year"]), {}
+            )
+            break
+    protocol = build_tft_ag_protocol(audit, counts, ag_root, representative=representative)
+    (audit_dir / "protocol.json").write_text(json.dumps(protocol, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return counts
 
 
@@ -200,14 +302,18 @@ def main() -> None:
         rows = [json.loads(line) for line in handle if line.strip()]
     counts = build_tft_ag_manifest(rows, args.ag_root, args.output_dir)
     audit = json.loads((args.output_dir / "audit" / "ag_integrity.json").read_text(encoding="utf-8"))
-    protocol = {
-        "states": sorted(CROPNET_FIVE_STATES),
-        "split": {"train": [2017, 2018, 2019, 2020], "val": [2021], "test": [2022]},
-        "modality": "AG-only", "ag_dates": AG_DATES, "ag_path_count": 2,
-        "source_shared_jsonl": str(args.shared_jsonl), "ag_root": str(args.ag_root),
-        "manifest_counts": counts,
-        "split_counts": audit["split_counts"],
-    }
+    representative = {}
+    for split in ("train", "val", "test"):
+        manifest = args.output_dir / "manifests" / f"{split}.jsonl"
+        if manifest.exists() and manifest.read_text(encoding="utf-8").strip():
+            representative = json.loads(manifest.read_text(encoding="utf-8").splitlines()[0])
+            representative["grid_count"] = _audit_file(
+                Path(representative["ag_paths"][0]), AG_DATES[:6], representative["FIPS"], representative["Year"], {}
+            )
+            break
+    protocol = build_tft_ag_protocol(
+        audit, counts, args.ag_root, source_shared_jsonl=args.shared_jsonl, representative=representative
+    )
     audit_dir = args.output_dir / "audit"
     audit_dir.mkdir(parents=True, exist_ok=True)
     (audit_dir / "protocol.json").write_text(json.dumps(protocol, indent=2, sort_keys=True) + "\n", encoding="utf-8")

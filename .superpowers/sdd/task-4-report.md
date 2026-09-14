@@ -9,7 +9,8 @@
 
 ## 五州协议与审计统计
 
-- 协议状态州：Illinois、Iowa、Louisiana、Mississippi、New York。
+- 协议范围：Illinois、Iowa、Louisiana、Mississippi、New York。
+- 当前真实样本覆盖：Illinois=532；Iowa=0；Louisiana=0；Mississippi=0；New York=0。
 - 固定年份 split：train=2017--2020，val=2021，test=2022。
 - 现有真实输入事实：`ag_integrity.json` 审计输入为 532 行，实际只有 Illinois；没有从八州输入中伪造或补齐其余四州。
 - train：359 输入，355 有效，4 无效。

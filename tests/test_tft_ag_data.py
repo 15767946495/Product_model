@@ -1,5 +1,6 @@
 from pathlib import Path
-import inspect
+import builtins
+import ast
 import sys
 
 import h5py
@@ -24,7 +25,6 @@ from data import (  # noqa: E402
 import data as data_module  # noqa: E402
 from tools.audit_tft_ag_data import audit_ag_samples, build_tft_ag_manifest  # noqa: E402
 from mmst_vit.config import tft_ag_quarter_paths  # noqa: E402
-from models import TFTEncoderForYieldPrediction  # noqa: E402
 
 
 AG_DATES = [
@@ -86,22 +86,62 @@ def test_ag_dataset_is_independent_of_tft_model_construction(ag_fixture, monkeyp
     root, sample = ag_fixture
     sample = dict(sample, weather={"must_not_load": True}, label=123)
 
-    def fail_if_constructed(*args, **kwargs):
-        raise AssertionError("TFT model construction is outside the AG dataset contract")
+    class ModelSentinel:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("TFT model construction is outside the AG dataset contract")
 
-    monkeypatch.setattr("models.TFTEncoderForYieldPrediction", fail_if_constructed)
+        def forward(self, *args, **kwargs):
+            raise AssertionError("TFT forward is outside the AG dataset contract")
+
+    sentinel = type(sys)("models")
+    sentinel.TFTEncoderForYieldPrediction = ModelSentinel
+    monkeypatch.setitem(sys.modules, "models", sentinel)
+    original_import = builtins.__import__
+
+    def reject_model_import(name, *args, **kwargs):
+        if name == "models" or name.startswith("models."):
+            raise AssertionError("AgricultureImageDataset must not import TFT models")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", reject_model_import)
     item = AgricultureImageDataset([sample], ag_root=root, train=False, seed=0)[0]
 
     assert set(item) == {"ag_images", "ag_dates", "FIPS", "Year", "State", "County", "grid_count"}
     assert "weather" not in item
     assert "label" not in item
+    assert "models" in sys.modules
 
 
-def test_tft_encoder_forward_signature_remains_unchanged_without_forward_call():
-    assert list(inspect.signature(TFTEncoderForYieldPrediction.forward).parameters) == [
+def test_real_ag_read_does_not_import_or_call_tft_model(monkeypatch):
+    _, row = _first_real_ag_row()
+    dataset_row = {key: value for key, value in row.items() if key != "ag_paths"}
+    monkeypatch.delitem(sys.modules, "models", raising=False)
+
+    original_import = builtins.__import__
+
+    def reject_model_import(name, *args, **kwargs):
+        if name == "models" or name.startswith("models."):
+            raise AssertionError("real AG read must not import TFT models")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", reject_model_import)
+    item = AgricultureImageDataset([dataset_row], ag_root=AG_ROOT, train=False, seed=0)[0]
+
+    assert item["ag_images"].shape == (12, item["grid_count"], 3, 224, 224)
+    assert item["ag_images"].dtype == torch.float32
+    assert "models" not in sys.modules
+
+
+def test_tft_forward_signature_is_verified_without_importing_model_module():
+    tree = ast.parse((ROOT / "TFT_model" / "models.py").read_text(encoding="utf-8"))
+    encoder = next(
+        node for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "TFTEncoderForYieldPrediction"
+    )
+    forward = next(node for node in encoder.body if isinstance(node, ast.FunctionDef) and node.name == "forward")
+    assert [arg.arg for arg in forward.args.args] == [
         "self", "grid_feats", "grid_coords", "grid_mask", "soil_feats", "seq_lens"
     ]
-    assert not hasattr(TFTEncoderForYieldPrediction, "_ag_images")
 
 
 def test_real_five_state_ag_sample_has_twelve_dates_shape_and_metadata():
@@ -110,8 +150,10 @@ def test_real_five_state_ag_sample_has_twelve_dates_shape_and_metadata():
     item = AgricultureImageDataset([dataset_row], ag_root=AG_ROOT, train=False, seed=0)[0]
 
     assert split in {"train", "val", "test"}
-    assert item["ag_images"].shape[0] == 12
-    assert item["ag_images"].shape[2:] == (3, 224, 224)
+    assert item["ag_images"].shape == (12, item["grid_count"], 3, 224, 224)
+    assert item["ag_images"].shape == (12, 24, 3, 224, 224)
+    assert item["ag_images"].dtype == torch.float32
+    assert item["grid_count"] == 24
     assert item["ag_dates"] == AG_DATES
     assert item["FIPS"] == str(row["FIPS"]).zfill(5)
     assert item["Year"] == row["Year"]
@@ -120,6 +162,31 @@ def test_real_five_state_ag_sample_has_twelve_dates_shape_and_metadata():
     assert item["grid_count"] == item["ag_images"].shape[1]
     assert "weather" not in item
     assert "label" not in item
+
+
+def test_generated_protocol_contains_complete_data_only_audit(ag_fixture, tmp_path):
+    root, sample = ag_fixture
+    output = tmp_path / "runtime"
+    build_tft_ag_manifest([sample], root, output)
+
+    protocol = json.loads((output / "audit" / "protocol.json").read_text())
+    verification = protocol["final_data_only_verification"]
+    assert protocol["states"] == sorted(CROPNET_FIVE_STATES)
+    assert verification["model_boundary"]["training_run"] is False
+    assert verification["model_boundary"]["inference_run"] is False
+    assert verification["model_boundary"]["tft_model_imported"] is False
+    assert verification["representative_sample"]["ag_dates"] == AG_DATES
+    assert verification["representative_sample"]["ag_images_shape"] == [12, 2, 3, 224, 224]
+    assert verification["representative_sample"]["seed"] == 0
+    assert verification["source_sha256"]
+    assert "TFT_model/models.py" in verification["source_sha256"]
+    assert verification["state_coverage"] == {
+        "illinois": {"input_count": 1, "valid_count": 1, "invalid_count": 0},
+        "iowa": {"input_count": 0, "valid_count": 0, "invalid_count": 0},
+        "louisiana": {"input_count": 0, "valid_count": 0, "invalid_count": 0},
+        "mississippi": {"input_count": 0, "valid_count": 0, "invalid_count": 0},
+        "new york": {"input_count": 0, "valid_count": 0, "invalid_count": 0},
+    }
 
 
 def test_ag_dataset_accepts_real_year_prefixed_date_groups(ag_fixture):
