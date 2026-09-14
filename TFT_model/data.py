@@ -31,6 +31,7 @@ PROJECT_DIR = os.path.dirname(SCRIPT_DIR)
 if PROJECT_DIR not in sys.path:
     sys.path.insert(0, PROJECT_DIR)
 from cropnet_protocol import (  # noqa: E402
+    CROPNET_FIVE_STATES,
     PROTOCOL_START_MONTH,
     PROTOCOL_END_MONTH,
     PROTOCOL_DAYS_PER_MONTH,
@@ -51,6 +52,52 @@ SOIL_DIM = len(SOIL_FEATURES)
 
 DEFAULT_CARBON_BUCKET_ID_PATH = os.path.join(TRAIN_DATA_DIR, "us_carbon_bucket_id.json")
 DEFAULT_PH_BUCKET_ID_PATH = os.path.join(TRAIN_DATA_DIR, "us_ph_bucket_id.json")
+
+
+def validate_five_state_sample(sample) -> None:
+    """Validate a sample against the five-state, 2017--2022 protocol."""
+    if not isinstance(sample, dict):
+        raise ValueError("sample must be a dict")
+
+    state = str(sample.get("State", "")).strip().lower()
+    if state not in CROPNET_FIVE_STATES:
+        raise ValueError(f"unsupported state: {sample.get('State')!r}")
+
+    try:
+        year = int(sample.get("Year", -1))
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"unsupported year: {sample.get('Year')!r}") from error
+    if year not in {2017, 2018, 2019, 2020, 2021, 2022}:
+        raise ValueError(f"unsupported year: {year}")
+
+
+def split_samples_by_year(
+    samples,
+    train_years=(2017, 2018, 2019, 2020),
+    val_years=(2021,),
+    test_years=(2022,),
+):
+    """Validate and split five-state samples into train, validation, and test."""
+    splits = {"train": [], "val": [], "test": []}
+    year_to_split = {
+        **{int(year): "train" for year in train_years},
+        **{int(year): "val" for year in val_years},
+        **{int(year): "test" for year in test_years},
+    }
+    for index, sample in enumerate(samples):
+        if not isinstance(sample, dict):
+            raise ValueError(f"sample {index} must be a dict")
+        state = str(sample.get("State", "")).strip().lower()
+        if state not in CROPNET_FIVE_STATES:
+            raise ValueError(f"sample {index} has unsupported state: {sample.get('State')!r}")
+        try:
+            year = int(sample.get("Year", -1))
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"sample {index} has unsupported year: {sample.get('Year')!r}") from error
+        if year not in year_to_split:
+            raise ValueError(f"sample {index} has unsupported year: {year}")
+        splits[year_to_split[year]].append(dict(sample))
+    return splits
 
 # ============================================================
 # 动态特征列（WRF-HRRR 原始列名）
