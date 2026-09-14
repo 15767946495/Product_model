@@ -13,10 +13,12 @@
   - 协议外州或年份抛出 `ValueError`。
 - 在 `TFT_model/data.py` 导出 `split_samples_by_year(...)`。
   - 默认训练年份为 2017--2020，验证年份为 2021，测试年份为 2022。
-  - 每个样本先执行五州和年份校验，再按指定年份集合划分。
+  - 自定义训练、验证、测试年份组先执行固定 2017--2022 协议校验；协议外分组年份直接抛出 `ValueError`。
+  - 每个样本统一调用 `validate_five_state_sample` 校验五州和固定协议年份，再按指定年份集合划分。
   - 返回 `train`、`val`、`test` 三个列表，并复制样本字典。
   - 协议外州或年份抛出带样本索引的 `ValueError`。
-- 新增 `tests/test_tft_ag_data.py`，覆盖正常划分、州名归一化、样本复制、协议外州、协议外年份及常量内容。
+- `split_samples_by_year` 返回类型标注为 `dict[str, list[dict]]`。
+- `tests/test_tft_ag_data.py` 覆盖四个训练年份、州名归一化、样本复制、协议外州、协议外年份、自定义协议外年份和常量内容。
 
 ## TDD 验证
 
@@ -29,7 +31,7 @@ ImportError: cannot import name 'CROPNET_FIVE_STATES' from 'cropnet_protocol'
 补充实现后，目标测试结果：
 
 ```text
-8 passed, 1 warning in 1.22s
+9 passed, 1 warning in 1.21s
 ```
 
 ## 完整验证
@@ -44,7 +46,7 @@ ImportError: cannot import name 'CROPNET_FIVE_STATES' from 'cropnet_protocol'
 结果：
 
 ```text
-112 passed, 1 warning in 29.66s
+112 passed, 1 warning in 29.28s
 py_compile exit code 0，无输出
 ```
 

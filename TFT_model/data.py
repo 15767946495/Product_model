@@ -76,9 +76,13 @@ def split_samples_by_year(
     train_years=(2017, 2018, 2019, 2020),
     val_years=(2021,),
     test_years=(2022,),
-):
+) -> dict[str, list[dict]]:
     """Validate and split five-state samples into train, validation, and test."""
     splits = {"train": [], "val": [], "test": []}
+    protocol_state = next(iter(CROPNET_FIVE_STATES))
+    for years in (train_years, val_years, test_years):
+        for year in years:
+            validate_five_state_sample({"State": protocol_state, "Year": year})
     year_to_split = {
         **{int(year): "train" for year in train_years},
         **{int(year): "val" for year in val_years},
@@ -87,13 +91,17 @@ def split_samples_by_year(
     for index, sample in enumerate(samples):
         if not isinstance(sample, dict):
             raise ValueError(f"sample {index} must be a dict")
-        state = str(sample.get("State", "")).strip().lower()
-        if state not in CROPNET_FIVE_STATES:
-            raise ValueError(f"sample {index} has unsupported state: {sample.get('State')!r}")
         try:
-            year = int(sample.get("Year", -1))
-        except (TypeError, ValueError) as error:
-            raise ValueError(f"sample {index} has unsupported year: {sample.get('Year')!r}") from error
+            validate_five_state_sample(sample)
+        except ValueError as error:
+            if str(error).startswith("unsupported state"):
+                raise ValueError(
+                    f"sample {index} has unsupported state: {sample.get('State')!r}"
+                ) from error
+            raise ValueError(
+                f"sample {index} has unsupported year: {sample.get('Year')!r}"
+            ) from error
+        year = int(sample["Year"])
         if year not in year_to_split:
             raise ValueError(f"sample {index} has unsupported year: {year}")
         splits[year_to_split[year]].append(dict(sample))
