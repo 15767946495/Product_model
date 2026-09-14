@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+import io
 import json
 import os
 import random
@@ -39,6 +40,11 @@ DEFAULT_OSS_ACCESS_KEY_SECRET = ""
 FIVE_STATE_NAMES = frozenset({"illinois", "iowa", "louisiana", "mississippi", "new york"})
 FIVE_STATE_ANSI = {"17", "19", "22", "28", "36"}
 FIVE_STATE_YEARS = tuple(range(2017, 2023))
+WEATHER_PROTOCOL_DATES = tuple(
+    (month, day)
+    for month in range(4, 10)
+    for day in range(1, 29)
+)
 STATE_NAME_TO_ANSI = {
     "illinois": "17", "iowa": "19", "louisiana": "22", "mississippi": "28", "new york": "36",
 }
@@ -83,7 +89,7 @@ def _row_fips(row: dict) -> str | None:
             text = str(value).strip()
             if text.endswith(".0"):
                 text = text[:-2]
-            if text.isdigit():
+            if text.isdigit() and len(text) == 5:
                 return text.zfill(5)
     state = _parsed_state_ansi(row.get("state_ansi", row.get("State ANSI", row.get("state"))))
     county = str(row.get("county_ansi", row.get("County ANSI", row.get("county"))) or "").strip()
@@ -94,23 +100,27 @@ def _row_fips(row: dict) -> str | None:
     return None
 
 
-def filter_usda_rows(rows: Iterable[dict]) -> list[dict]:
+def _is_usda_corn_year(row: dict) -> bool:
+    return (
+        str(row.get("commodity_desc", "")).strip().upper() == "CORN"
+        and str(row.get("reference_period_desc", "")).strip().upper() == "YEAR"
+    )
+
+
+def filter_usda_rows(rows: Iterable[dict], target_fips: set[str] | None = None) -> list[dict]:
+    target_fips = {str(value).zfill(5) for value in target_fips} if target_fips is not None else None
     kept = []
     for row in rows:
         fips = _row_fips(row)
-        if fips and is_five_state_fips(fips):
+        if _is_usda_corn_year(row) and fips and is_five_state_fips(fips) and (
+            target_fips is None or fips in target_fips
+        ):
             kept.append(row)
     return kept
 
 
 def _usda_sample_rows(rows: Iterable[dict]) -> list[dict]:
-    return [
-        row for row in rows
-        if str(row.get("commodity_desc", "")).strip().upper() == "CORN"
-        and str(row.get("reference_period_desc", "")).strip().upper() == "YEAR"
-        and _row_fips(row)
-        and is_five_state_fips(_row_fips(row))
-    ]
+    return filter_usda_rows(rows)
 
 
 def _row_is_five_state(row: dict) -> bool:
@@ -137,8 +147,8 @@ def _read_jsonl(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
-def _weather_fips(weather_dir: Path, years: Iterable[int]) -> set[str]:
-    result = set()
+def _weather_fips_by_year(weather_dir: Path, years: Iterable[int]) -> dict[int, set[str]]:
+    dates_by_fips: dict[tuple[str, int], set[tuple[int, int]]] = {}
     for year in years:
         for path in sorted((weather_dir / str(year)).glob("**/*.csv")):
             state_dir = next((parent for parent in path.parents if parent.parent == weather_dir / str(year)), None)
@@ -147,12 +157,38 @@ def _weather_fips(weather_dir: Path, years: Iterable[int]) -> set[str]:
             try:
                 with path.open(newline="", encoding="utf-8-sig") as handle:
                     for row in csv.DictReader(handle):
+                        if str(row.get("Daily/Monthly", "")).strip().lower() != "daily":
+                            continue
                         value = _row_fips(row)
-                        if value:
-                            result.add(value)
+                        if not value or not is_five_state_fips(value):
+                            continue
+                        month = row.get("Month")
+                        day = row.get("Day")
+                        if month in (None, "") or day in (None, ""):
+                            date_value = row.get("date") or row.get("Date")
+                            if date_value:
+                                match = re.search(r"(?:^|[-/])(\d{1,2})[-/](\d{1,2})(?:$|\s)", str(date_value))
+                                if match:
+                                    month, day = match.groups()
+                        try:
+                            date_key = (int(month), int(day))
+                            row_year = int(row.get("Year", year))
+                        except (TypeError, ValueError):
+                            continue
+                        if date_key in WEATHER_PROTOCOL_DATES:
+                            dates_by_fips.setdefault((value, row_year), set()).add(date_key)
             except (OSError, UnicodeError):
                 continue
-    return result
+    required = set(WEATHER_PROTOCOL_DATES)
+    complete_by_year: dict[int, set[str]] = {}
+    for (fips, year), dates in dates_by_fips.items():
+        if required <= dates:
+            complete_by_year.setdefault(year, set()).add(fips)
+    return complete_by_year
+
+
+def _weather_fips(weather_dir: Path, years: Iterable[int]) -> set[str]:
+    return set().union(*_weather_fips_by_year(weather_dir, years).values())
 
 
 def _usda_rows_by_year(usda_dir: Path, years: Iterable[int]) -> dict[int, tuple[list[str], list[dict]]]:
@@ -168,19 +204,16 @@ def _usda_rows_by_year(usda_dir: Path, years: Iterable[int]) -> dict[int, tuple[
 
 
 def _valid_target_fips(usda_dir: Path, weather_dir: Path, years: Iterable[int]) -> set[str]:
-    usda = set()
-    for rows in _usda_rows_by_year(usda_dir, years).values():
-        usda.update(fips for row in _usda_sample_rows(rows[1]) if (fips := _row_fips(row)))
-    weather_states = set()
-    for year in years:
-        year_dir = weather_dir / str(year)
-        if year_dir.exists():
-            weather_states.update(
-                _parsed_state_ansi(path.name)
-                for path in year_dir.iterdir()
-                if path.is_dir() and _parsed_state_ansi(path.name) in FIVE_STATE_ANSI
-            )
-    return {fips for fips in usda if fips[:2] in weather_states}
+    weather_by_year = _weather_fips_by_year(weather_dir, years)
+    target = set()
+    for year, rows in _usda_rows_by_year(usda_dir, years).items():
+        usda = {
+            fips
+            for row in _usda_sample_rows(rows[1])
+            if (fips := _row_fips(row))
+        }
+        target.update(usda & weather_by_year.get(year, set()))
+    return target
 
 
 def _weather_directories_to_delete(weather_dir: Path, years: Iterable[int]) -> list[str]:
@@ -196,6 +229,12 @@ def _weather_directories_to_delete(weather_dir: Path, years: Iterable[int]) -> l
     return deleted
 
 
+def _source_file_is_current(entry: dict, download_root: Path) -> bool:
+    path = download_root / str(entry.get("path", ""))
+    expected_size = int(entry.get("size", 0) or 0)
+    return path.is_file() and (not expected_size or path.stat().st_size == expected_size)
+
+
 def build_sync_plan(
     usda_dir: Path,
     weather_dir: Path,
@@ -203,6 +242,7 @@ def build_sync_plan(
     years: Iterable[int] = FIVE_STATE_YEARS,
     source_entries: Sequence[dict] = (),
     extract_root: Path | None = None,
+    download_root: Path | None = None,
 ) -> dict:
     years = tuple(sorted({int(year) for year in years}))
     if set(years) != set(FIVE_STATE_YEARS):
@@ -210,10 +250,11 @@ def build_sync_plan(
     target_fips = sorted(_valid_target_fips(usda_dir, weather_dir, years))
     usda_plan = {}
     for year, (fieldnames, rows) in _usda_rows_by_year(usda_dir, years).items():
-        kept = [row for row in rows if _row_is_five_state(row)]
+        kept = filter_usda_rows(rows, set(target_fips))
         usda_plan[str(year)] = {"keep": len(kept), "delete": len(rows) - len(kept), "path": str(usda_dir / f"USDA_Corn_County_{year}.csv")}
     url_classification = classify_url_rows(_read_jsonl(url_manifest))
     entries = [dict(entry) for entry in source_entries if str(entry.get("image_type", "AG")).upper() == "AG"]
+    download_root = download_root or Path(".")
     county_paths = []
     if extract_root:
         county_paths = [str(extract_root / "AG" / str(entry["year"]) / fips / Path(entry["path"]).name) for entry in entries for fips in entry.get("fips", []) if fips in target_fips]
@@ -225,7 +266,11 @@ def build_sync_plan(
         "old_url_manifest_to_delete": [{"oss_key": row.get("oss_key"), "path": row.get("path"), "reason": "non-five-state-or-NDVI"} for row in url_classification["delete"]],
         "old_url_manifest_to_keep": len(url_classification["keep"]),
         "oss_objects_to_delete": [row.get("oss_key") for row in url_classification["delete"] if row.get("oss_key")],
-        "ag_source_files_to_download": [entry.get("path") for entry in entries],
+        "ag_source_files_to_download": [
+            entry.get("path")
+            for entry in entries
+            if not _source_file_is_current(entry, download_root)
+        ],
         "county_files_to_upload": county_paths,
     }
 
@@ -239,8 +284,16 @@ def backup_usda_files(usda_dir: Path, years: Iterable[int], backup_root: Path) -
             continue
         target = backup_root / source.name
         shutil.copy2(source, target)
-        report.append({"source": str(source), "backup": str(target), "sha256": sha256(source), "lines": sum(1 for _ in source.open(encoding="utf-8"))})
+        with source.open(encoding="utf-8-sig") as handle:
+            lines = sum(1 for _ in handle)
+        report.append({"source": str(source), "backup": str(target), "sha256": sha256(source), "lines": lines})
     return report
+
+
+class OssDeletionError(RuntimeError):
+    def __init__(self, result: dict):
+        self.result = result
+        super().__init__(f"OSS deletion failed: {json.dumps(result['failed'], sort_keys=True)}")
 
 
 def delete_oss_objects(rows: Sequence[dict], bucket) -> dict:
@@ -255,11 +308,11 @@ def delete_oss_objects(rows: Sequence[dict], bucket) -> dict:
         except Exception as exc:
             failed.append({"oss_key": key, "error": str(exc)})
     if failed:
-        raise RuntimeError(f"OSS deletion failed: {json.dumps(failed, sort_keys=True)}")
+        raise OssDeletionError({"deleted": deleted, "failed": failed})
     return {"deleted": deleted, "failed": failed}
 
 
-def _rewrite_usda_files(usda_dir: Path, years: Iterable[int]) -> dict:
+def _rewrite_usda_files(usda_dir: Path, years: Iterable[int], target_fips: set[str]) -> dict:
     result = {}
     for year in sorted(years):
         path = usda_dir / f"USDA_Corn_County_{year}.csv"
@@ -269,10 +322,19 @@ def _rewrite_usda_files(usda_dir: Path, years: Iterable[int]) -> dict:
             reader = csv.DictReader(handle)
             fieldnames = reader.fieldnames or []
             rows = list(reader)
-        kept = [row for row in rows if _row_is_five_state(row)]
-        text_lines = ["\ufeff" + ",".join(fieldnames)]
-        text_lines.extend(",".join(row.get(field, "") for field in fieldnames) for row in kept)
-        atomic_write_text(path, "\n".join(text_lines) + "\n")
+        kept = filter_usda_rows(rows, target_fips)
+        buffer = io.StringIO(newline="")
+        writer = csv.DictWriter(buffer, fieldnames=fieldnames, lineterminator="\n")
+        writer.writeheader()
+        writer.writerows(kept)
+        candidate = "\ufeff" + buffer.getvalue()
+        validation_reader = csv.DictReader(io.StringIO(candidate.lstrip("\ufeff"), newline=""))
+        if validation_reader.fieldnames != fieldnames:
+            raise ValueError(f"USDA field validation failed for {path}")
+        validation_rows = list(validation_reader)
+        if len(validation_rows) != len(kept):
+            raise ValueError(f"USDA row validation failed for {path}")
+        atomic_write_text(path, candidate)
         result[str(year)] = {"keep": len(kept), "delete": len(rows) - len(kept)}
     return result
 
@@ -294,7 +356,7 @@ def sync_cropnet_five_state(
     years = tuple(sorted({int(year) for year in years}))
     target_fips = _valid_target_fips(usda_dir, weather_dir, years)
     entries = parse_hf_tree(tree_payload, target_fips, set(years), {"AG"}) if tree_payload is not None else (fetch_hf_files(target_fips, set(years), {"AG"}) if target_fips else [])
-    plan = build_sync_plan(usda_dir, weather_dir, url_manifest, years, entries, extract_root)
+    plan = build_sync_plan(usda_dir, weather_dir, url_manifest, years, entries, extract_root, download_root)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     run_dir = run_root / timestamp
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -306,26 +368,41 @@ def sync_cropnet_five_state(
     if bucket is None:
         raise ValueError("execute requires an authenticated OSS bucket")
     backup = backup_usda_files(usda_dir, years, run_dir / "usda-backup")
-    result["status"].append({"step": "backup-usda", "report": backup})
+    result["status"].append({"step": "backup-usda", "outcome": "completed", "report": backup})
     download_result = sync_counties_to_oss(entries, download_root, extract_root, bucket, run_dir / "sentinel_urls_cropnet5_ag.jsonl", oss_prefix)
     if download_result["failed"]:
-        result["status"].append({"step": "ag-sync", "result": download_result})
+        result["status"].append({"step": "ag-sync", "outcome": "failed", "result": download_result})
+        result["status"].extend(_not_run_cleanup_status())
         atomic_write_text(run_dir / "status.json", json.dumps(result, indent=2, sort_keys=True) + "\n")
         raise RuntimeError("AG synchronization failed")
-    result["status"].append({"step": "ag-sync", "result": download_result})
-    delete_result = delete_oss_objects([{"oss_key": key} for key in plan["oss_objects_to_delete"]], bucket)
-    result["status"].append({"step": "delete-oss", "result": delete_result})
+    result["status"].append({"step": "ag-sync", "outcome": "completed", "result": download_result})
+    try:
+        delete_result = delete_oss_objects([{"oss_key": key} for key in plan["oss_objects_to_delete"]], bucket)
+    except OssDeletionError as exc:
+        result["status"].append({"step": "delete-oss", "outcome": "failed", "result": exc.result})
+        result["status"].extend(_not_run_cleanup_status())
+        atomic_write_text(run_dir / "status.json", json.dumps(result, indent=2, sort_keys=True) + "\n")
+        raise
+    result["status"].append({"step": "delete-oss", "outcome": "completed", "result": delete_result})
     for directory in plan["weather_state_directories_to_delete"]:
         shutil.rmtree(directory)
-    result["status"].append({"step": "delete-weather", "count": len(plan["weather_state_directories_to_delete"])})
-    result["status"].append({"step": "rewrite-usda", "result": _rewrite_usda_files(usda_dir, years)})
+    result["status"].append({"step": "delete-weather", "outcome": "completed", "count": len(plan["weather_state_directories_to_delete"])})
+    result["status"].append({"step": "rewrite-usda", "outcome": "completed", "result": _rewrite_usda_files(usda_dir, years, set(plan["target_fips"]))})
     new_rows = [*classify_url_rows(_read_jsonl(url_manifest))["keep"], *_read_jsonl(run_dir / "sentinel_urls_cropnet5_ag.jsonl")]
     new_rows = [row for row in new_rows if str(row.get("image_type", "")).upper() == "AG" and _row_is_five_state(row)]
     url_output = url_output or url_manifest.with_name("sentinel_urls_cropnet5_ag.jsonl")
     atomic_write_text(url_output, "".join(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n" for row in new_rows))
-    result["status"].append({"step": "rewrite-url-manifest", "count": len(new_rows), "path": str(url_output)})
+    result["status"].append({"step": "rewrite-url-manifest", "outcome": "completed", "count": len(new_rows), "path": str(url_output)})
     atomic_write_text(run_dir / "status.json", json.dumps(result, indent=2, sort_keys=True) + "\n")
     return result
+
+
+def _not_run_cleanup_status() -> list[dict]:
+    return [
+        {"step": "delete-weather", "outcome": "not-run"},
+        {"step": "rewrite-usda", "outcome": "not-run"},
+        {"step": "rewrite-url-manifest", "outcome": "not-run"},
+    ]
 
 
 def atomic_write_text(path: Path, text: str) -> None:
