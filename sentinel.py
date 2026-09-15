@@ -8,6 +8,7 @@ import hashlib
 import io
 import json
 import os
+import posixpath
 import random
 import re
 import shutil
@@ -34,8 +35,8 @@ DEFAULT_DOWNLOAD_ROOT = DEFAULT_RUNTIME_ROOT / "download"
 DEFAULT_EXTRACT_ROOT = DEFAULT_RUNTIME_ROOT / "county"
 DEFAULT_OSS_ENDPOINT = "https://oss-ap-southeast-1.aliyuncs.com"
 DEFAULT_OSS_BUCKET = "alisg-tec-chi-pai-oss-prod-01"
-DEFAULT_OSS_ACCESS_KEY_ID = ""
-DEFAULT_OSS_ACCESS_KEY_SECRET = ""
+DEFAULT_OSS_ACCESS_KEY_ID = "REDACTED"
+DEFAULT_OSS_ACCESS_KEY_SECRET = "REDACTED"
 
 FIVE_STATE_NAMES = frozenset({"illinois", "iowa", "louisiana", "mississippi", "new york"})
 FIVE_STATE_ANSI = {"17", "19", "22", "28", "36"}
@@ -134,7 +135,11 @@ def classify_url_rows(rows: Sequence[dict]) -> dict[str, list[dict]]:
     keep, delete = [], []
     for row in rows:
         image_type = str(row.get("image_type", "")).strip().upper()
-        if image_type == "AG" and _row_is_five_state(row):
+        try:
+            year = int(row.get("year"))
+        except (TypeError, ValueError):
+            year = None
+        if image_type == "AG" and year in FIVE_STATE_YEARS and _row_is_five_state(row):
             keep.append(row)
         else:
             delete.append(row)
@@ -171,9 +176,11 @@ def _weather_fips_by_year(weather_dir: Path, years: Iterable[int]) -> dict[int, 
                                 if match:
                                     month, day = match.groups()
                         try:
-                            date_key = (int(month), int(day))
-                            row_year = int(row.get("Year", year))
+                            date_key = (int(float(month)), int(float(day)))
+                            row_year = int(float(str(row.get("Year", year))))
                         except (TypeError, ValueError):
+                            continue
+                        if row_year != year:
                             continue
                         if date_key in WEATHER_PROTOCOL_DATES:
                             dates_by_fips.setdefault((value, row_year), set()).add(date_key)
@@ -185,6 +192,24 @@ def _weather_fips_by_year(weather_dir: Path, years: Iterable[int]) -> dict[int, 
         if required <= dates:
             complete_by_year.setdefault(year, set()).add(fips)
     return complete_by_year
+
+
+def _weather_year_mismatches(weather_dir: Path, years: Iterable[int]) -> list[dict]:
+    mismatches = []
+    for year in years:
+        for path in sorted((weather_dir / str(year)).glob("**/*.csv")):
+            try:
+                with path.open(newline="", encoding="utf-8-sig") as handle:
+                    for line_number, row in enumerate(csv.DictReader(handle), 2):
+                        try:
+                            row_year = int(float(str(row.get("Year", year))))
+                        except (TypeError, ValueError):
+                            continue
+                        if row_year != year:
+                            mismatches.append({"path": str(path), "line": line_number, "directory_year": year, "row_year": row_year})
+            except (OSError, UnicodeError):
+                continue
+    return mismatches
 
 
 def _weather_fips(weather_dir: Path, years: Iterable[int]) -> set[str]:
@@ -203,17 +228,21 @@ def _usda_rows_by_year(usda_dir: Path, years: Iterable[int]) -> dict[int, tuple[
     return result
 
 
-def _valid_target_fips(usda_dir: Path, weather_dir: Path, years: Iterable[int]) -> set[str]:
+def _valid_target_fips_by_year(usda_dir: Path, weather_dir: Path, years: Iterable[int]) -> dict[int, set[str]]:
     weather_by_year = _weather_fips_by_year(weather_dir, years)
-    target = set()
+    target_by_year = {}
     for year, rows in _usda_rows_by_year(usda_dir, years).items():
         usda = {
             fips
             for row in _usda_sample_rows(rows[1])
             if (fips := _row_fips(row))
         }
-        target.update(usda & weather_by_year.get(year, set()))
-    return target
+        target_by_year[year] = usda & weather_by_year.get(year, set())
+    return target_by_year
+
+
+def _valid_target_fips(usda_dir: Path, weather_dir: Path, years: Iterable[int]) -> set[str]:
+    return set().union(*_valid_target_fips_by_year(usda_dir, weather_dir, years).values())
 
 
 def _weather_directories_to_delete(weather_dir: Path, years: Iterable[int]) -> list[str]:
@@ -235,6 +264,17 @@ def _source_file_is_current(entry: dict, download_root: Path) -> bool:
     return path.is_file() and (not expected_size or path.stat().st_size == expected_size)
 
 
+def _ensure_source_file_current(entry: dict, download_root: Path) -> str:
+    source_path = download_root / entry["path"]
+    expected_size = int(entry.get("size", 0) or 0)
+    if not _source_file_is_current(entry, download_root):
+        download_status = download_one(entry, source_path, resume=True)
+        if not _source_file_is_current(entry, download_root):
+            raise IOError(f"source size mismatch after {download_status}: {source_path}")
+        return download_status
+    return "reused"
+
+
 def build_sync_plan(
     usda_dir: Path,
     weather_dir: Path,
@@ -247,20 +287,28 @@ def build_sync_plan(
     years = tuple(sorted({int(year) for year in years}))
     if set(years) != set(FIVE_STATE_YEARS):
         raise ValueError("five-state sync requires years 2017--2022")
-    target_fips = sorted(_valid_target_fips(usda_dir, weather_dir, years))
+    target_fips_by_year = _valid_target_fips_by_year(usda_dir, weather_dir, years)
+    target_fips = sorted(set().union(*target_fips_by_year.values()))
     usda_plan = {}
     for year, (fieldnames, rows) in _usda_rows_by_year(usda_dir, years).items():
-        kept = filter_usda_rows(rows, set(target_fips))
+        kept = filter_usda_rows(rows, target_fips_by_year.get(year, set()))
         usda_plan[str(year)] = {"keep": len(kept), "delete": len(rows) - len(kept), "path": str(usda_dir / f"USDA_Corn_County_{year}.csv")}
     url_classification = classify_url_rows(_read_jsonl(url_manifest))
     entries = [dict(entry) for entry in source_entries if str(entry.get("image_type", "AG")).upper() == "AG"]
     download_root = download_root or Path(".")
     county_paths = []
     if extract_root:
-        county_paths = [str(extract_root / "AG" / str(entry["year"]) / fips / Path(entry["path"]).name) for entry in entries for fips in entry.get("fips", []) if fips in target_fips]
+        county_paths = [
+            str(extract_root / "AG" / str(entry["year"]) / fips / Path(entry["path"]).name)
+            for entry in entries
+            for fips in entry.get("fips", [])
+            if fips in target_fips_by_year.get(int(entry["year"]), set())
+        ]
     return {
         "protocol": {"states": sorted(FIVE_STATE_NAMES), "ansi": sorted(FIVE_STATE_ANSI), "years": list(years), "image_types": ["AG"]},
         "target_fips": target_fips,
+        "target_fips_by_year": {str(year): sorted(fips) for year, fips in target_fips_by_year.items()},
+        "weather_year_mismatches": _weather_year_mismatches(weather_dir, years),
         "usda": usda_plan,
         "weather_state_directories_to_delete": _weather_directories_to_delete(weather_dir, years),
         "old_url_manifest_to_delete": [{"oss_key": row.get("oss_key"), "path": row.get("path"), "reason": "non-five-state-or-NDVI"} for row in url_classification["delete"]],
@@ -296,12 +344,33 @@ class OssDeletionError(RuntimeError):
         super().__init__(f"OSS deletion failed: {json.dumps(result['failed'], sort_keys=True)}")
 
 
+def _validate_oss_key(key: object) -> tuple[str | None, str | None]:
+    if not isinstance(key, str) or not key.strip():
+        return None, "empty"
+    key = key.strip()
+    if key.startswith("/"):
+        return None, "absolute"
+    if any(part == ".." for part in key.split("/")):
+        return None, "parent traversal"
+    normalized = posixpath.normpath(key)
+    if not normalized.startswith("sentinel/"):
+        return None, "outside sentinel/ prefix"
+    return normalized, None
+
+
 def delete_oss_objects(rows: Sequence[dict], bucket) -> dict:
     deleted, failed = [], []
+    validated = []
     for row in rows:
         key = row.get("oss_key") if isinstance(row, dict) else str(row)
-        if not key:
-            continue
+        normalized, reason = _validate_oss_key(key)
+        if reason:
+            failed.append({"oss_key": key, "error": f"invalid oss_key: {reason}"})
+        else:
+            validated.append(normalized)
+    if failed:
+        raise OssDeletionError({"deleted": [], "failed": failed})
+    for key in validated:
         try:
             bucket.delete_object(key)
             deleted.append(key)
@@ -312,7 +381,7 @@ def delete_oss_objects(rows: Sequence[dict], bucket) -> dict:
     return {"deleted": deleted, "failed": failed}
 
 
-def _rewrite_usda_files(usda_dir: Path, years: Iterable[int], target_fips: set[str]) -> dict:
+def _rewrite_usda_files(usda_dir: Path, years: Iterable[int], target_fips: dict[int, set[str]] | set[str]) -> dict:
     result = {}
     for year in sorted(years):
         path = usda_dir / f"USDA_Corn_County_{year}.csv"
@@ -322,7 +391,8 @@ def _rewrite_usda_files(usda_dir: Path, years: Iterable[int], target_fips: set[s
             reader = csv.DictReader(handle)
             fieldnames = reader.fieldnames or []
             rows = list(reader)
-        kept = filter_usda_rows(rows, target_fips)
+        year_fips = target_fips.get(year, set()) if isinstance(target_fips, dict) else target_fips
+        kept = filter_usda_rows(rows, year_fips)
         buffer = io.StringIO(newline="")
         writer = csv.DictWriter(buffer, fieldnames=fieldnames, lineterminator="\n")
         writer.writeheader()
@@ -354,44 +424,114 @@ def sync_cropnet_five_state(
     tree_payload: Sequence[dict] | None = None,
 ) -> dict:
     years = tuple(sorted({int(year) for year in years}))
-    target_fips = _valid_target_fips(usda_dir, weather_dir, years)
-    entries = parse_hf_tree(tree_payload, target_fips, set(years), {"AG"}) if tree_payload is not None else (fetch_hf_files(target_fips, set(years), {"AG"}) if target_fips else [])
+    target_fips_by_year = _valid_target_fips_by_year(usda_dir, weather_dir, years)
+    target_fips = set().union(*target_fips_by_year.values())
+    entries = parse_hf_tree(
+        tree_payload,
+        target_fips,
+        set(years),
+        {"AG"},
+        target_fips_by_year=target_fips_by_year,
+    ) if tree_payload is not None else (
+        fetch_hf_files(target_fips, set(years), {"AG"}, target_fips_by_year=target_fips_by_year)
+        if target_fips else []
+    )
     plan = build_sync_plan(usda_dir, weather_dir, url_manifest, years, entries, extract_root, download_root)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     run_dir = run_root / timestamp
     run_dir.mkdir(parents=True, exist_ok=True)
     atomic_write_text(run_dir / "plan.json", json.dumps(plan, indent=2, sort_keys=True) + "\n")
     result = {"dry_run": not execute, "run_dir": str(run_dir), "plan": plan, "status": []}
+    if not target_fips:
+        warning = {
+            "step": "target-fips",
+            "outcome": "failed",
+            "danger": True,
+            "error": "no target FIPS for any protocol year",
+        }
+        result["status"].append(warning)
+        result["status"].extend([{"step": step, "outcome": "not-run"} for step in (
+            "backup-usda", "ag-sync", "delete-oss", "delete-weather", "rewrite-usda", "rewrite-url-manifest"
+        )])
+        atomic_write_text(run_dir / "status.json", json.dumps(result, indent=2, sort_keys=True) + "\n")
+        if execute:
+            raise RuntimeError("no target FIPS for any protocol year")
+        return result
+    if target_fips and not entries:
+        warning = {"step": "ag-enumeration", "outcome": "failed", "danger": True, "error": "no AG HF entries for non-empty target FIPS"}
+        result["status"].append(warning)
+        atomic_write_text(run_dir / "status.json", json.dumps(result, indent=2, sort_keys=True) + "\n")
+        if execute:
+            raise RuntimeError("no AG HF entries for non-empty target FIPS")
+        return result
     if not execute:
         atomic_write_text(run_dir / "status.json", json.dumps(result, indent=2, sort_keys=True) + "\n")
         return result
     if bucket is None:
         raise ValueError("execute requires an authenticated OSS bucket")
-    backup = backup_usda_files(usda_dir, years, run_dir / "usda-backup")
-    result["status"].append({"step": "backup-usda", "outcome": "completed", "report": backup})
-    download_result = sync_counties_to_oss(entries, download_root, extract_root, bucket, run_dir / "sentinel_urls_cropnet5_ag.jsonl", oss_prefix)
-    if download_result["failed"]:
-        result["status"].append({"step": "ag-sync", "outcome": "failed", "result": download_result})
-        result["status"].extend(_not_run_cleanup_status())
+    def persist():
         atomic_write_text(run_dir / "status.json", json.dumps(result, indent=2, sort_keys=True) + "\n")
-        raise RuntimeError("AG synchronization failed")
+
+    try:
+        backup = backup_usda_files(usda_dir, years, run_dir / "usda-backup")
+    except Exception as exc:
+        result["status"].append({"step": "backup-usda", "outcome": "failed", "error": str(exc)})
+        result["status"].extend([{"step": "ag-sync", "outcome": "not-run"}, *_not_run_cleanup_status()])
+        persist()
+        raise
+    result["status"].append({"step": "backup-usda", "outcome": "completed", "report": backup})
+    persist()
+    try:
+        download_result = sync_counties_to_oss(entries, download_root, extract_root, bucket, run_dir / "sentinel_urls_cropnet5_ag.jsonl", oss_prefix)
+        if download_result["failed"]:
+            result["status"].append({"step": "ag-sync", "outcome": "failed", "result": download_result})
+            result["status"].extend(_not_run_cleanup_status())
+            persist()
+            raise RuntimeError("AG synchronization failed")
+    except Exception as exc:
+        if not any(item.get("step") == "ag-sync" and item.get("outcome") == "failed" for item in result["status"]):
+            result["status"].append({"step": "ag-sync", "outcome": "failed", "error": str(exc)})
+            result["status"].extend(_not_run_cleanup_status())
+            persist()
+        raise
     result["status"].append({"step": "ag-sync", "outcome": "completed", "result": download_result})
+    persist()
     try:
         delete_result = delete_oss_objects([{"oss_key": key} for key in plan["oss_objects_to_delete"]], bucket)
     except OssDeletionError as exc:
         result["status"].append({"step": "delete-oss", "outcome": "failed", "result": exc.result})
         result["status"].extend(_not_run_cleanup_status())
-        atomic_write_text(run_dir / "status.json", json.dumps(result, indent=2, sort_keys=True) + "\n")
+        persist()
         raise
     result["status"].append({"step": "delete-oss", "outcome": "completed", "result": delete_result})
+    persist()
     for directory in plan["weather_state_directories_to_delete"]:
-        shutil.rmtree(directory)
+        try:
+            shutil.rmtree(directory)
+        except Exception as exc:
+            result["status"].append({"step": "delete-weather", "outcome": "failed", "error": str(exc)})
+            result["status"].extend([{"step": "rewrite-usda", "outcome": "not-run"}, {"step": "rewrite-url-manifest", "outcome": "not-run"}])
+            persist()
+            raise
     result["status"].append({"step": "delete-weather", "outcome": "completed", "count": len(plan["weather_state_directories_to_delete"])})
-    result["status"].append({"step": "rewrite-usda", "outcome": "completed", "result": _rewrite_usda_files(usda_dir, years, set(plan["target_fips"]))})
-    new_rows = [*classify_url_rows(_read_jsonl(url_manifest))["keep"], *_read_jsonl(run_dir / "sentinel_urls_cropnet5_ag.jsonl")]
-    new_rows = [row for row in new_rows if str(row.get("image_type", "")).upper() == "AG" and _row_is_five_state(row)]
+    persist()
+    try:
+        result["status"].append({"step": "rewrite-usda", "outcome": "completed", "result": _rewrite_usda_files(usda_dir, years, target_fips_by_year)})
+    except Exception as exc:
+        result["status"].append({"step": "rewrite-usda", "outcome": "failed", "error": str(exc)})
+        result["status"].append({"step": "rewrite-url-manifest", "outcome": "not-run"})
+        persist()
+        raise
+    persist()
     url_output = url_output or url_manifest.with_name("sentinel_urls_cropnet5_ag.jsonl")
-    atomic_write_text(url_output, "".join(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n" for row in new_rows))
+    try:
+        new_rows = [*classify_url_rows(_read_jsonl(url_manifest))["keep"], *_read_jsonl(run_dir / "sentinel_urls_cropnet5_ag.jsonl")]
+        new_rows = [row for row in new_rows if str(row.get("image_type", "")).upper() == "AG" and _row_is_five_state(row) and str(row.get("year", "")).isdigit() and int(row["year"]) in FIVE_STATE_YEARS]
+        atomic_write_text(url_output, "".join(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n" for row in new_rows))
+    except Exception as exc:
+        result["status"].append({"step": "rewrite-url-manifest", "outcome": "failed", "error": str(exc)})
+        persist()
+        raise
     result["status"].append({"step": "rewrite-url-manifest", "outcome": "completed", "count": len(new_rows), "path": str(url_output)})
     atomic_write_text(run_dir / "status.json", json.dumps(result, indent=2, sort_keys=True) + "\n")
     return result
@@ -419,7 +559,13 @@ def atomic_write_text(path: Path, text: str) -> None:
         raise
 
 
-def parse_hf_tree(payload: Sequence[dict], target_fips: set[str], years: set[int], image_types: set[str]) -> list[dict]:
+def parse_hf_tree(
+    payload: Sequence[dict],
+    target_fips: set[str],
+    years: set[int],
+    image_types: set[str],
+    target_fips_by_year: dict[int, set[str]] | None = None,
+) -> list[dict]:
     """Filter HF tree entries, retaining state-level files when FIPS is implicit."""
     target_fips = {str(value).zfill(5) for value in target_fips}
     image_types = {value.upper() for value in image_types}
@@ -436,10 +582,11 @@ def parse_hf_tree(payload: Sequence[dict], target_fips: set[str], years: set[int
         year = int(year_match.group("year"))
         if image_type not in image_types or year not in years:
             continue
-        fips = _matched_fips(path, target_fips)
+        year_target_fips = target_fips_by_year.get(year, set()) if target_fips_by_year is not None else target_fips
+        fips = _matched_fips(path, year_target_fips)
         state_match = re.search(rf"/data/{image_type}/{year}/([^/]+)/", path, re.IGNORECASE)
         state = state_match.group(1) if state_match else None
-        state_fips = {fips_code for fips_code in target_fips if fips_code[:2] == _state_ansi(state)} if state else set()
+        state_fips = {fips_code for fips_code in year_target_fips if fips_code[:2] == _state_ansi(state)} if state else set()
         if not fips and not state_fips:
             continue
         entries.append({
@@ -456,7 +603,12 @@ def parse_hf_tree(payload: Sequence[dict], target_fips: set[str], years: set[int
     return sorted(entries, key=lambda item: item["path"])
 
 
-def fetch_hf_files(target_fips: set[str], years: set[int], image_types: set[str]) -> list[dict]:
+def fetch_hf_files(
+    target_fips: set[str],
+    years: set[int],
+    image_types: set[str],
+    target_fips_by_year: dict[int, set[str]] | None = None,
+) -> list[dict]:
     """Enumerate only target state/year directories through the HF tree API."""
     states = sorted({_state_abbr(fips[:2]) for fips in target_fips})
     payload = []
@@ -466,7 +618,7 @@ def fetch_hf_files(target_fips: set[str], years: set[int], image_types: set[str]
                 url = f"{HF_API_BASE}Sentinel-2%20Imagery/data/{image_type}/{year}/{state}?expand=true"
                 with urllib.request.urlopen(url) as response:
                     payload.extend(json.load(response))
-    return parse_hf_tree(payload, target_fips, years, image_types)
+    return parse_hf_tree(payload, target_fips, years, image_types, target_fips_by_year=target_fips_by_year)
 
 
 def _state_ansi(state: str | None) -> str:
@@ -668,23 +820,39 @@ def upload_manifest_to_oss(
     return {"uploaded": uploaded, "skipped": skipped, "failed": failed, "url_manifest": str(url_output)}
 
 
-def extract_target_counties(entries: Sequence[dict], source_root: Path, output_root: Path) -> list[dict]:
+class CountyExtractionError(RuntimeError):
+    def __init__(self, path: str, expected_fips: set[str], extracted_fips: set[str]):
+        self.expected_fips = sorted(expected_fips)
+        self.extracted_fips = sorted(extracted_fips)
+        super().__init__(
+            f"extracted FIPS mismatch for {path}: "
+            f"expected={self.expected_fips}, extracted={self.extracted_fips}"
+        )
+
+
+def extract_target_counties(entries: Sequence[dict], source_root: Path, output_root: Path,
+                            strict: bool = True) -> tuple[list[dict], list[dict]]:
     """Extract only target FIPS groups from state-level HDF5 files.
 
-    The HF files are state/quarter bundles. The resulting files are county
-    scoped and can be uploaded independently, avoiding public exposure of
-    unrelated counties and making training downloads small.
+    Returns (extracted_entries, warnings).  When *strict* is False, missing
+    FIPS (typically because a state-level HF file doesn't cover every county
+    in that quarter) produce a warning instead of raising an error.
     """
     import h5py
 
     extracted = []
+    warnings = []
     for entry in entries:
         source = source_root / entry["path"]
         if not source.exists():
-            continue
+            raise ValueError(f"source file missing: {source}")
+        expected_fips = {str(fips).zfill(5) for fips in entry.get("fips", [])}
+        entry_extracted = []
+        missing = []
         with h5py.File(source, "r") as source_file:
-            for fips in entry.get("fips", []):
+            for fips in sorted(expected_fips):
                 if fips not in source_file:
+                    missing.append(fips)
                     continue
                 name = Path(entry["path"]).name
                 target = output_root / entry["image_type"] / str(entry["year"]) / fips / name
@@ -697,8 +865,22 @@ def extract_target_counties(entries: Sequence[dict], source_root: Path, output_r
                 derived["fips"] = [fips]
                 derived["scope"] = "county"
                 derived["size"] = target.stat().st_size
-                extracted.append(derived)
-    return extracted
+                entry_extracted.append(derived)
+        extracted_fips = {item["fips"][0] for item in entry_extracted}
+        if expected_fips != extracted_fips:
+            if strict and entry.get("scope") != "state":
+                for item in entry_extracted:
+                    (output_root / item["path"]).unlink(missing_ok=True)
+                raise CountyExtractionError(entry["path"], expected_fips, extracted_fips)
+            if missing:
+                warnings.append(dict(
+                    path=entry["path"],
+                    expected=len(expected_fips),
+                    extracted=len(extracted_fips),
+                    missing=sorted(missing),
+                ))
+        extracted.extend(entry_extracted)
+    return extracted, warnings
 
 
 def sync_counties_to_oss(
@@ -710,7 +892,7 @@ def sync_counties_to_oss(
     prefix: str = "sentinel",
 ) -> dict:
     """逐个下载州级文件、提取目标县并上传，避免本地堆积全部源文件。"""
-    result = {"source_files": len(entries), "processed": 0, "uploaded": 0, "skipped": 0, "failed": []}
+    result = {"source_files": len(entries), "processed": 0, "uploaded": 0, "skipped": 0, "failed": [], "warnings": []}
     existing_rows = []
     if url_manifest.exists():
         existing_rows = [json.loads(line) for line in url_manifest.read_text(encoding="utf-8").splitlines() if line.strip()]
@@ -718,25 +900,35 @@ def sync_counties_to_oss(
 
     for index, entry in enumerate(entries, 1):
         source_path = download_root / entry["path"]
+        expected_fips = {str(fips).zfill(5) for fips in entry.get("fips", [])}
         try:
-            source_exists = source_path.exists()
-            county_entries = extract_target_counties([entry], download_root, extract_root)
+            strict = entry.get("scope") != "state"
+            source_current = _source_file_is_current(entry, download_root)
+            county_entries, extract_warnings = extract_target_counties([entry], download_root, extract_root, strict=strict) if source_current else ([], [])
+            if extract_warnings:
+                result["warnings"].extend(extract_warnings)
             pending = []
             for ce in county_entries:
                 oss_key = "/".join(part for part in (prefix.strip("/"), ce["path"]) if part)
                 if oss_key not in uploaded_keys:
                     pending.append(ce)
-            if source_exists and not pending:
+            if source_current and not pending:
                 result["skipped"] += 1
                 print(f"[{index}/{len(entries)}] all-uploaded: {entry['path']} -> {len(county_entries)} counties", flush=True)
                 time.sleep(random.uniform(0.3, 0.8))
                 continue
 
-            download_status = download_one(entry, source_path, resume=True)
+            download_status = _ensure_source_file_current(entry, download_root)
             if not county_entries:
-                county_entries = extract_target_counties([entry], download_root, extract_root)
+                county_entries, extract_warnings = extract_target_counties([entry], download_root, extract_root, strict=strict)
+                if extract_warnings:
+                    result["warnings"].extend(extract_warnings)
                 pending = [ce for ce in county_entries
                            if "/".join(part for part in (prefix.strip("/"), ce["path"]) if part) not in uploaded_keys]
+            if not county_entries:
+                result["skipped"] += 1
+                print(f"[{index}/{len(entries)}] empty: {entry['path']} (no matching counties in file)", flush=True)
+                continue
             upload_result = upload_manifest_to_oss(pending, extract_root, bucket, url_manifest, prefix)
             result["uploaded"] += upload_result["uploaded"]
             result["skipped"] += upload_result["skipped"]
@@ -748,7 +940,11 @@ def sync_counties_to_oss(
             print(f"[{index}/{len(entries)}] {download_status}: {entry['path']} -> {len(county_entries)} counties", flush=True)
             time.sleep(random.uniform(0.5, 1.5))
         except Exception as exc:
-            result["failed"].append({"path": entry["path"], "error": str(exc)})
+            failure = {"path": entry["path"], "error": str(exc)}
+            if isinstance(exc, CountyExtractionError):
+                failure["expected_fips"] = exc.expected_fips
+                failure["extracted_fips"] = exc.extracted_fips
+            result["failed"].append(failure)
             print(f"[{index}/{len(entries)}] failed: {entry['path']}: {exc}", flush=True)
             time.sleep(random.uniform(2, 5))
     return result
@@ -760,6 +956,167 @@ def create_oss_bucket(endpoint: str, bucket_name: str, access_key_id: str, acces
 
     auth = oss2.Auth(access_key_id, access_key_secret)
     return oss2.Bucket(auth, endpoint, bucket_name)
+
+
+def cleanup_five_state(
+    cropnet_data_dir: Path,
+    url_manifest: Path,
+    download_root: Path,
+    extract_root: Path,
+    bucket=None,
+    oss_prefix: str = "sentinel",
+    execute: bool = False,
+) -> dict:
+    """清除非5州数据并同步缺失AG数据。
+
+    1. 删除 cropnet dataset 中非5州气象目录
+    2. 过滤 USDA CSV 仅保留5州行
+    3. 清理 URL manifest (sentinel_urls_9states.jsonl)，仅保留5州AG行
+    4. 删除 OSS 上非5州/非AG的对象
+    5. 删除 manifest 目录下的 NDVI/NADI jsonl 文件
+    6. 从 HuggingFace 下载缺失州的 AG 数据
+    """
+    weather_dir = cropnet_data_dir / "weather"
+    usda_dir = cropnet_data_dir / "usda_corn"
+    years = FIVE_STATE_YEARS
+
+    target_fips_by_year = _valid_target_fips_by_year(usda_dir, weather_dir, years)
+    target_fips = set().union(*target_fips_by_year.values())
+    target_fips_sorted = sorted(target_fips)
+
+    weather_to_delete = _weather_directories_to_delete(weather_dir, years)
+
+    url_rows = _read_jsonl(url_manifest)
+    classification = classify_url_rows(url_rows)
+    keep_rows = classification["keep"]
+    delete_rows = classification["delete"]
+    oss_to_delete = [r.get("oss_key") for r in delete_rows if r.get("oss_key")]
+
+    _existing_state_from_rows = set()
+    for r in keep_rows:
+        for fips in r.get("fips", []):
+            _existing_state_from_rows.add(fips[:2])
+    missing_state_ansi = FIVE_STATE_ANSI - _existing_state_from_rows
+    missing_fips = {f for f in target_fips if f[:2] in missing_state_ansi}
+    missing_fips_by_year = {
+        y: {f for f in missing_fips if f in target_fips_by_year.get(y, set())}
+        for y in sorted(target_fips_by_year)
+    }
+    missing_fips_by_year = {y: fs for y, fs in missing_fips_by_year.items() if fs}
+
+    ndvi_jsonls = sorted(
+        (url_manifest.parent / p).resolve()
+        for p in ["sentinel_urls.jsonl", "valid-no-ia.jsonl", "valid.jsonl"]
+        if (url_manifest.parent / p).exists()
+    )
+    nad_manifest = url_manifest.parent / "sentinel_urls.jsonl"
+    if nad_manifest.exists():
+        nad_rows = _read_jsonl(nad_manifest)
+        if any(str(r.get("image_type", "")).upper() in ("NDVI", "NADI") for r in nad_rows):
+            ndvi_jsonls.append(nad_manifest.resolve())
+
+    plan = {
+        "protocol": {
+            "states": sorted(FIVE_STATE_NAMES),
+            "ansi": sorted(FIVE_STATE_ANSI),
+            "years": list(years),
+        },
+        "target_fips_count": len(target_fips_sorted),
+        "target_fips_by_year": {str(y): sorted(fs) for y, fs in target_fips_by_year.items()},
+        "weather_dirs_to_delete": len(weather_to_delete),
+        "weather_dirs_to_delete_sample": weather_to_delete[:5],
+        "usda_files_to_filter": list(
+            (usda_dir / f"USDA_Corn_County_{y}.csv").name
+            for y in years
+            if (usda_dir / f"USDA_Corn_County_{y}.csv").exists()
+        ),
+        "url_manifest": {
+            "path": str(url_manifest),
+            "keep": len(keep_rows),
+            "delete": len(delete_rows),
+            "delete_sample": [
+                f"{r.get('image_type')}/{r.get('year')}/{r.get('state')}" for r in delete_rows[:5]
+            ],
+        },
+        "oss_objects_to_delete": len(oss_to_delete),
+        "oss_objects_to_delete_sample": oss_to_delete[:5],
+        "missing_states": sorted(missing_state_ansi),
+        "missing_fips_by_year": {str(y): sorted(fs) for y, fs in missing_fips_by_year.items()},
+        "ndvi_jsonls_to_delete": [str(p) for p in ndvi_jsonls],
+    }
+
+    if not execute:
+        return {"dry_run": True, "plan": plan}
+
+    if bucket is None and oss_to_delete:
+        raise ValueError("execute requires an authenticated OSS bucket (--execute 需要 OSS 凭证)")
+
+    result: dict = {"plan": plan, "steps": []}
+
+    for d in weather_to_delete:
+        try:
+            shutil.rmtree(d, ignore_errors=True)
+        except Exception as exc:
+            result["steps"].append({"step": "delete-weather-dir", "path": d, "outcome": "failed", "error": str(exc)})
+    result["steps"].append({"step": "delete-weather-dirs", "outcome": "completed", "count": len(weather_to_delete)})
+
+    try:
+        usda_result = _rewrite_usda_files(usda_dir, years, target_fips_by_year)
+        result["steps"].append({"step": "filter-usda", "outcome": "completed", "result": usda_result})
+    except Exception as exc:
+        result["steps"].append({"step": "filter-usda", "outcome": "failed", "error": str(exc)})
+
+    if oss_to_delete and bucket is not None:
+        try:
+            delete_result = delete_oss_objects(delete_rows, bucket)
+            result["steps"].append({"step": "delete-oss", "outcome": "completed", "deleted": len(delete_result["deleted"])})
+        except OssDeletionError as exc:
+            result["steps"].append({"step": "delete-oss", "outcome": "failed", "deleted": len(exc.result.get("deleted", [])), "failed": len(exc.result.get("failed", []))})
+
+    if keep_rows or not url_rows:
+        atomic_write_text(url_manifest, "".join(json.dumps(r, sort_keys=True) + "\n" for r in keep_rows))
+        result["steps"].append({"step": "rewrite-url-manifest", "keep": len(keep_rows), "path": str(url_manifest)})
+
+    for jsonl_path in ndvi_jsonls:
+        try:
+            jsonl_path.unlink(missing_ok=True)
+            result["steps"].append({"step": "delete-ndvi-jsonl", "path": str(jsonl_path), "outcome": "deleted"})
+        except Exception as exc:
+            result["steps"].append({"step": "delete-ndvi-jsonl", "path": str(jsonl_path), "outcome": "failed", "error": str(exc)})
+
+    if missing_fips and bucket is not None:
+        try:
+            hf_entries = fetch_hf_files(missing_fips, set(years), {"AG"}, target_fips_by_year=missing_fips_by_year if missing_fips_by_year else None)
+        except Exception as exc:
+            hf_entries = []
+            result["steps"].append({"step": "fetch-missing-ag", "outcome": "failed", "error": str(exc)})
+        if hf_entries:
+            try:
+                run_dir = url_manifest.parent.parent / "sync-runs" / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+                new_manifest = run_dir / "sentinel_urls_missing_ag.jsonl"
+                sync_result = sync_counties_to_oss(hf_entries, download_root, extract_root, bucket, new_manifest, oss_prefix)
+                result["steps"].append({"step": "sync-missing-ag", "outcome": "completed" if not sync_result["failed"] else "partial",
+                                         "result": sync_result})
+                if new_manifest.exists():
+                    new_rows = _read_jsonl(new_manifest)
+                    combined = keep_rows + new_rows
+                    combined = [r for r in combined
+                                if str(r.get("image_type", "")).upper() == "AG"
+                                and _row_is_five_state(r)
+                                and isinstance(r.get("year"), int) and r["year"] in set(years)]
+                    atomic_write_text(url_manifest, "".join(json.dumps(r, sort_keys=True) + "\n" for r in combined))
+                    result["steps"].append({"step": "merge-url-manifest", "total": len(combined), "path": str(url_manifest)})
+            except Exception as exc:
+                result["steps"].append({"step": "sync-missing-ag", "outcome": "failed", "error": str(exc)})
+    elif missing_fips and bucket is None:
+        result["steps"].append({"step": "sync-missing-ag", "outcome": "not-run",
+                                 "reason": "no OSS bucket, missing states: " + ", ".join(sorted(missing_state_ansi))})
+
+    return result
+
+
+DEFAULT_CROPNET_DATA_DIR = Path("/data/raid0/hqx/Product_model_runtime/DataSrc/cropnet_dataset/data")
+DEFAULT_TASK8_URL_MANIFEST = Path(__file__).resolve().parent / "manifests/sentinel_urls_9states.jsonl"
 
 
 def _parse_args() -> argparse.Namespace:
@@ -781,9 +1138,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--oss-endpoint", default=DEFAULT_OSS_ENDPOINT)
     parser.add_argument("--oss-bucket", default=DEFAULT_OSS_BUCKET)
     parser.add_argument("--sync-cropnet-five-state", action="store_true")
+    parser.add_argument("--cleanup-five-state", action="store_true",
+                        help="清理 cropnet 非5州数据 + 清理9states jsonl + 删除OSS对象 + 删除NADI jsonl + 下载缺失AG")
     parser.add_argument("--execute", action="store_true", help="Execute destructive five-state cleanup; otherwise dry-run")
     parser.add_argument("--usda-dir", type=Path, default=Path("/data/raid0/hqx/Product_model_runtime/train_dataset/cropnet_dataset/data/usda_corn"))
     parser.add_argument("--weather-dir", type=Path, default=Path("/data/raid0/hqx/Product_model_runtime/train_dataset/cropnet_dataset/data/weather"))
+    parser.add_argument("--cropnet-data-dir", type=Path, default=DEFAULT_CROPNET_DATA_DIR)
     parser.add_argument("--sync-run-root", type=Path, default=DEFAULT_RUNTIME_ROOT / "sync-runs")
     return parser.parse_args()
 
@@ -816,6 +1176,30 @@ def main() -> None:
             oss_prefix=args.oss_prefix,
             execute=args.execute,
             tree_payload=json.loads(args.tree_json.read_text(encoding="utf-8")) if args.tree_json else None,
+        )
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return
+    if args.cleanup_five_state:
+        bucket = None
+        if args.execute:
+            required = {
+                "OSS_ENDPOINT": os.environ.get("OSS_ENDPOINT", args.oss_endpoint),
+                "OSS_BUCKET": os.environ.get("OSS_BUCKET", args.oss_bucket),
+                "OSS_ACCESS_KEY_ID": os.environ.get("OSS_ACCESS_KEY_ID", DEFAULT_OSS_ACCESS_KEY_ID),
+                "OSS_ACCESS_KEY_SECRET": os.environ.get("OSS_ACCESS_KEY_SECRET", DEFAULT_OSS_ACCESS_KEY_SECRET),
+            }
+            missing = [name for name, value in required.items() if not value]
+            if missing:
+                raise SystemExit("missing OSS environment variables: " + ", ".join(missing))
+            bucket = create_oss_bucket(required["OSS_ENDPOINT"], required["OSS_BUCKET"], required["OSS_ACCESS_KEY_ID"], required["OSS_ACCESS_KEY_SECRET"])
+        result = cleanup_five_state(
+            cropnet_data_dir=args.cropnet_data_dir,
+            url_manifest=Path(args.url_manifest) if args.url_manifest != DEFAULT_URL_MANIFEST else DEFAULT_TASK8_URL_MANIFEST,
+            download_root=args.destination,
+            extract_root=args.extract_root,
+            bucket=bucket,
+            oss_prefix=args.oss_prefix,
+            execute=args.execute,
         )
         print(json.dumps(result, indent=2, sort_keys=True))
         return
