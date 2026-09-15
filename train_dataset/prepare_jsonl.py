@@ -28,6 +28,7 @@ if PROJECT_DIR not in sys.path:
     sys.path.insert(0, PROJECT_DIR)
 from cropnet_protocol import (  # noqa: E402
     ALLOWED_STATES,
+    CROPNET_FIVE_STATES,
     START_MONTH,
     END_MONTH,
     DAYS_PER_MONTH,
@@ -45,7 +46,7 @@ PROJECT_DIR = os.path.dirname(SCRIPT_DIR)          # cropnet_model/
 DATA_DIR = os.path.join(PROJECT_DIR, "DataSrc", "cropnet_dataset", "data")
 USDA_DIR = os.path.join(DATA_DIR, "usda_corn")
 WEATHER_DIR = os.path.join(DATA_DIR, "weather")
-OUTPUT_PATH = os.path.join(SCRIPT_DIR, "dataset.jsonl")
+OUTPUT_PATH = os.path.join("/data/raid0/hqx/Product_model_runtime/train_dataset", "dataset.jsonl")
 
 # ============================================================
 # 2. 特征配置 — 使用 WRF-HRRR 原始列名
@@ -80,7 +81,7 @@ USPS_MAP = {
 USPS_TO_FULL = {k: v for k, v in USPS_MAP.items()}
 
 # USDA state_name → 缩写（反向查找用）
-STATE_TO_USPS = {v.upper(): k for k, v in USPS_MAP.items()}
+STATE_TO_USPS = {v.upper().replace("_", " "): k for k, v in USPS_MAP.items()}
 
 
 def _load_state_weather(year, state_abbr):
@@ -203,15 +204,17 @@ def protocol_dry_run():
     }
 
 
-def process_all(output_path=None, data_dir=None, soil_path=None):
+def process_all(output_path=None, data_dir=None, soil_path=None, five_states=True):
     output_path = output_path or OUTPUT_PATH
     data_dir = data_dir or DATA_DIR
     soil_path = soil_path or os.path.join(SCRIPT_DIR, "us_state_soil.csv")
     global USDA_DIR, WEATHER_DIR
     USDA_DIR = os.path.join(data_dir, "usda_corn")
     WEATHER_DIR = os.path.join(data_dir, "weather")
+    allowed = CROPNET_FIVE_STATES if five_states else ALLOWED_STATES
+    tag = "五州(AG)" if five_states else "八州"
     print("=" * 60)
-    print("cropnet_dataset → JSONL (县级粒度)")
+    print(f"cropnet_dataset → JSONL (县级粒度, {tag})")
     print("=" * 60)
 
     # ---- 1. 读取 USDA 数据 ----
@@ -249,7 +252,7 @@ def process_all(output_path=None, data_dir=None, soil_path=None):
         print(f"[错误] 找不到 USDA 输入文件: {USDA_DIR}")
         raise SystemExit(1)
     usda_all = pd.concat(usda_rows, ignore_index=True)
-    usda_all = usda_all[usda_all["state"].isin(ALLOWED_STATES)].copy()
+    usda_all = usda_all[usda_all["state"].isin(allowed)].copy()
     # 移除无缩写或无效产量的行
     usda_all = usda_all.dropna(subset=["state_abbr", "prod", "yield_"])
     print(f"  USDA 总行数: {len(usda_all)}")
@@ -370,11 +373,14 @@ def main(argv=None):
     parser.add_argument("--output", default=OUTPUT_PATH, help="JSONL 输出路径")
     parser.add_argument("--data-dir", default=DATA_DIR, help="cropnet_dataset/data 根目录")
     parser.add_argument("--soil-path", default=None, help="州级土壤映射 CSV，可省略")
+    parser.add_argument("--five-states", action="store_true", default=True,
+                        help="仅输出五州（默认），--no-five-states 切回八州")
     args = parser.parse_args(argv)
     if args.dry_run:
         print(json.dumps(protocol_dry_run(), ensure_ascii=False, indent=2))
         return
-    process_all(output_path=args.output, data_dir=args.data_dir, soil_path=args.soil_path)
+    process_all(output_path=args.output, data_dir=args.data_dir, soil_path=args.soil_path,
+                five_states=args.five_states)
 
 
 if __name__ == "__main__":

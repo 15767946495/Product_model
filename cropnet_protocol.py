@@ -5,7 +5,7 @@ ALLOWED_STATES = {
     "indiana", "ohio", "missouri", "kentucky",
 }
 CROPNET_FIVE_STATES = {
-    "illinois", "iowa", "louisiana", "mississippi", "new york",
+    "illinois", "iowa", "louisiana", "mississippi", "new_york",
 }
 START_MONTH = 4
 END_MONTH = 9

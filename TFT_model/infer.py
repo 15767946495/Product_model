@@ -123,7 +123,7 @@ def infer():
 
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     val_tag = args.val_year.replace(",", "_")
-    output_dir = args.output_dir or os.path.join(_THIS_DIR, "train_output", f"val_{val_tag}")
+    output_dir = args.output_dir or os.path.join("/data/raid0/hqx", "TFT_train", f"val_{val_tag}")
     os.makedirs(output_dir, exist_ok=True)
 
     # 提前预报节点(MM-DD) -> [(month, day), ...]
@@ -263,7 +263,12 @@ def infer():
 
     with torch.no_grad():
         for batch in tqdm(val_loader, desc="Infer"):
-            grid_feats, grid_coords, grid_mask, month_ids, day_ids, soil_feats, labels, seq_lens, states, years, fips, counties = batch
+            grid_feats, grid_coords, grid_mask, month_ids, day_ids, soil_feats, labels, seq_lens, *_rest = batch
+            states = _rest[0] if len(_rest) >= 1 else [""] * grid_feats.size(0)
+            years = _rest[1] if len(_rest) >= 2 else [0] * grid_feats.size(0)
+            fips = _rest[2] if len(_rest) >= 3 else [""] * grid_feats.size(0)
+            counties = _rest[3] if len(_rest) >= 4 else [""] * grid_feats.size(0)
+            ag_images = _rest[4] if len(_rest) >= 5 else None
             grid_feats = grid_feats.to(device)
             grid_coords = grid_coords.to(device)
             grid_mask = grid_mask.to(device)
@@ -279,6 +284,7 @@ def infer():
                 grid_mask=grid_mask,
                 soil_feats=soil_feats,
                 seq_lens=seq_lens,
+                ag_images=ag_images,
             )  # (B, T, 1)
 
             B, T, _ = pred_all.shape

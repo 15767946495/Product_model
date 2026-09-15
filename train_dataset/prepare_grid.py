@@ -38,6 +38,7 @@ from prepare_jsonl import (
 )
 from cropnet_protocol import (  # noqa: E402
     ALLOWED_STATES,
+    CROPNET_FIVE_STATES,
     DAYS_PER_MONTH,
     TIME_WINDOW,
     protocol_metadata,
@@ -45,9 +46,10 @@ from cropnet_protocol import (  # noqa: E402
 )
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-JSONL_PATH = os.path.join(SCRIPT_DIR, "dataset.jsonl")
-OUT_PATH = os.path.join(SCRIPT_DIR, "grid_cache.pt")
-META_PATH = os.path.join(SCRIPT_DIR, "grid_cache_meta.json")
+RUNTIME_DIR = "/data/raid0/hqx/Product_model_runtime/train_dataset"
+JSONL_PATH = os.path.join(RUNTIME_DIR, "dataset.jsonl")
+OUT_PATH = os.path.join(RUNTIME_DIR, "grid_cache.pt")
+META_PATH = os.path.join(RUNTIME_DIR, "grid_cache_meta.json")
 
 
 def _median(xs):
@@ -55,15 +57,16 @@ def _median(xs):
     return s[len(s) // 2]
 
 
-def validate_jsonl_states(meta_lines):
+def validate_jsonl_states(meta_lines, allowed=None):
     """Reject JSONL metadata containing a state outside the shared allowlist."""
-    invalid = sorted({str(row.get("State", "")).lower() for row in meta_lines} - ALLOWED_STATES)
+    allowed = allowed or ALLOWED_STATES
+    invalid = sorted({str(row.get("State", "")).lower() for row in meta_lines} - allowed)
     if invalid:
         raise ValueError(f"JSONL contains states outside allowed states: {invalid}")
 
 
-def validate_jsonl_rows(meta_lines):
-    validate_jsonl_states(meta_lines)
+def validate_jsonl_rows(meta_lines, allowed=None):
+    validate_jsonl_states(meta_lines, allowed=allowed)
     for index, row in enumerate(meta_lines):
         try:
             prepare_jsonl.validate_sample_calendar(row)
@@ -240,8 +243,10 @@ def audit_artifacts(jsonl_path, cache_path, report_path=None):
     return result
 
 
-def process(jsonl_path=None, out_path=None, meta_path=None, data_dir=None):
+def process(jsonl_path=None, out_path=None, meta_path=None, data_dir=None, five_states=True):
     global JSONL_PATH, OUT_PATH, META_PATH
+    allowed = CROPNET_FIVE_STATES if five_states else ALLOWED_STATES
+    tag = "五州(AG)" if five_states else "八州"
     if jsonl_path:
         JSONL_PATH = jsonl_path
     if out_path:
@@ -253,7 +258,7 @@ def process(jsonl_path=None, out_path=None, meta_path=None, data_dir=None):
         prepare_jsonl.USDA_DIR = os.path.join(data_dir, "usda_corn")
         prepare_jsonl.WEATHER_DIR = os.path.join(data_dir, "weather")
     print("=" * 60)
-    print("WRF-HRRR 气象 → 网格级 grid_cache.pt")
+    print(f"WRF-HRRR 气象 → 网格级 grid_cache.pt ({tag})")
     print("=" * 60)
 
     # ---- 1. 读取 dataset.jsonl 作为元数据/顺序基准 ----
@@ -264,14 +269,14 @@ def process(jsonl_path=None, out_path=None, meta_path=None, data_dir=None):
             line = line.strip()
             if line:
                 meta_lines.append(json.loads(line))
-    validate_jsonl_rows(meta_lines)
-    print(f"  jsonl 行数: {len(meta_lines)}")
+    validate_jsonl_rows(meta_lines, allowed=allowed)
+    print(f"  jsonl 行数: {len(meta_lines)} ({tag})")
 
     # ---- 2. 按 (year, state_abbr) 分组,逐组加载气象 ----
     print("\n[2/3] 逐 (year, state) 加载 WRF-HRRR,构建网格级样本...")
     groups = {}
     for i, m in enumerate(meta_lines):
-        abbr = STATE_TO_USPS.get(str(m["State"]).upper())
+        abbr = STATE_TO_USPS.get(str(m["State"]).upper().replace("_", " "))
         if abbr is None:
             print(f"  [警告] State={m['State']} 无 USPS 映射, line {i}")
             continue
@@ -347,8 +352,11 @@ def main(argv=None):
     parser.add_argument("--output", default=OUT_PATH, help="缓存输出路径")
     parser.add_argument("--meta-output", default=META_PATH, help="缓存元数据输出路径")
     parser.add_argument("--data-dir", default=prepare_jsonl.DATA_DIR, help="cropnet_dataset/data 根目录")
+    parser.add_argument("--five-states", action="store_true", default=True,
+                        help="仅输出五州（默认），--no-five-states 切回八州")
     args = parser.parse_args(argv)
-    process(args.jsonl, args.output, args.meta_output, args.data_dir)
+    process(args.jsonl, args.output, args.meta_output, args.data_dir,
+            five_states=args.five_states)
 
 
 if __name__ == "__main__":

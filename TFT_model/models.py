@@ -1,9 +1,3 @@
-"""
-解耦 TFT：产量支路与 alpha 支路独立参数，推理时再融合。
-
-- TFTYieldModel：原 TFT 去掉 official_mape_head，输出 final_pred
-"""
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -11,7 +5,7 @@ from copy import deepcopy
 import math
 from typing import Any, Dict, List, Tuple, Optional
 
-MODEL_CONTRACT_VERSION = 7
+MODEL_CONTRACT_VERSION = 8
 
 
 class GatedLinearUnit(nn.Module):
@@ -606,6 +600,168 @@ class SpatialAttentionAggregator(nn.Module):
         return self.norm(cls_out), w
 
 
+# ============================================================
+# 遥感特征编码模块
+# ============================================================
+
+AG_DATES = [
+    "04-01", "04-15", "05-01", "05-15", "06-01", "06-15",
+    "07-01", "07-15", "08-01", "08-15", "09-01", "09-15",
+]
+AG_DAY_INDICES = [0, 14, 28, 42, 56, 70, 84, 98, 112, 126, 140, 154]
+RS_WINDOW_SIZE = 14
+
+
+class PretrainedViTEncoder(nn.Module):
+    """DINOv2 ViT-S（facebook/dinov2-small）遥感图像编码器。
+
+    DINOv2 在 1.42 亿张多样化图像上自监督预训练，
+    遥感领域广泛使用（Panopticon CVPR2025 / SoftCon IEEE TGRS 等）。
+    冻结 backbone，只训练投影头 (384 → H*2 → H)。"""
+
+    def __init__(self, out_dim: int = 32, freeze_backbone: bool = True, dropout: float = 0.1):
+        super().__init__()
+        from transformers import AutoModel
+        self.backbone = AutoModel.from_pretrained("facebook/dinov2-small")
+        self.embed_dim = self.backbone.config.hidden_size
+        if freeze_backbone:
+            for p in self.backbone.parameters():
+                p.requires_grad = False
+        self.proj = nn.Sequential(
+            nn.Linear(self.embed_dim, out_dim * 2),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(out_dim * 2, out_dim),
+        )
+        self._init_weights()
+
+    def _init_weights(self):
+        for layer in self.proj:
+            if isinstance(layer, nn.Linear):
+                nn.init.xavier_uniform_(layer.weight)
+                if layer.bias is not None:
+                    nn.init.zeros_(layer.bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        with torch.set_grad_enabled(
+            not all(not p.requires_grad for p in self.backbone.parameters())
+        ):
+            out = self.backbone(pixel_values=x)
+        return self.proj(out.pooler_output)
+
+
+class RSMetCrossAttention(nn.Module):
+    """遥感向量(12 时相)作为 Q，对应前 14 天气象窗口作为 KV，
+    做 multi-head cross attention，输出 12 个融合向量。
+    窗口为空（无气象数据）的时相直接跳过 attention，输出 rs_vec 自身。"""
+
+    def __init__(self, hidden_size: int, num_heads: int = 2, dropout: float = 0.1):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.num_heads = num_heads
+        if hidden_size % num_heads != 0:
+            raise ValueError(f"hidden_size ({hidden_size}) 须能被 num_heads ({num_heads}) 整除")
+        self.head_dim = hidden_size // num_heads
+
+        self.W_q = nn.Linear(hidden_size, hidden_size)
+        self.W_k = nn.Linear(hidden_size, hidden_size)
+        self.W_v = nn.Linear(hidden_size, hidden_size)
+        self.W_o = nn.Linear(hidden_size, hidden_size)
+        self.norm = nn.LayerNorm(hidden_size)
+        self.dropout = nn.Dropout(dropout)
+        self.softmax = nn.Softmax(dim=-1)
+        self._init_weights()
+
+    def _init_weights(self):
+        for m in (self.W_q, self.W_k, self.W_v, self.W_o):
+            nn.init.xavier_uniform_(m.weight, gain=1.0)
+            if m.bias is not None:
+                nn.init.zeros_(m.bias)
+
+    def forward(
+        self,
+        rs_vec: torch.Tensor,
+        met_windows: torch.Tensor,
+        window_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        B, N, H = rs_vec.shape
+        _, _, W, _ = met_windows.shape
+
+        has_met = window_mask.any(dim=-1)
+        if not has_met.any():
+            return rs_vec
+
+        q_all = self.W_q(rs_vec).reshape(B, N, self.num_heads, self.head_dim)
+        k_all = self.W_k(met_windows).reshape(B, N, W, self.num_heads, self.head_dim)
+        v_all = self.W_v(met_windows).reshape(B, N, W, self.num_heads, self.head_dim)
+
+        q_flat = q_all[has_met].reshape(-1, self.num_heads, self.head_dim)
+        k_flat = k_all[has_met].reshape(-1, self.num_heads, W, self.head_dim)
+        v_flat = v_all[has_met].reshape(-1, self.num_heads, W, self.head_dim)
+        wm_flat = window_mask[has_met].unsqueeze(1).expand(-1, self.num_heads, W)
+
+        scale = math.sqrt(float(self.head_dim))
+        attn_scores = torch.matmul(q_flat.unsqueeze(2), k_flat.transpose(-2, -1)).squeeze(2) / scale
+        attn_scores = attn_scores.masked_fill(~wm_flat, float("-inf"))
+        attn_weights = self.softmax(attn_scores)
+        attn_weights = attn_weights * wm_flat.to(attn_weights.dtype)
+        attn_weights = self.dropout(attn_weights)
+
+        out_active = torch.matmul(attn_weights.unsqueeze(2), v_flat).squeeze(2)
+        out_active = self.W_o(out_active.reshape(-1, self.num_heads * self.head_dim))
+
+        out = rs_vec.reshape(B * N, H).clone()
+        out[has_met.reshape(-1)] = out_active
+        out = out.reshape(B, N, H)
+
+        skip = rs_vec
+        return self.norm(self.dropout(out) + skip)
+
+
+# ============================================================
+# 遥感日期映射工具（返回 (num_phases,) long tensor）
+# ============================================================
+
+def _rs_day_indices(device: torch.device) -> torch.Tensor:
+    return torch.tensor(AG_DAY_INDICES, device=device, dtype=torch.long)
+
+
+def _build_met_windows(
+    temporal_feat: torch.Tensor,
+    seq_lens: torch.Tensor,
+    day_indices: torch.Tensor,
+    window_size: int = RS_WINDOW_SIZE,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    B, T, H = temporal_feat.shape
+    N = day_indices.shape[0]
+    device = temporal_feat.device
+
+    met_windows = torch.zeros(B, N, window_size, H, device=device, dtype=temporal_feat.dtype)
+    window_mask = torch.zeros(B, N, window_size, device=device, dtype=torch.bool)
+
+    for i in range(N):
+        center = int(day_indices[i].item())
+        end = min(center, T)
+        start = max(0, center - window_size)
+
+        if start < end:
+            wlen = end - start
+            sl = seq_lens.to(device=device)
+            valid_sl = sl.unsqueeze(1) > start
+            w_len_clamped = torch.full((B,), wlen, device=device, dtype=torch.long)
+            actual_len = torch.min(
+                w_len_clamped,
+                (sl - start).clamp(min=0),
+            )
+            for b in range(B):
+                al = int(actual_len[b].item())
+                if al > 0:
+                    met_windows[b, i, :al] = temporal_feat[b, start:start + al]
+                    window_mask[b, i, :al] = True
+
+    return met_windows, window_mask
+
+
 class TFTEncoderForYieldPrediction(nn.Module):
     """TFT 编码器 + 产量预测头：无解码器，直接 LSTM → 注意力 → 预测头。"""
     def __init__(
@@ -619,6 +775,8 @@ class TFTEncoderForYieldPrediction(nn.Module):
         num_heads: int = 3,
         spatial_mode: str = "attention",
         variable_selection_stage: str = "grid",
+        use_remote_sensing: bool = False,
+        vit_freeze_backbone: bool = True,
     ):
         super().__init__()
         self.hidden_size = hidden_size
@@ -626,6 +784,7 @@ class TFTEncoderForYieldPrediction(nn.Module):
         self.dynamic_feature_names = list(dynamic_feature_names)
         self.spatial_mode = spatial_mode
         self.variable_selection_stage = variable_selection_stage
+        self.use_remote_sensing = use_remote_sensing
 
         # 1. 静态：县级连续土壤(Linear 映射,不分桶)+ 上下文 GRN
         self.soil_static_encoder = SoilStaticEncoder(
@@ -710,6 +869,20 @@ class TFTEncoderForYieldPrediction(nn.Module):
         else:
             raise ValueError(f"未知 spatial_mode: {spatial_mode}，可选 'attention' / 'mean'")
 
+        # ========== 遥感模块 ==========
+        if use_remote_sensing:
+            self.vit_encoder = PretrainedViTEncoder(
+                out_dim=hidden_size, freeze_backbone=vit_freeze_backbone, dropout=dropout,
+            )
+            self.rs_spatial_agg = SpatialAttentionAggregator(hidden_size, dropout)
+            self.rs_met_cross_attn = RSMetCrossAttention(
+                hidden_size=hidden_size, num_heads=num_heads, dropout=dropout,
+            )
+        else:
+            self.vit_encoder = None
+            self.rs_spatial_agg = None
+            self.rs_met_cross_attn = None
+
     def forward(
         self,
         grid_feats: torch.Tensor,
@@ -717,6 +890,7 @@ class TFTEncoderForYieldPrediction(nn.Module):
         grid_mask: torch.Tensor,
         soil_feats: torch.Tensor,
         seq_lens: torch.Tensor,
+        ag_images: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, Any]]:
         """
         Args:
@@ -725,6 +899,7 @@ class TFTEncoderForYieldPrediction(nn.Module):
             grid_mask: (B, G) bool 有效网格
             soil_feats: (B, soil_dim) 县级连续土壤静态特征(已标准化,不进网格注意力)
             seq_lens: (batch_size,) 有效时序长度
+            ag_images: (B, 12, G, 3, 224, 224) 可选遥感图像, 仅 use_remote_sensing=True 生效
 
         Returns:
             pred_all: (B, T, 1) 逐时间步产量预测
@@ -789,6 +964,12 @@ class TFTEncoderForYieldPrediction(nn.Module):
                 if feature_spatial_weights else None
             )
 
+        # ========== 遥感处理: ViT → 网格注意力 → Cross Attention → 注入 temporal_feat ==========
+        if self.use_remote_sensing and ag_images is not None:
+            temporal_feat = self._forward_remote_sensing(
+                ag_images, grid_coords, grid_mask, temporal_feat, seq_lens, device
+            )
+
         # ========== 4. LSTM 编码器 ==========
         lstm_feat_raw, _, _, _ = self.lstm_encoder(
             temporal_feat, seq_lens=seq_lens, c_c=c_c, c_h=c_h
@@ -808,7 +989,6 @@ class TFTEncoderForYieldPrediction(nn.Module):
         )
 
         # ========== 6. 产量预测头（逐时间步）==========
-        # 每个时间步的注意力向量都经过 GRN + pred_head → (B, T, 1)
         pred_all = self.pred_head(self.pred_grn(attn_feat))  # (B, T, 1)
 
         grad_tensors = {
@@ -833,3 +1013,66 @@ class TFTEncoderForYieldPrediction(nn.Module):
         }
 
         return pred_all, attn_weights_out, aux_dict
+
+    def _forward_remote_sensing(
+        self,
+        ag_images: torch.Tensor,
+        grid_coords: torch.Tensor,
+        grid_mask: torch.Tensor,
+        temporal_feat: torch.Tensor,
+        seq_lens: torch.Tensor,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """遥感处理: ViT 编码 → 网格注意力 → Cross Attention → 注入 temporal_feat。
+
+        Args:
+            ag_images: (B, 12, G, 3, 224, 224)
+            grid_coords: (B, G, 2)
+            grid_mask: (B, G) bool
+            temporal_feat: (B, T, H) 已通过 VSN + spatial_agg 的气象特征
+            seq_lens: (B,)
+            device: 设备
+
+        Returns:
+            temporal_feat: (B, T, H) 在遥感日期位置增强了遥感信息的特征
+        """
+        B, N_rs, G, C, H_img, W_img = ag_images.shape
+        T_met = temporal_feat.shape[1]
+        H = self.hidden_size
+
+        # --- step 1: ViT 对每个网格的每张遥感图像编码 ---
+        images = ag_images.permute(0, 2, 1, 3, 4, 5).reshape(B * G, N_rs, C, H_img, W_img)
+        images = images.reshape(B * G * N_rs, C, H_img, W_img)
+        rs_encoded = self.vit_encoder(images)
+        rs_encoded = rs_encoded.reshape(B, G, N_rs, H)
+        rs_encoded = rs_encoded * grid_mask[:, :, None, None].to(rs_encoded.dtype)
+
+        # --- step 2: 网格空间注意力聚合 (复刻 SpatialAttentionAggregator) ---
+        rs_tokens = rs_encoded.permute(0, 1, 2, 3).contiguous()
+        rs_tokens = rs_tokens * grid_mask[:, :, None, None].to(rs_tokens.dtype)
+        rs_vec, _ = self.rs_spatial_agg.forward_weights(
+            rs_tokens, grid_coords, grid_mask
+        )
+
+        # --- step 3: 构建气象窗口 & Cross Attention（跳过空窗口时相）---
+        day_indices = _rs_day_indices(device)
+        met_windows, window_mask = _build_met_windows(
+            temporal_feat, seq_lens, day_indices, RS_WINDOW_SIZE
+        )
+        has_any_met = window_mask.any(dim=-1)
+
+        fuse = self.rs_met_cross_attn(rs_vec, met_windows, window_mask)
+
+        # --- step 4: 时间对齐注入（仅对有气象窗口的时相做最近邻替换）---
+        day_indices_clamped = day_indices.clamp(max=T_met - 1)
+        within_seq = day_indices.unsqueeze(0) < seq_lens.unsqueeze(1)
+
+        for i in range(N_rs):
+            idx = int(day_indices_clamped[i].item())
+            if idx >= T_met:
+                continue
+            inject_mask = has_any_met[:, i] & within_seq[:, i]
+            if inject_mask.any():
+                temporal_feat[inject_mask, idx] = fuse[inject_mask, i]
+
+        return temporal_feat

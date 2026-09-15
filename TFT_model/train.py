@@ -44,6 +44,7 @@ from data import (
     build_grid_samples,
     GridTimeSeriesDataset,
     make_grid_collate_fn,
+    AgricultureImageDataset,
     SOIL_DIM,
     DEFAULT_DYNAMIC_FEATURE_NAMES,
     DEFAULT_DATA_JSONL,
@@ -52,7 +53,7 @@ from data import (
     GDD_FEATURE_NAME,
     CONSTRUCTED_FEATURES,
 )
-from cropnet_protocol import ALLOWED_STATES, PROTOCOL_MAX_STEPS
+from cropnet_protocol import ALLOWED_STATES, CROPNET_FIVE_STATES, PROTOCOL_MAX_STEPS
 
 # ========== 常量 ==========
 EARLY_STOP_PATIENCE: int = 10
@@ -179,6 +180,7 @@ def train_model(
     early_stop_patience: int = EARLY_STOP_PATIENCE,
     use_crucial: bool = False,
     valid_freq: int = 1,
+    use_rs: bool = False,
 ) -> float:
     """
     训练主循环。
@@ -204,8 +206,9 @@ def train_model(
 
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs} [Train]")
         for batch in pbar:
-            # batch: (grid_feats, grid_coords, grid_mask, month, static_bucket_ids, labels, seq_lens, states, years, fips, counties)
-            grid_feats, grid_coords, grid_mask, month_ids, day_ids, soil_feats, labels, seq_lens, states, years, _, _ = batch
+            grid_feats, grid_coords, grid_mask, month_ids, day_ids, soil_feats, labels, seq_lens, *_rest = batch
+            ag_images = _rest[4] if use_rs and len(_rest) >= 5 else None
+
             grid_feats = grid_feats.to(device)
             grid_coords = grid_coords.to(device)
             grid_mask = grid_mask.to(device)
@@ -214,6 +217,8 @@ def train_model(
             soil_feats = soil_feats.to(device)
             labels = labels.to(device)
             seq_lens = seq_lens.to(device)
+            if ag_images is not None:
+                ag_images = ag_images.to(device)
 
             optimizer.zero_grad()
 
@@ -223,8 +228,8 @@ def train_model(
                 grid_mask=grid_mask,
                 soil_feats=soil_feats,
                 seq_lens=seq_lens,
+                ag_images=ag_images,
             )
-
             # 每条协议序列只取最后一个有效时间步计算损失。
             B, T, _ = pred_all.shape
             has_valid = seq_lens > 0
@@ -260,7 +265,8 @@ def train_model(
             val_pbar = tqdm(val_loader, desc=f"Epoch {epoch+1}/{epochs} [Val]")
             with torch.no_grad():
                 for batch in val_pbar:
-                    grid_feats, grid_coords, grid_mask, month_ids, day_ids, soil_feats, labels, seq_lens, states, years, _, _ = batch
+                    grid_feats, grid_coords, grid_mask, month_ids, day_ids, soil_feats, labels, seq_lens, *_restv = batch
+                    ag_images_v = _restv[4] if use_rs and len(_restv) >= 5 else None
                     grid_feats = grid_feats.to(device)
                     grid_coords = grid_coords.to(device)
                     grid_mask = grid_mask.to(device)
@@ -269,6 +275,8 @@ def train_model(
                     soil_feats = soil_feats.to(device)
                     labels = labels.to(device)
                     seq_lens = seq_lens.to(device)
+                    if ag_images_v is not None:
+                        ag_images_v = ag_images_v.to(device)
 
                     pred_all, _, _ = model(
                         grid_feats=grid_feats,
@@ -276,6 +284,7 @@ def train_model(
                         grid_mask=grid_mask,
                         soil_feats=soil_feats,
                         seq_lens=seq_lens,
+                        ag_images=ag_images_v,
                     )
 
                     # 在每个样本的有效序列中取最后一步作为输出。
@@ -461,9 +470,8 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--val_year", type=str, default="2022",
                         help="验证年份，可用逗号分隔多个年份，如 '2021,2022'")
-    parser.add_argument("--states", type=str,
-                        default=",".join(sorted(ALLOWED_STATES)),
-                        help="按州过滤(逗号分隔的小写全称)，范围限定为协议八州")
+    parser.add_argument("--states", type=str, default=None,
+                        help="按州过滤(逗号分隔的小写全称)，默认遥感模式五州/普通模式八州")
     parser.add_argument("--grid_cache", type=str, default=None,
                         help="网格级气象缓存路径,默认 train_dataset/grid_cache.pt")
     parser.add_argument("--soil", type=str, default=None,
@@ -478,7 +486,7 @@ def main():
     parser.add_argument("--use_crucial", action="store_true",
                         help="使用 CRUCIAL 损失替代 MSE")
     parser.add_argument("--output_dir", type=str, default=None,
-                        help="产物输出目录，默认 train_model/train_output/")
+                        help="产物输出目录，默认 /data/raid0/hqx/TFT_train/val_<year>/")
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--early_stop_patience", type=int, default=EARLY_STOP_PATIENCE)
     parser.add_argument("--spatial_mode", type=str, default="attention",
@@ -492,6 +500,8 @@ def main():
     parser.add_argument("--use_constructed", action="store_true",
                         help="追加全部农学构造特征(CumGDD/KDD/CumPRCP/CumDeficit,15 维动态输入)"
                              ";与 --use_gdd 互斥,开启时以本开关为准")
+    parser.add_argument("--use_remote_sensing", action="store_true",
+                        help="启用遥感模块(DINOv2 ViT-S编码Sentinel-2图像,CorssAttention融合气象)")
     args = parser.parse_args()
 
     # 解析验证年份
@@ -511,7 +521,7 @@ def main():
 
     # 输出目录
     val_tag = "_".join(str(y) for y in val_years)
-    output_dir = args.output_dir or os.path.join(_THIS_DIR, "train_output", f"val_{val_tag}")
+    output_dir = args.output_dir or os.path.join("/data/raid0/hqx", "TFT_train", f"val_{val_tag}")
     os.makedirs(output_dir, exist_ok=True)
     print(f"输出目录: {output_dir}")
 
@@ -538,10 +548,16 @@ def main():
     soil_dict = load_county_soil(soil_path)
     print(f"    县级土壤: {soil_path} ({len(soil_dict)} 县, 连续 {SOIL_DIM} 维, 不分桶)")
 
-    requested_states = {s.strip().lower() for s in args.states.split(",") if s.strip()}
-    state_set = requested_states & ALLOWED_STATES
+    use_rs = bool(args.use_remote_sensing)
+    allowed = CROPNET_FIVE_STATES if use_rs else ALLOWED_STATES
+    if args.states:
+        requested = {s.strip().lower() for s in args.states.split(",") if s.strip()}
+        state_set = requested & allowed
+    else:
+        state_set = allowed
+    tag = "五州(AG)" if use_rs else "八州"
     pairs = [p for p in pairs if str(p[0].get("State", "")).lower() in state_set]
-    print(f"  按协议八州过滤 {sorted(state_set)} 后: {len(pairs)} 条")
+    print(f"  按协议{tag}过滤 {sorted(state_set)} 后: {len(pairs)} 条")
 
     # 目标 = yield_per_acre(单产, bu/ac),无归一化
     train_pairs, val_pairs = _split_pairs_by_year(pairs, val_years)
@@ -551,6 +567,35 @@ def main():
 
     if not train_pairs or not val_pairs:
         raise ValueError("训练集或验证集为空，请检查 --val_year 和数据")
+
+    if use_rs:
+        from data import AG_STATE_ABBR, load_ag_manifest, DEFAULT_AG_MANIFEST
+        ag_states = {"IL", "IA"}
+        ag_index = load_ag_manifest(DEFAULT_AG_MANIFEST)
+        def _has_ag(meta):
+            abbr = AG_STATE_ABBR.get(str(meta.get("State", "")).strip().lower())
+            if abbr not in ag_states:
+                return False
+            year = int(meta["Year"])
+            fips = str(meta.get("FIPS", "")).zfill(5)
+            entries = ag_index.get((abbr, year, fips), [])
+            if not entries:
+                return False
+            quarters = {e["path"].rstrip(".h5").split("_")[-1][-5:] for e in entries}
+            return "06-30" in quarters and "09-30" in quarters
+        n_tr, n_val = len(train_pairs), len(val_pairs)
+        train_pairs = [(m, e) for m, e in train_pairs if _has_ag(m)]
+        val_pairs = [(m, e) for m, e in val_pairs if _has_ag(m)]
+        if not train_pairs or not val_pairs:
+            raise ValueError("AG 数据仅覆盖 IL/IA 且有 q2/q3，过滤后训练集或验证集为空")
+        print(f"  AG 过滤 (IL/IA,q2+q3): Train {len(train_pairs)}/{n_tr}, Val {len(val_pairs)}/{n_val}")
+        train_meta_ag = [meta for meta, _ in train_pairs]
+        val_meta_ag = [meta for meta, _ in val_pairs]
+        train_ag = AgricultureImageDataset(train_meta_ag, train=True, seed=args.seed)
+        val_ag = AgricultureImageDataset(val_meta_ag, train=False, seed=args.seed)
+    else:
+        train_ag = None
+        val_ag = None
 
     # ========== 2. 目标 = 原始单产 (bu/ac),无归一化 ==========
     print("\n[2] 目标 = yield_per_acre(单产, bu/ac),不做归一化")
@@ -579,8 +624,9 @@ def main():
 
     train_samples = build_grid_samples(train_pairs, soil_dict=soil_dict, dynamic_feature_names=dynamic_feature_names)
     val_samples = build_grid_samples(val_pairs, soil_dict=soil_dict, dynamic_feature_names=dynamic_feature_names)
-    train_dataset = GridTimeSeriesDataset(train_samples)
-    val_dataset = GridTimeSeriesDataset(val_samples)
+
+    train_dataset = GridTimeSeriesDataset(train_samples, ag_dataset=train_ag)
+    val_dataset = GridTimeSeriesDataset(val_samples, ag_dataset=val_ag)
 
     # 随机采样,固定 batch_size,num_workers=0
     # (网格缓存 ~1.3GB,Windows 无 fork,多 worker 会整份 pickle 复制缓存)
@@ -615,13 +661,15 @@ def main():
         num_heads=args.num_heads,
         spatial_mode=args.spatial_mode,
         variable_selection_stage=args.variable_selection_stage,
+        use_remote_sensing=use_rs,
     )
 
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"  参数总量: {total_params:,}, 可训练: {trainable_params:,}")
     print(f"  消融开关: use_constructed={args.use_constructed}  use_gdd={args.use_gdd}  "
-          f"spatial_mode={args.spatial_mode}  variable_selection_stage={args.variable_selection_stage}")
+          f"spatial_mode={args.spatial_mode}  variable_selection_stage={args.variable_selection_stage}  "
+          f"use_remote_sensing={use_rs}")
 
     # 保存模型超参
     hparams = {
@@ -637,6 +685,7 @@ def main():
         "variable_selection_stage": args.variable_selection_stage,
         "use_gdd": bool(args.use_gdd),
         "use_constructed": bool(args.use_constructed),
+        "use_remote_sensing": use_rs,
     }
     with open(os.path.join(output_dir, "model_hparams.json"), "w", encoding="utf-8") as f:
         json.dump(hparams, f, ensure_ascii=False, indent=2)
@@ -662,6 +711,7 @@ def main():
         weight_decay=args.weight_decay,
         early_stop_patience=args.early_stop_patience,
         use_crucial=args.use_crucial,
+        use_rs=use_rs,
     )
 
     print(f"\n{'='*50}")

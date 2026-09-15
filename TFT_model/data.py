@@ -26,6 +26,9 @@ from pathlib import Path
 from torchvision import transforms
 from collections.abc import Mapping
 from typing import Any, List, Dict, Optional, Tuple, Iterator
+import urllib.request
+import shutil
+import tempfile
 
 # ============================================================
 # 路径配置
@@ -46,10 +49,37 @@ from cropnet_protocol import (  # noqa: E402
     validate_protocol_metadata,
 )
 
-DEFAULT_DATA_JSONL = os.path.join(TRAIN_DATA_DIR, "dataset.jsonl")
-DEFAULT_GRID_CACHE = os.path.join(TRAIN_DATA_DIR, "grid_cache.pt")
+DEFAULT_DATA_JSONL = os.path.join("/data/raid0/hqx/Product_model_runtime/train_dataset", "dataset.jsonl")
+DEFAULT_GRID_CACHE = os.path.join("/data/raid0/hqx/Product_model_runtime/train_dataset", "grid_cache.pt")
 # 源数据已迁移到 DataSrc/(2026-08 重构)
 DEFAULT_COUNTY_SOIL = os.path.join(SCRIPT_DIR, "..", "DataSrc", "soil_dataset", "county_soil.json")
+
+# 遥感 OSS URL 清单
+DEFAULT_AG_MANIFEST = os.path.join(PROJECT_DIR, "manifests", "sentinel_urls.jsonl")
+AG_CACHE_ROOT = "/data/raid0/hqx/Product_model_runtime/DataSrc/mmst_vit/county/AG"
+
+
+def load_ag_manifest(path: str = DEFAULT_AG_MANIFEST) -> Dict[Tuple[str, int, str], List[dict]]:
+    """加载 OSS URL 清单，返回按 (state_abbr, year, fips) 索引的条目列表。
+
+    返回 {(state, year, fips): [entry, ...]}，每个 entry 包含 oss_key/url/size/sha256。
+    用法: manifest["IL", 2017, "17001"] -> [{"oss_key": "...", "url": "...", ...}, ...]
+    """
+    result: Dict[Tuple[str, int, str], List[dict]] = {}
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            entry = json.loads(line)
+            state = str(entry.get("state", "")).upper()
+            year = int(entry["year"])
+            fips_list = entry.get("fips", [])
+            for fips in fips_list:
+                key = (state, year, str(fips).zfill(5))
+                result.setdefault(key, []).append(entry)
+    return result
+
 
 # 县级土壤特征(gSSURGO,连续值,0-30cm 加权)
 SOIL_FEATURES = ["clay_pct", "sand_pct", "silt_pct", "om_pct", "ph", "bulk_density", "awc"]
@@ -223,14 +253,63 @@ def _validate_ag_dataset(dataset, context, date):
 
 
 class AgricultureImageDataset(Dataset):
-    """严格读取五州 Agriculture HDF5 的 12 个 Sentinel 时相。"""
+    """从 OSS 清单按需下载并按 FIPS 读取五州 Sentinel-2 时相。"""
 
-    def __init__(self, samples, ag_root: str | Path, train: bool, image_size=224, seed=0):
+    def __init__(self, samples, ag_manifest_path=None, train=True, image_size=224, seed=0):
+        super().__init__()
         self.samples = [dict(sample) for sample in samples]
-        self.ag_root = Path(ag_root)
         self.train = bool(train)
         self.image_size = int(image_size)
         self.seed = int(seed)
+
+        manifest_path = ag_manifest_path or DEFAULT_AG_MANIFEST
+        raw = load_ag_manifest(manifest_path)
+        index = {}
+        for (state, year, fips_str), entries in raw.items():
+            for e in entries:
+                end_date = e["path"].rstrip(".h5").split("_")[-1]
+                mmdd = end_date[-5:]
+                if mmdd == "03-31":
+                    q = "q1"
+                elif mmdd == "06-30":
+                    q = "q2"
+                elif mmdd == "09-30":
+                    q = "q3"
+                elif mmdd == "12-31":
+                    q = "q4"
+                else:
+                    continue
+                index.setdefault((state, year, fips_str), {})[q] = e["url"]
+
+        self.ag_index = index
+
+        missing = []
+        for sample in self.samples:
+            key = self._sample_key(sample)
+            for q in ("q2", "q3"):
+                url = self.ag_index[key][q]
+                cache_path = os.path.join(AG_CACHE_ROOT, str(sample["Year"]).zfill(4),
+                                           str(sample["FIPS"]).zfill(5),
+                                           os.path.basename(url.split("?")[0]))
+                if not os.path.isfile(cache_path):
+                    missing.append((url, cache_path))
+        if missing:
+            print(f"  [AG] 预下载 {len(missing)} 个文件到 {AG_CACHE_ROOT} ...", flush=True)
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            def _dl(args):
+                url, dest = args
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                urllib.request.urlretrieve(url, dest)
+                return dest
+            done = 0
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                futures = {pool.submit(_dl, m): m for m in missing}
+                for fut in as_completed(futures):
+                    done += 1
+                    if done % 50 == 0 or done == len(missing):
+                        print(f"    [{done}/{len(missing)}]", flush=True)
+            print(f"  [AG] 下载完成", flush=True)
+
         normalize = transforms.Normalize([0.466, 0.471, 0.380], [0.195, 0.194, 0.192])
         if self.train:
             self.transform = transforms.Compose([
@@ -246,93 +325,93 @@ class AgricultureImageDataset(Dataset):
                 transforms.CenterCrop(self.image_size),
                 normalize,
             ])
-        for index, sample in enumerate(self.samples):
-            _reject_non_ag_paths(sample, index)
-            self._validate_sample_files(sample, index)
 
-    def _validate_sample_files(self, sample, index):
-        context = _ag_sample_context(index, sample)
-        paths = build_ag_paths(sample, self.ag_root)
-        selected_dates = _sample_ag_dates(paths, sample, context)
-        grid_count = None
-        for path, dates in zip(paths, (selected_dates[:6], selected_dates[6:])):
-            if not path.is_file():
-                raise ValueError(f"{context}: missing AG file {path}")
-            try:
-                with h5py.File(path, "r") as handle:
-                    fips = str(sample["FIPS"]).strip().zfill(5)
-                    if fips not in handle:
-                        raise ValueError(f"{context}: missing FIPS group {fips}")
-                    county = handle[fips]
-                    date_names = resolve_ag_date_names(county, dates, sample["Year"])
-                    for date in dates:
-                        date_group = county[date_names[date]]
-                        if "data" not in date_group:
-                            raise ValueError(f"{context}: missing data dataset at {date}")
-                        dataset = date_group["data"]
-                        _validate_ag_dataset(dataset, context, date)
-                        if grid_count is None:
-                            grid_count = int(dataset.shape[0])
-                        elif int(dataset.shape[0]) != grid_count:
-                            raise ValueError(f"{context}: inconsistent grid counts at {date}")
-            except ValueError:
-                raise
-            except (OSError, KeyError, TypeError) as error:
-                raise ValueError(f"{context}: invalid AG HDF5 structure: {error}") from error
+        for index_i, sample in enumerate(self.samples):
+            self._validate(sample, index_i)
+
+    def _validate(self, sample, index_i):
+        context = _ag_sample_context(index_i, sample)
+        year = _validate_ag_year(sample["Year"])
+        fips = str(sample["FIPS"]).strip().zfill(5)
+        state_full = str(sample["State"]).strip().lower()
+        state_abbr = AG_STATE_ABBR.get(state_full)
+        if state_abbr is None:
+            raise ValueError(f"{context}: 不支持的 AG 州: {state_full}")
+        key = (state_abbr, year, fips)
+        if key not in self.ag_index:
+            raise ValueError(f"{context}: 无 AG 清单条目")
+        if "q2" not in self.ag_index[key] or "q3" not in self.ag_index[key]:
+            raise ValueError(f"{context}: 缺少 q2/q3 季度，仅有 {sorted(self.ag_index[key].keys())}")
 
     def __len__(self):
         return len(self.samples)
 
+    @staticmethod
+    def _sample_key(sample):
+        state_full = str(sample["State"]).strip().lower()
+        state_abbr = AG_STATE_ABBR[state_full]
+        return (state_abbr, int(sample["Year"]), str(sample["FIPS"]).zfill(5))
+
     def __getitem__(self, index):
         sample = self.samples[index]
         context = _ag_sample_context(index, sample)
+        key = self._sample_key(sample)
+        fips = str(sample["FIPS"]).strip().zfill(5)
+        year = int(sample["Year"])
+
+        tensors = []
+        grid_count = None
+
+        for q in ("q2", "q3"):
+            url = self.ag_index[key][q]
+            cache_path = os.path.join(AG_CACHE_ROOT, str(year), fips,
+                                       os.path.basename(url.split("?")[0]))
+            with h5py.File(cache_path, "r") as handle:
+                grp = handle[fips]
+                date_names = list(grp.keys())
+                available = {str(dn)[-5:] for dn in date_names}
+                dates_in_q = [d for d in AG_DATES if d in available]
+                if len(dates_in_q) != 6:
+                    raise ValueError(f"{context}: q={q} 期望 6 个 AG 日期，得到 {len(dates_in_q)}: {sorted(available)}")
+
+                for date_str in dates_in_q:
+                    ds_name = [dn for dn in date_names if str(dn).endswith(date_str)][0]
+                    ds = grp[ds_name]["data"]
+                    if ds.dtype != np.uint8 or ds.ndim != 4 or ds.shape[1:] != (224, 224, 3):
+                        raise ValueError(f"{context}: 数据格式异常 at {date_str}")
+                    array = ds[...]
+                    if grid_count is None:
+                        grid_count = int(array.shape[0])
+                    images = torch.from_numpy(array).permute(0, 3, 1, 2).float().div(255.0)
+                    transformed = []
+                    for img in images:
+                        with torch.random.fork_rng():
+                            torch.manual_seed(self.seed + index * len(AG_DATES) + AG_DATES.index(date_str))
+                            transformed.append(self.transform(img))
+                    tensors.append(torch.stack(transformed))
+
+        return {
+            "ag_images": torch.stack(tensors),
+            "ag_dates": list(AG_DATES),
+            "FIPS": fips,
+            "Year": year,
+            "State": str(sample["State"]).strip().lower(),
+            "County": str(sample.get("County", "")),
+            "grid_count": grid_count,
+        }
+
+    @staticmethod
+    def _download(url, dest):
+        print(f"  [下载] {os.path.basename(dest)} ...", end=" ", flush=True)
         try:
-            paths = build_ag_paths(sample, self.ag_root)
-            selected_dates = _sample_ag_dates(paths, sample, context)
-            tensors = []
-            grid_count = None
-            quarter_dates = (selected_dates[:6], selected_dates[6:])
-            for path, dates in zip(paths, quarter_dates):
-                if not path.is_file():
-                    raise ValueError(f"{context}: missing AG file {path}")
-                with h5py.File(path, "r") as handle:
-                    fips = str(sample["FIPS"]).strip().zfill(5)
-                    if fips not in handle:
-                        raise ValueError(f"{context}: missing FIPS group {fips}")
-                    county = handle[fips]
-                    date_names = resolve_ag_date_names(county, dates, sample["Year"])
-                    for date in dates:
-                        date_group = county[date_names[date]]
-                        if "data" not in date_group:
-                            raise ValueError(f"{context}: missing data dataset at {date}")
-                        dataset = date_group["data"]
-                        _validate_ag_dataset(dataset, context, date)
-                        array = dataset[...]
-                        if grid_count is None:
-                            grid_count = int(array.shape[0])
-                        elif int(array.shape[0]) != grid_count:
-                            raise ValueError(f"{context}: inconsistent grid counts at {date}")
-                        images = torch.from_numpy(array).permute(0, 3, 1, 2).float().div(255.0)
-                        transformed = []
-                        for image in images:
-                            devices = list(range(torch.cuda.device_count())) if torch.cuda.is_available() else []
-                            with torch.random.fork_rng(devices=devices):
-                                torch.manual_seed(self.seed + index * len(AG_DATES) + AG_DATES.index(date))
-                                transformed.append(self.transform(image))
-                        tensors.append(torch.stack(transformed))
-            return {
-                "ag_images": torch.stack(tensors),
-                "ag_dates": list(AG_DATES),
-                "FIPS": str(sample["FIPS"]).strip().zfill(5),
-                "Year": int(sample["Year"]),
-                "State": str(sample["State"]).strip().lower(),
-                "County": str(sample.get("County", "")),
-                "grid_count": grid_count,
-            }
-        except ValueError:
+            with urllib.request.urlopen(url, timeout=120) as resp:
+                with open(dest, "wb") as f:
+                    shutil.copyfileobj(resp, f)
+        except Exception:
+            if os.path.isfile(dest):
+                os.remove(dest)
             raise
-        except (KeyError, OSError, TypeError) as error:
-            raise ValueError(f"{context}: invalid AG HDF5 structure: {error}") from error
+        print("OK")
 
 
 def validate_five_state_sample(sample) -> None:
@@ -1301,21 +1380,23 @@ class GridTimeSeriesDataset(Dataset):
     每个样本一条 (县, 年):
       - grid_feats: (G, T, F) 该县覆盖 G 个 9×9km 网格的气象时序
       - grid_coords: (G, 2) 每个网格的 [lat, lon]
-       - month: (T,) 时间步月份 (4-9)，每条序列最多 168 步
-      - static_bucket_ids: {"carbon_bucket": (1,), "ph_bucket": (1,)}
+      - month: (T,) 时间步月份 (4-9)，每条序列最多 168 步
+      - soil_feats: (7,) 连续土壤静态特征
       - yield_per_acre: (1,) 单产 (bu/ac)
       - seq_len: 有效时间步数
+      - ag_images: (12, G, 3, 224, 224) 可选，Sentinel-2 遥感图像，仅 ag_dataset 非 None 时返回
     """
 
-    def __init__(self, sub_samples: List[Dict]):
+    def __init__(self, sub_samples: List[Dict], ag_dataset=None):
         self.sub_samples = sub_samples
+        self.ag_dataset = ag_dataset
 
     def __len__(self) -> int:
         return len(self.sub_samples)
 
     def __getitem__(self, idx: int):
         s = self.sub_samples[idx]
-        return (
+        result = [
             s["grid_feats"],        # (G, T, F)
             s["grid_coords"],       # (G, 2)
             s["month"],             # (T,)
@@ -1327,7 +1408,11 @@ class GridTimeSeriesDataset(Dataset):
             s["year"],
             s["FIPS"],
             s["County"],
-        )
+        ]
+        if self.ag_dataset is not None:
+            ag_entry = self.ag_dataset[idx]
+            result.append(ag_entry["ag_images"])
+        return tuple(result)
 
 
 def make_grid_collate_fn(
@@ -1363,6 +1448,8 @@ def make_grid_collate_fn(
         years = [int(it[8]) for it in batch]
         fips_list = [it[9] for it in batch]
         county_list = [it[10] for it in batch]
+        has_ag = len(batch[0]) > 11
+        ag_list = [it[11] for it in batch] if has_ag else None
 
         B = len(batch)
         Gmax = max(x.shape[0] for x in grid_feats_list)
@@ -1389,6 +1476,14 @@ def make_grid_collate_fn(
         )
         labels = torch.stack(labels, dim=0)
 
+        if has_ag:
+            ag_images = torch.zeros(B, 12, Gmax, 3, 224, 224, dtype=torch.float32)
+            for i in range(B):
+                g = ag_list[i].shape[1]
+                ag_images[i, :, :g] = ag_list[i]
+        else:
+            ag_images = None
+
         return (
             grid_feats,      # (B, Gmax, Tmax, F)
             grid_coords,     # (B, Gmax, 2)
@@ -1399,6 +1494,7 @@ def make_grid_collate_fn(
             labels,          # (B, 1)
             seq_lens,        # (B,)
             states, years, fips_list, county_list,
+            ag_images,       # (B, 12, Gmax, 3, 224, 224) or None
         )
 
     return collate_fn
