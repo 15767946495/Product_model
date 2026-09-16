@@ -5,8 +5,6 @@ from copy import deepcopy
 import math
 from typing import Any, Dict, List, Tuple, Optional
 
-MODEL_CONTRACT_VERSION = 8
-
 
 class GatedLinearUnit(nn.Module):
     """门控线性单元"""
@@ -414,99 +412,6 @@ class LSTMEncoder(nn.Module):
         return lstm_feat, last_hidden, enc_h_last, enc_c_last
 
 
-class LSTMDecoder(nn.Module):
-    """TFT 解码器：初态仅底层接入编码器末步 h、c，输入为 official 支路经 GRN 后的序列。"""
-
-    def __init__(
-        self,
-        input_size: int,
-        hidden_size: int,
-        num_layers: int = 1,
-        dropout: float = 0.3,
-        bidirectional: bool = False,
-    ):
-        super().__init__()
-        self.hidden_size = hidden_size
-        self.num_layers = num_layers
-        self.bidirectional = bidirectional
-        self.num_directions = 2 if bidirectional else 1
-
-        self.lstm = nn.LSTM(
-            input_size=input_size,
-            hidden_size=hidden_size,
-            num_layers=num_layers,
-            batch_first=True,
-            dropout=dropout if num_layers > 1 else 0,
-            bidirectional=bidirectional,
-        )
-        self.gate_add_norm = GateAddNorm(
-            input_size=hidden_size * self.num_directions,
-            skip_size=input_size,
-            dropout=dropout,
-        )
-        self.output_dropout = nn.Dropout(dropout)
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        seq_lens: torch.Tensor,
-        h_init: torch.Tensor,
-        c_init: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Args:
-            x: (B, T, input_size)
-            seq_lens: (B,) 解码支路有效长度（必传）
-            h_init, c_init: (B, hidden_size) 编码器末层末步，写入 LSTM 第 0 层初态
-        """
-        B = x.shape[0]
-        device = x.device
-        dtype = x.dtype
-        nh = self.num_layers * self.num_directions
-        h0 = torch.zeros(nh, B, self.hidden_size, device=device, dtype=dtype)
-        c0 = torch.zeros(nh, B, self.hidden_size, device=device, dtype=dtype)
-        h0[0] = h_init
-        c0[0] = c_init
-
-        seq_lens_cpu = seq_lens.cpu().tolist()
-        seq_lens_sorted, idx = torch.sort(
-            torch.tensor(seq_lens_cpu, device=x.device), descending=True
-        )
-        idx = idx.long()
-        x_sorted = x[idx]
-        h0 = h0[:, idx, :]
-        c0 = c0[:, idx, :]
-        x_packed = nn.utils.rnn.pack_padded_sequence(
-            x_sorted,
-            seq_lens_sorted.cpu().tolist(),
-            batch_first=True,
-            enforce_sorted=True,
-        )
-        lstm_out_packed, _ = self.lstm(x_packed, (h0, c0))
-        lstm_out, _ = nn.utils.rnn.pad_packed_sequence(
-            lstm_out_packed, batch_first=True, total_length=x.size(1)
-        )
-
-        idx_rev = torch.argsort(idx)
-        lstm_out_orig = lstm_out[idx_rev]
-        x_orig = x_sorted[idx_rev]
-        lstm_feat = self.gate_add_norm(lstm_out_orig, x_orig)
-        Bsz_d, Tlen_d, _ = lstm_feat.shape
-        t_ar_d = torch.arange(
-            Tlen_d, device=lstm_feat.device, dtype=torch.long
-        ).unsqueeze(0).expand(Bsz_d, Tlen_d)
-        sl_orig_d = seq_lens.to(device=lstm_feat.device).unsqueeze(1)
-        ok_td = t_ar_d < sl_orig_d
-        lstm_feat = lstm_feat * ok_td.unsqueeze(-1).to(dtype=lstm_feat.dtype)
-
-        Bsz = lstm_feat.shape[0]
-        batch_idx = torch.arange(Bsz, device=lstm_feat.device)
-        last_idx = (seq_lens.to(device=lstm_feat.device) - 1).clamp(min=0).long()
-        last_hidden = lstm_feat[batch_idx, last_idx, :]
-
-        return lstm_feat, last_hidden
-
-
 class SpatialAttentionAggregator(nn.Module):
     """WeatherFormer pooling with a county CLS query and positional Q/K/V inputs."""
 
@@ -627,12 +532,7 @@ class PretrainedViTEncoder(nn.Module):
         if freeze_backbone:
             for p in self.backbone.parameters():
                 p.requires_grad = False
-        self.proj = nn.Sequential(
-            nn.Linear(self.embed_dim, out_dim * 2),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(out_dim * 2, out_dim),
-        )
+        self.proj = GatedResidualNetwork(input_size=self.embed_dim, hidden_size=out_dim * 2, output_size=out_dim, dropout=dropout)
         self._init_weights()
 
     def _init_weights(self):
@@ -651,7 +551,7 @@ class PretrainedViTEncoder(nn.Module):
 
 
 class RSMetCrossAttention(nn.Module):
-    """遥感向量(12 时相)作为 Q，对应前 14 天气象窗口作为 KV，
+    """遥感向量(12 时相)作为 Q，对应当天起后 14 天气象窗口作为 KV，
     做 multi-head cross attention，输出 12 个融合向量。
     窗口为空（无气象数据）的时相直接跳过 attention，输出 rs_vec 自身。"""
 
@@ -714,8 +614,7 @@ class RSMetCrossAttention(nn.Module):
         out[has_met.reshape(-1)] = out_active
         out = out.reshape(B, N, H)
 
-        skip = rs_vec
-        return self.norm(self.dropout(out) + skip)
+        return self.norm(out)
 
 
 # ============================================================
@@ -741,13 +640,12 @@ def _build_met_windows(
 
     for i in range(N):
         center = int(day_indices[i].item())
-        end = min(center, T)
-        start = max(0, center - window_size)
+        start = min(center, T)
+        end = min(center + window_size, T)
 
         if start < end:
             wlen = end - start
             sl = seq_lens.to(device=device)
-            valid_sl = sl.unsqueeze(1) > start
             w_len_clamped = torch.full((B,), wlen, device=device, dtype=torch.long)
             actual_len = torch.min(
                 w_len_clamped,
@@ -975,7 +873,7 @@ class TFTEncoderForYieldPrediction(nn.Module):
             temporal_feat, seq_lens=seq_lens, c_c=c_c, c_h=c_h
         )
 
-        # ========== 5. GRN 准备 + 因果注意力（仅编码器序列）==========
+        # ========== 5. GRN 准备 + 因果注意力==========
         Te = int(lstm_feat_raw.size(1))
         pad_mask = torch.arange(Te, device=device).unsqueeze(0) < seq_lens.unsqueeze(1)
         pm_f = pad_mask.unsqueeze(-1).to(dtype=lstm_feat_raw.dtype)
