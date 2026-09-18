@@ -10,12 +10,15 @@ cd "$SCRIPT_DIR"
 
 python train.py \
   --epochs 500 \
-  --lr 5e-4 \
+  --lr 1e-4 \
   --batch_size 4 \
-  --hidden_size 32 \
+  --hidden_size 128 \
+  --num_lstm_layers 2 \
   --num_heads 2 \
   --dropout 0.1 \
   --weight_decay 5e-4 \
-  --val_year 2021 \
+  --val_year 2022 \
   --seed 42 \
-  --use_remote_sensing
+  --use_remote_sensing \
+  --use_constructed \
+  --keep_ag_cache

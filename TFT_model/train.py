@@ -34,7 +34,7 @@ _THIS_DIR = Path(__file__).resolve().parent
 if str(_THIS_DIR) not in sys.path:
     sys.path.insert(0, str(_THIS_DIR))
 
-from models import MODEL_CONTRACT_VERSION, TFTEncoderForYieldPrediction
+from models import TFTEncoderForYieldPrediction
 from data import (
     load_jsonl,
     load_grid_cache,
@@ -53,10 +53,10 @@ from data import (
     GDD_FEATURE_NAME,
     CONSTRUCTED_FEATURES,
 )
-from cropnet_protocol import ALLOWED_STATES, CROPNET_FIVE_STATES, PROTOCOL_MAX_STEPS
+from cropnet_protocol import CROPNET_FIVE_STATES, PROTOCOL_MAX_STEPS
 
 # ========== 常量 ==========
-EARLY_STOP_PATIENCE: int = 10
+EARLY_STOP_PATIENCE: int = 2
 
 
 def last_valid_index(seq_lens: torch.Tensor) -> torch.Tensor:
@@ -208,6 +208,7 @@ def train_model(
         for batch in pbar:
             grid_feats, grid_coords, grid_mask, month_ids, day_ids, soil_feats, labels, seq_lens, *_rest = batch
             ag_images = _rest[4] if use_rs and len(_rest) >= 5 else None
+            ag_mask = _rest[5] if use_rs and len(_rest) >= 6 else None
 
             grid_feats = grid_feats.to(device)
             grid_coords = grid_coords.to(device)
@@ -219,6 +220,8 @@ def train_model(
             seq_lens = seq_lens.to(device)
             if ag_images is not None:
                 ag_images = ag_images.to(device)
+            if ag_mask is not None:
+                ag_mask = ag_mask.to(device)
 
             optimizer.zero_grad()
 
@@ -267,6 +270,7 @@ def train_model(
                 for batch in val_pbar:
                     grid_feats, grid_coords, grid_mask, month_ids, day_ids, soil_feats, labels, seq_lens, *_restv = batch
                     ag_images_v = _restv[4] if use_rs and len(_restv) >= 5 else None
+                    ag_mask_v = _restv[5] if use_rs and len(_restv) >= 6 else None
                     grid_feats = grid_feats.to(device)
                     grid_coords = grid_coords.to(device)
                     grid_mask = grid_mask.to(device)
@@ -277,6 +281,8 @@ def train_model(
                     seq_lens = seq_lens.to(device)
                     if ag_images_v is not None:
                         ag_images_v = ag_images_v.to(device)
+                    if ag_mask_v is not None:
+                        ag_mask_v = ag_mask_v.to(device)
 
                     pred_all, _, _ = model(
                         grid_feats=grid_feats,
@@ -502,6 +508,8 @@ def main():
                              ";与 --use_gdd 互斥,开启时以本开关为准")
     parser.add_argument("--use_remote_sensing", action="store_true",
                         help="启用遥感模块(DINOv2 ViT-S编码Sentinel-2图像,CorssAttention融合气象)")
+    parser.add_argument("--keep_ag_cache", action="store_true",
+                        help="训练结束后保留本地遥感缓存(默认自动删除,下次训练重新下载)")
     args = parser.parse_args()
 
     # 解析验证年份
@@ -549,7 +557,9 @@ def main():
     print(f"    县级土壤: {soil_path} ({len(soil_dict)} 县, 连续 {SOIL_DIM} 维, 不分桶)")
 
     use_rs = bool(args.use_remote_sensing)
-    allowed = CROPNET_FIVE_STATES if use_rs else ALLOWED_STATES
+    train_ag = None
+    val_ag = None
+    allowed = CROPNET_FIVE_STATES
     if args.states:
         requested = {s.strip().lower() for s in args.states.split(",") if s.strip()}
         state_set = requested & allowed
@@ -569,33 +579,42 @@ def main():
         raise ValueError("训练集或验证集为空，请检查 --val_year 和数据")
 
     if use_rs:
-        from data import AG_STATE_ABBR, load_ag_manifest, DEFAULT_AG_MANIFEST
-        ag_states = {"IL", "IA"}
-        ag_index = load_ag_manifest(DEFAULT_AG_MANIFEST)
+        from data import (
+            AG_STATE_ABBR,
+            pre_download_ag,
+            load_ag_manifest,
+            DEFAULT_AG_MANIFEST,
+        )
+        raw_ag = load_ag_manifest(DEFAULT_AG_MANIFEST)
+        ag_available = set()
+        for (state_abbr, year, fips), entries in raw_ag.items():
+            quarters = {
+                e["path"].rstrip(".h5").split("_")[-1][-5:] for e in entries
+            }
+            if "06-30" in quarters and "09-30" in quarters:
+                ag_available.add((state_abbr, int(year), str(fips).zfill(5)))
+
         def _has_ag(meta):
             abbr = AG_STATE_ABBR.get(str(meta.get("State", "")).strip().lower())
-            if abbr not in ag_states:
+            if abbr is None:
                 return False
-            year = int(meta["Year"])
-            fips = str(meta.get("FIPS", "")).zfill(5)
-            entries = ag_index.get((abbr, year, fips), [])
-            if not entries:
-                return False
-            quarters = {e["path"].rstrip(".h5").split("_")[-1][-5:] for e in entries}
-            return "06-30" in quarters and "09-30" in quarters
+            key = (abbr, int(meta["Year"]), str(meta.get("FIPS", "")).zfill(5))
+            return key in ag_available
+
         n_tr, n_val = len(train_pairs), len(val_pairs)
-        train_pairs = [(m, e) for m, e in train_pairs if _has_ag(m)]
-        val_pairs = [(m, e) for m, e in val_pairs if _has_ag(m)]
-        if not train_pairs or not val_pairs:
-            raise ValueError("AG 数据仅覆盖 IL/IA 且有 q2/q3，过滤后训练集或验证集为空")
-        print(f"  AG 过滤 (IL/IA,q2+q3): Train {len(train_pairs)}/{n_tr}, Val {len(val_pairs)}/{n_val}")
-        train_meta_ag = [meta for meta, _ in train_pairs]
-        val_meta_ag = [meta for meta, _ in val_pairs]
-        train_ag = AgricultureImageDataset(train_meta_ag, train=True, seed=args.seed)
-        val_ag = AgricultureImageDataset(val_meta_ag, train=False, seed=args.seed)
-    else:
-        train_ag = None
-        val_ag = None
+        train_pairs_ag = [(m, e) for m, e in train_pairs if _has_ag(m)]
+        val_pairs_ag = [(m, e) for m, e in val_pairs if _has_ag(m)]
+        print(f"  AG 过滤 (manifest 有 q2/q3 的五州): Train {len(train_pairs_ag)}/{n_tr}, Val {len(val_pairs_ag)}/{n_val}")
+        all_meta = [m for m, _ in train_pairs_ag] + [m for m, _ in val_pairs_ag]
+        if not args.keep_ag_cache:
+            import atexit
+            from data import cleanup_ag_cache
+            atexit.register(cleanup_ag_cache)
+        pre_download_ag(all_meta)
+        train_ag = AgricultureImageDataset([m for m, _ in train_pairs_ag], train=True, seed=args.seed)
+        val_ag = AgricultureImageDataset([m for m, _ in val_pairs_ag], train=False, seed=args.seed)
+        train_pairs = train_pairs_ag
+        val_pairs = val_pairs_ag
 
     # ========== 2. 目标 = 原始单产 (bu/ac),无归一化 ==========
     print("\n[2] 目标 = yield_per_acre(单产, bu/ac),不做归一化")
@@ -673,7 +692,6 @@ def main():
 
     # 保存模型超参
     hparams = {
-        "model_contract_version": MODEL_CONTRACT_VERSION,
         "hidden_size": args.hidden_size,
         "num_heads": args.num_heads,
         "num_lstm_layers": args.num_lstm_layers,

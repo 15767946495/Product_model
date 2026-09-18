@@ -224,13 +224,18 @@ class CausalScaledDotProductAttention(nn.Module):
         x: torch.Tensor,
         mask: Optional[torch.Tensor] = None,
         pad_mask: Optional[torch.Tensor] = None,
+        rope: Optional[nn.Module] = None,
+        rope_t: Optional[torch.Tensor] = None,
+        rope_lat: Optional[torch.Tensor] = None,
+        rope_lon: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        # x: (batch, seq_len, hidden_size)
-        # 返回 attn_avg: (batch, seq_len, seq_len)，各头 softmax 权重在头维上平均
         B, T, _ = x.shape
-        v = self.W_v(x)  # (B, T, head_dim)
+        v = self.W_v(x)
         q = self._split_heads(self.W_q(x))
         k = self._split_heads(self.W_k(x))
+
+        if rope is not None:
+            q, k = rope(q, k, rope_t, rope_lat, rope_lon)
         attn_scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(
             float(self.head_dim)
         )
@@ -506,6 +511,60 @@ class SpatialAttentionAggregator(nn.Module):
 
 
 # ============================================================
+# 3D Rotary Position Embedding（多模态时空对齐）
+# ============================================================
+
+class RotaryEmbedding3D(nn.Module):
+    """3D RoPE：对 Q/K 做 (time, lat, lon) 旋转位置编码。
+
+    每对相邻维度旋转 angle = t * freq + lat * freq + lon * freq，
+    频率采用 WeatherFormer 的 10000^{-4i/d} 方案。"""
+
+    def __init__(self, dim: int):
+        super().__init__()
+        self.dim = dim
+        inv_freq = 1.0 / (10000.0 ** (torch.arange(0, dim, 2).float() / dim))
+        self.register_buffer("inv_freq", inv_freq)
+
+    def forward(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        t_indices: torch.Tensor,
+        lat: torch.Tensor,
+        lon: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """对 Q 和 K 施加 3D 旋转位置编码。
+
+        Args:
+            q, k: (B, num_heads, T, head_dim)
+            t_indices: (B, T) 时间索引
+            lat, lon: (B, T, 1) 或 (B, 1) 各位置经纬度(弧度)
+        Returns:
+            q_rot, k_rot: 同形状
+        """
+        freqs = self.inv_freq.to(q.device)  # (head_dim/2,)
+        freqs = freqs.view(1, 1, 1, -1)  # (1,1,1, H/2)
+
+        t = t_indices.unsqueeze(-1).float().unsqueeze(1)  # (B, 1, T, 1)
+        s_lat = lat.unsqueeze(1)  # (B, *, 1) → (B, 1, *, 1)
+        s_lon = lon.unsqueeze(1)
+
+        angle = (t + s_lat + s_lon) * freqs  # (B, 1, T, H/2)
+        cos = torch.cos(angle)
+        sin = torch.sin(angle)
+
+        q_out = torch.empty_like(q)
+        k_out = torch.empty_like(k)
+        q_out[..., 0::2] = q[..., 0::2] * cos - q[..., 1::2] * sin
+        q_out[..., 1::2] = q[..., 0::2] * sin + q[..., 1::2] * cos
+        k_out[..., 0::2] = k[..., 0::2] * cos - k[..., 1::2] * sin
+        k_out[..., 1::2] = k[..., 0::2] * sin + k[..., 1::2] * cos
+
+        return q_out, k_out
+
+
+# ============================================================
 # 遥感特征编码模块
 # ============================================================
 
@@ -514,7 +573,6 @@ AG_DATES = [
     "07-01", "07-15", "08-01", "08-15", "09-01", "09-15",
 ]
 AG_DAY_INDICES = [0, 14, 28, 42, 56, 70, 84, 98, 112, 126, 140, 154]
-RS_WINDOW_SIZE = 14
 
 
 class PretrainedViTEncoder(nn.Module):
@@ -532,7 +590,12 @@ class PretrainedViTEncoder(nn.Module):
         if freeze_backbone:
             for p in self.backbone.parameters():
                 p.requires_grad = False
-        self.proj = GatedResidualNetwork(input_size=self.embed_dim, hidden_size=out_dim * 2, output_size=out_dim, dropout=dropout)
+        self.proj = nn.Sequential(
+            nn.Linear(self.embed_dim, out_dim * 2), 
+            nn.GELU(), 
+            nn.Dropout(dropout), 
+            nn.Linear(out_dim * 2, out_dim)
+            )
         self._init_weights()
 
     def _init_weights(self):
@@ -547,117 +610,7 @@ class PretrainedViTEncoder(nn.Module):
             not all(not p.requires_grad for p in self.backbone.parameters())
         ):
             out = self.backbone(pixel_values=x)
-        return self.proj(out.pooler_output)
-
-
-class RSMetCrossAttention(nn.Module):
-    """遥感向量(12 时相)作为 Q，对应当天起后 14 天气象窗口作为 KV，
-    做 multi-head cross attention，输出 12 个融合向量。
-    窗口为空（无气象数据）的时相直接跳过 attention，输出 rs_vec 自身。"""
-
-    def __init__(self, hidden_size: int, num_heads: int = 2, dropout: float = 0.1):
-        super().__init__()
-        self.hidden_size = hidden_size
-        self.num_heads = num_heads
-        if hidden_size % num_heads != 0:
-            raise ValueError(f"hidden_size ({hidden_size}) 须能被 num_heads ({num_heads}) 整除")
-        self.head_dim = hidden_size // num_heads
-
-        self.W_q = nn.Linear(hidden_size, hidden_size)
-        self.W_k = nn.Linear(hidden_size, hidden_size)
-        self.W_v = nn.Linear(hidden_size, hidden_size)
-        self.W_o = nn.Linear(hidden_size, hidden_size)
-        self.norm = nn.LayerNorm(hidden_size)
-        self.dropout = nn.Dropout(dropout)
-        self.softmax = nn.Softmax(dim=-1)
-        self._init_weights()
-
-    def _init_weights(self):
-        for m in (self.W_q, self.W_k, self.W_v, self.W_o):
-            nn.init.xavier_uniform_(m.weight, gain=1.0)
-            if m.bias is not None:
-                nn.init.zeros_(m.bias)
-
-    def forward(
-        self,
-        rs_vec: torch.Tensor,
-        met_windows: torch.Tensor,
-        window_mask: torch.Tensor,
-    ) -> torch.Tensor:
-        B, N, H = rs_vec.shape
-        _, _, W, _ = met_windows.shape
-
-        has_met = window_mask.any(dim=-1)
-        if not has_met.any():
-            return rs_vec
-
-        q_all = self.W_q(rs_vec).reshape(B, N, self.num_heads, self.head_dim)
-        k_all = self.W_k(met_windows).reshape(B, N, W, self.num_heads, self.head_dim)
-        v_all = self.W_v(met_windows).reshape(B, N, W, self.num_heads, self.head_dim)
-
-        q_flat = q_all[has_met].reshape(-1, self.num_heads, self.head_dim)
-        k_flat = k_all[has_met].reshape(-1, self.num_heads, W, self.head_dim)
-        v_flat = v_all[has_met].reshape(-1, self.num_heads, W, self.head_dim)
-        wm_flat = window_mask[has_met].unsqueeze(1).expand(-1, self.num_heads, W)
-
-        scale = math.sqrt(float(self.head_dim))
-        attn_scores = torch.matmul(q_flat.unsqueeze(2), k_flat.transpose(-2, -1)).squeeze(2) / scale
-        attn_scores = attn_scores.masked_fill(~wm_flat, float("-inf"))
-        attn_weights = self.softmax(attn_scores)
-        attn_weights = attn_weights * wm_flat.to(attn_weights.dtype)
-        attn_weights = self.dropout(attn_weights)
-
-        out_active = torch.matmul(attn_weights.unsqueeze(2), v_flat).squeeze(2)
-        out_active = self.W_o(out_active.reshape(-1, self.num_heads * self.head_dim))
-
-        out = rs_vec.reshape(B * N, H).clone()
-        out[has_met.reshape(-1)] = out_active
-        out = out.reshape(B, N, H)
-
-        return self.norm(out)
-
-
-# ============================================================
-# 遥感日期映射工具（返回 (num_phases,) long tensor）
-# ============================================================
-
-def _rs_day_indices(device: torch.device) -> torch.Tensor:
-    return torch.tensor(AG_DAY_INDICES, device=device, dtype=torch.long)
-
-
-def _build_met_windows(
-    temporal_feat: torch.Tensor,
-    seq_lens: torch.Tensor,
-    day_indices: torch.Tensor,
-    window_size: int = RS_WINDOW_SIZE,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    B, T, H = temporal_feat.shape
-    N = day_indices.shape[0]
-    device = temporal_feat.device
-
-    met_windows = torch.zeros(B, N, window_size, H, device=device, dtype=temporal_feat.dtype)
-    window_mask = torch.zeros(B, N, window_size, device=device, dtype=torch.bool)
-
-    for i in range(N):
-        center = int(day_indices[i].item())
-        start = min(center, T)
-        end = min(center + window_size, T)
-
-        if start < end:
-            wlen = end - start
-            sl = seq_lens.to(device=device)
-            w_len_clamped = torch.full((B,), wlen, device=device, dtype=torch.long)
-            actual_len = torch.min(
-                w_len_clamped,
-                (sl - start).clamp(min=0),
-            )
-            for b in range(B):
-                al = int(actual_len[b].item())
-                if al > 0:
-                    met_windows[b, i, :al] = temporal_feat[b, start:start + al]
-                    window_mask[b, i, :al] = True
-
-    return met_windows, window_mask
+        return self.proj(out.last_hidden_state[:, 0, :])
 
 
 class TFTEncoderForYieldPrediction(nn.Module):
@@ -772,14 +725,10 @@ class TFTEncoderForYieldPrediction(nn.Module):
             self.vit_encoder = PretrainedViTEncoder(
                 out_dim=hidden_size, freeze_backbone=vit_freeze_backbone, dropout=dropout,
             )
-            self.rs_spatial_agg = SpatialAttentionAggregator(hidden_size, dropout)
-            self.rs_met_cross_attn = RSMetCrossAttention(
-                hidden_size=hidden_size, num_heads=num_heads, dropout=dropout,
-            )
+            self.rs_rope = RotaryEmbedding3D(hidden_size // num_heads)
         else:
             self.vit_encoder = None
-            self.rs_spatial_agg = None
-            self.rs_met_cross_attn = None
+            self.rs_rope = None
 
     def forward(
         self,
@@ -789,12 +738,17 @@ class TFTEncoderForYieldPrediction(nn.Module):
         soil_feats: torch.Tensor,
         seq_lens: torch.Tensor,
         ag_images: Optional[torch.Tensor] = None,
+        diagnose_mode: Optional[Dict[str, bool]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, Any]]:
         """
         Args:
             grid_feats: (B, G, T, F) 每县 G 个 9×9km 网格的标准化气象
             grid_coords: (B, G, 2) 每网格 [lat, lon]
             grid_mask: (B, G) bool 有效网格
+            ...
+            diagnose_mode: 可选诊断开关，支持:
+                disable_rs: 强制跳过遥感分支
+                force_mean_spatial: 强制将空间注意力替换为掩码均值
             soil_feats: (B, soil_dim) 县级连续土壤静态特征(已标准化,不进网格注意力)
             seq_lens: (batch_size,) 有效时序长度
             ag_images: (B, 12, G, 3, 224, 224) 可选遥感图像, 仅 use_remote_sensing=True 生效
@@ -807,6 +761,12 @@ class TFTEncoderForYieldPrediction(nn.Module):
         B, _, T, _ = grid_feats.shape
         max_seq_len = int(T)
         device = grid_feats.device
+
+        # 诊断模式开关
+        diag = diagnose_mode or {}
+        _disable_rs = bool(diag.get("disable_rs", False))
+        _force_mean = bool(diag.get("force_mean_spatial", False))
+        _eff_spatial_mode = "mean" if _force_mean else self.spatial_mode
 
         c_s, c_e, c_c, c_h = self.soil_static_encoder(soil_feats)
         c_s_expanded = c_s.unsqueeze(1).repeat(1, max_seq_len, 1)
@@ -830,7 +790,7 @@ class TFTEncoderForYieldPrediction(nn.Module):
             )
             grid_token = grid_token.reshape(B, G, T, self.hidden_size)
             grid_token = grid_token * grid_mask[:, :, None, None].to(grid_token.dtype)
-            if self.spatial_mode == "attention":
+            if _eff_spatial_mode == "attention":
                 temporal_feat, spatial_weights = self.spatial_agg.forward_weights(
                     grid_token, grid_coords, grid_mask
                 )
@@ -844,7 +804,7 @@ class TFTEncoderForYieldPrediction(nn.Module):
             feature_spatial_weights = []
             for name, tensor in projected.items():
                 tensor = tensor * grid_mask[:, :, None, None].to(tensor.dtype)
-                if self.spatial_mode == "attention":
+                if _eff_spatial_mode == "attention":
                     pooled, weights = self.spatial_agg.forward_weights(
                         tensor, grid_coords, grid_mask
                     )
@@ -862,18 +822,19 @@ class TFTEncoderForYieldPrediction(nn.Module):
                 if feature_spatial_weights else None
             )
 
-        # ========== 遥感处理: ViT → 网格注意力 → Cross Attention → 注入 temporal_feat ==========
-        if self.use_remote_sensing and ag_images is not None:
-            temporal_feat = self._forward_remote_sensing(
-                ag_images, grid_coords, grid_mask, temporal_feat, seq_lens, device
-            )
+        # ========== 遥感: ViT → 网格级 RS token（不聚合）==========
+        rs_encoded = None
+        if self.use_remote_sensing and ag_images is not None and not _disable_rs:
+            rs_encoded = self._forward_remote_sensing(
+                ag_images, grid_coords, grid_mask, device,
+            )  # (B, G, 12, H)
 
         # ========== 4. LSTM 编码器 ==========
         lstm_feat_raw, _, _, _ = self.lstm_encoder(
             temporal_feat, seq_lens=seq_lens, c_c=c_c, c_h=c_h
         )
 
-        # ========== 5. GRN 准备 + 因果注意力==========
+        # ========== 5. GRN 准备 + 时空交错 + 因果注意力 ==========
         Te = int(lstm_feat_raw.size(1))
         pad_mask = torch.arange(Te, device=device).unsqueeze(0) < seq_lens.unsqueeze(1)
         pm_f = pad_mask.unsqueeze(-1).to(dtype=lstm_feat_raw.dtype)
@@ -881,10 +842,61 @@ class TFTEncoderForYieldPrediction(nn.Module):
         cat_feat = self.cat_attn_prep_grn(lstm_feat_raw, context=c_e_expanded)
         cat_feat = cat_feat * pm_f
 
-        attn_feat, attn_weights_out = self.attention(
-            x=cat_feat,
-            pad_mask=pad_mask,
-        )
+        if self.use_remote_sensing and rs_encoded is not None:
+            _, G, N_rs, _ = rs_encoded.shape  # N_rs=12
+
+            # 网格经纬度 → rad
+            grid_lat = grid_coords[:, :, 0:1] * (math.pi / 180.0)  # (B, G, 1)
+            grid_lon = grid_coords[:, :, 1:2] * (math.pi / 180.0)
+
+            rs_days = torch.tensor(AG_DAY_INDICES, device=device, dtype=torch.long)
+
+            # 每个 RS 时相插入 G 个网格 token，序列总长 = Te + G*N_rs
+            T_new = Te + G * N_rs
+
+            # 构建交错序列和坐标，每样本 G 相同（batch 内 G 已固定）
+            # 布局: [w0, rs0_g0..rs0_g{G-1}, w1, ..., w13, rs1_g0.., w14, ...]
+            interleaved = torch.zeros(B, T_new, self.hidden_size, device=device, dtype=cat_feat.dtype)
+            t_indices = torch.zeros(B, T_new, device=device, dtype=torch.long)
+            token_lat = torch.zeros(B, T_new, device=device)
+            token_lon = torch.zeros(B, T_new, device=device)
+
+            # 填充天气 token
+            w_positions = []
+            offset = 0
+            for t in range(Te):
+                w_positions.append(offset)
+                interleaved[:, offset, :] = cat_feat[:, t, :]
+                t_indices[:, offset] = t
+                # 天气 token 用县中心坐标
+                valid = grid_mask.to(dtype=grid_coords.dtype).unsqueeze(-1)
+                county_center = (grid_coords * valid).sum(dim=1) / valid.sum(dim=1).clamp_min(1)
+                token_lat[:, offset] = county_center[:, 0] * (math.pi / 180.0)
+                token_lon[:, offset] = county_center[:, 1] * (math.pi / 180.0)
+                offset += 1
+                # 在 RS 日期插入 G 个网格 RS token
+                if t in rs_days:
+                    rs_i = (rs_days == t).nonzero(as_tuple=False)[0].item()
+                    for g in range(G):
+                        interleaved[:, offset, :] = rs_encoded[:, g, rs_i, :]
+                        t_indices[:, offset] = t
+                        token_lat[:, offset] = grid_lat[:, g, 0]
+                        token_lon[:, offset] = grid_lon[:, g, 0]
+                        offset += 1
+
+            w_positions = torch.tensor(w_positions, device=device)
+            interleave_pad = torch.ones(B, T_new, dtype=torch.bool, device=device)
+
+            attn_feat_interleaved, attn_weights_out = self.attention(
+                x=interleaved, pad_mask=interleave_pad,
+                rope=self.rs_rope, rope_t=t_indices,
+                rope_lat=token_lat.unsqueeze(-1), rope_lon=token_lon.unsqueeze(-1),
+            )
+            attn_feat = attn_feat_interleaved[:, w_positions, :]
+        else:
+            attn_feat, attn_weights_out = self.attention(
+                x=cat_feat, pad_mask=pad_mask,
+            )
 
         # ========== 6. 产量预测头（逐时间步）==========
         pred_all = self.pred_head(self.pred_grn(attn_feat))  # (B, T, 1)
@@ -917,60 +929,17 @@ class TFTEncoderForYieldPrediction(nn.Module):
         ag_images: torch.Tensor,
         grid_coords: torch.Tensor,
         grid_mask: torch.Tensor,
-        temporal_feat: torch.Tensor,
-        seq_lens: torch.Tensor,
         device: torch.device,
     ) -> torch.Tensor:
-        """遥感处理: ViT 编码 → 网格注意力 → Cross Attention → 注入 temporal_feat。
+        """遥感编码: ViT → 网格级 RS token（不聚合）。
 
-        Args:
-            ag_images: (B, 12, G, 3, 224, 224)
-            grid_coords: (B, G, 2)
-            grid_mask: (B, G) bool
-            temporal_feat: (B, T, H) 已通过 VSN + spatial_agg 的气象特征
-            seq_lens: (B,)
-            device: 设备
-
-        Returns:
-            temporal_feat: (B, T, H) 在遥感日期位置增强了遥感信息的特征
-        """
+        返回 rs_encoded (B, G, 12, H)，每网格每时相一个 token。"""
         B, N_rs, G, C, H_img, W_img = ag_images.shape
-        T_met = temporal_feat.shape[1]
         H = self.hidden_size
 
-        # --- step 1: ViT 对每个网格的每张遥感图像编码 ---
         images = ag_images.permute(0, 2, 1, 3, 4, 5).reshape(B * G, N_rs, C, H_img, W_img)
         images = images.reshape(B * G * N_rs, C, H_img, W_img)
         rs_encoded = self.vit_encoder(images)
         rs_encoded = rs_encoded.reshape(B, G, N_rs, H)
         rs_encoded = rs_encoded * grid_mask[:, :, None, None].to(rs_encoded.dtype)
-
-        # --- step 2: 网格空间注意力聚合 (复刻 SpatialAttentionAggregator) ---
-        rs_tokens = rs_encoded.permute(0, 1, 2, 3).contiguous()
-        rs_tokens = rs_tokens * grid_mask[:, :, None, None].to(rs_tokens.dtype)
-        rs_vec, _ = self.rs_spatial_agg.forward_weights(
-            rs_tokens, grid_coords, grid_mask
-        )
-
-        # --- step 3: 构建气象窗口 & Cross Attention（跳过空窗口时相）---
-        day_indices = _rs_day_indices(device)
-        met_windows, window_mask = _build_met_windows(
-            temporal_feat, seq_lens, day_indices, RS_WINDOW_SIZE
-        )
-        has_any_met = window_mask.any(dim=-1)
-
-        fuse = self.rs_met_cross_attn(rs_vec, met_windows, window_mask)
-
-        # --- step 4: 时间对齐注入（仅对有气象窗口的时相做最近邻替换）---
-        day_indices_clamped = day_indices.clamp(max=T_met - 1)
-        within_seq = day_indices.unsqueeze(0) < seq_lens.unsqueeze(1)
-
-        for i in range(N_rs):
-            idx = int(day_indices_clamped[i].item())
-            if idx >= T_met:
-                continue
-            inject_mask = has_any_met[:, i] & within_seq[:, i]
-            if inject_mask.any():
-                temporal_feat[inject_mask, idx] = fuse[inject_mask, i]
-
-        return temporal_feat
+        return rs_encoded

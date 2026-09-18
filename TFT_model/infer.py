@@ -48,7 +48,7 @@ from data import (
     CONSTRUCTED_FEATURES,
 )
 from cropnet_protocol import (
-    ALLOWED_STATES,
+    CROPNET_FIVE_STATES,
     PROTOCOL_START_MONTH,
     PROTOCOL_END_MONTH,
     PROTOCOL_DAYS_PER_MONTH,
@@ -105,8 +105,8 @@ def infer():
     parser.add_argument("--ckpt", type=str, default=None,
                         help="checkpoint 路径，默认 train_output/val_<val_year>/best_model.pth")
     parser.add_argument("--states", type=str,
-                        default=",".join(sorted(ALLOWED_STATES)),
-                        help="按州过滤(逗号分隔的小写全称)，范围限定为协议八州")
+                        default=",".join(sorted(CROPNET_FIVE_STATES)),
+                        help="按州过滤(逗号分隔的小写全称)，范围限定为协议五州")
     parser.add_argument("--grid_cache", type=str, default=None,
                         help="网格级气象缓存路径,默认 train_dataset/grid_cache.pt")
     parser.add_argument("--soil", type=str, default=None,
@@ -117,7 +117,7 @@ def infer():
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--cutoffs", type=str,
-                        default="06-01,06-15,06-28,07-01,07-15,07-28,08-01,08-15,08-28,09-01,09-15,09-28",
+                        default="04-28,05-28,06-28,07-28,08-28,09-28",
                         help="提前预报节点(MM-DD,逗号分隔)，必须位于协议日期窗口内")
     args = parser.parse_args()
 
@@ -155,7 +155,7 @@ def infer():
     val_set = set(val_years)
     pairs = list(zip(meta_lines, cache_entries))
     requested_states = {s.strip().lower() for s in args.states.split(",") if s.strip()}
-    state_set = requested_states & ALLOWED_STATES
+    state_set = requested_states & CROPNET_FIVE_STATES
     pairs = [p for p in pairs if str(p[0].get("State", "")).lower() in state_set]
     val_pairs = [(m, e) for m, e in pairs if int(m["Year"]) in val_set]
     print(f"    验证样本: {len(val_pairs)}")
