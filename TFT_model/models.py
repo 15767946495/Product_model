@@ -224,26 +224,32 @@ class CausalScaledDotProductAttention(nn.Module):
         x: torch.Tensor,
         mask: Optional[torch.Tensor] = None,
         pad_mask: Optional[torch.Tensor] = None,
-        rope: Optional[nn.Module] = None,
-        rope_t: Optional[torch.Tensor] = None,
-        rope_lat: Optional[torch.Tensor] = None,
-        rope_lon: Optional[torch.Tensor] = None,
+        block_boundaries: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         B, T, _ = x.shape
         v = self.W_v(x)
         q = self._split_heads(self.W_q(x))
         k = self._split_heads(self.W_k(x))
 
-        if rope is not None:
-            q, k = rope(q, k, rope_t, rope_lat, rope_lon)
         attn_scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(
             float(self.head_dim)
         )
 
-        causal = self._causal_mask(T, attn_scores.device)
-        attn_scores = attn_scores.masked_fill(
-            causal.view(1, 1, T, T), self.mask_bias
-        )
+        if block_boundaries is not None:
+            # block-causal mask: 同组内全可见，前面的组可见
+            # block_boundaries[i]=1 表示位置 i 是新 group 的开始
+            group_id = torch.cumsum(block_boundaries, dim=1)  # (B, T)
+            same_group = group_id.unsqueeze(-1) == group_id.unsqueeze(-2)  # (B, T, T)
+            earlier_group = group_id.unsqueeze(-1) >= group_id.unsqueeze(-2)
+            allowed = same_group | earlier_group
+            attn_scores = attn_scores.masked_fill(
+                ~allowed.view(B, 1, T, T), self.mask_bias
+            )
+        else:
+            causal = self._causal_mask(T, attn_scores.device)
+            attn_scores = attn_scores.masked_fill(
+                causal.view(1, 1, T, T), self.mask_bias
+            )
 
         if pad_mask is not None:
             valid = pad_mask.to(device=attn_scores.device, dtype=torch.bool)
@@ -511,70 +517,6 @@ class SpatialAttentionAggregator(nn.Module):
 
 
 # ============================================================
-# 3D Rotary Position Embedding（多模态时空对齐）
-# ============================================================
-
-class RotaryEmbedding3D(nn.Module):
-    """3D RoPE：将 head_dim 三等分，分别做 (time, lat, lon) 旋转位置编码。
-
-    每部分 dim_p = head_dim // 3（向下取偶），对应部分对相邻维度对旋转：
-      part_a[0:dim_p]:   angle = t * freq_i
-      part_b[dim_p:2*dim_p]: angle = lat * freq_i
-      part_c[2*dim_p:3*dim_p]: angle = lon * freq_i
-    尾部余数不做旋转，直通。
-    频率 freq_i = 10000^{-2i / dim_p}。"""
-
-    def __init__(self, dim: int):
-        super().__init__()
-        self.dim = dim
-        raw_p = dim // 3
-        self.dim_p = max(2, (raw_p // 2) * 2)  # 向下取偶，≥2
-        self.rot_dim = 3 * self.dim_p
-        self.unused_dim = dim - self.rot_dim
-        inv_freq = 1.0 / (10000.0 ** (torch.arange(0, self.dim_p, 2).float() / self.dim_p))
-        self.register_buffer("inv_freq", inv_freq)
-
-    def _rotate(self, x: torch.Tensor, angle: torch.Tensor) -> torch.Tensor:
-        cos = torch.cos(angle)
-        sin = torch.sin(angle)
-        x_rot = torch.empty_like(x)
-        x_rot[..., 0::2] = x[..., 0::2] * cos - x[..., 1::2] * sin
-        x_rot[..., 1::2] = x[..., 0::2] * sin + x[..., 1::2] * cos
-        return x_rot
-
-    def forward(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        t_indices: torch.Tensor,
-        lat: torch.Tensor,
-        lon: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        freqs = self.inv_freq.to(q.device)  # (dim_p/2,)
-        freqs = freqs.view(1, 1, 1, -1)  # (1,1,1, dim_p/2)
-
-        t = t_indices.unsqueeze(-1).float().unsqueeze(1)  # (B, 1, T, 1)
-        s_lat = lat.unsqueeze(1)
-        s_lon = lon.unsqueeze(1)
-
-        d = self.dim_p
-        q_out = torch.empty_like(q)
-        k_out = torch.empty_like(k)
-
-        q_out[..., 0:d]       = self._rotate(q[..., 0:d],       t * freqs)
-        k_out[..., 0:d]       = self._rotate(k[..., 0:d],       t * freqs)
-        q_out[..., d:2*d]     = self._rotate(q[..., d:2*d],     s_lat * freqs)
-        k_out[..., d:2*d]     = self._rotate(k[..., d:2*d],     s_lat * freqs)
-        q_out[..., 2*d:3*d]   = self._rotate(q[..., 2*d:3*d],   s_lon * freqs)
-        k_out[..., 2*d:3*d]   = self._rotate(k[..., 2*d:3*d],   s_lon * freqs)
-
-        if self.unused_dim > 0:
-            q_out[..., 3*d:] = q[..., 3*d:]
-            k_out[..., 3*d:] = k[..., 3*d:]
-
-        return q_out, k_out
-
-
 # ============================================================
 # 遥感特征编码模块
 # ============================================================
@@ -736,10 +678,8 @@ class TFTEncoderForYieldPrediction(nn.Module):
             self.vit_encoder = PretrainedViTEncoder(
                 out_dim=hidden_size, freeze_backbone=vit_freeze_backbone, dropout=dropout,
             )
-            self.rs_rope = RotaryEmbedding3D(hidden_size // num_heads)
         else:
             self.vit_encoder = None
-            self.rs_rope = None
 
     def forward(
         self,
@@ -854,57 +794,59 @@ class TFTEncoderForYieldPrediction(nn.Module):
         cat_feat = cat_feat * pm_f
 
         if self.use_remote_sensing and rs_encoded is not None:
-            _, G, N_rs, _ = rs_encoded.shape  # N_rs=12
+            _, G, N_rs, _ = rs_encoded.shape
 
-            # 网格经纬度 → rad
-            grid_lat = grid_coords[:, :, 0:1] * (math.pi / 180.0)  # (B, G, 1)
+            grid_lat = grid_coords[:, :, 0:1] * (math.pi / 180.0)  # (B,G,1) rad
             grid_lon = grid_coords[:, :, 1:2] * (math.pi / 180.0)
 
             rs_days = torch.tensor(AG_DAY_INDICES, device=device, dtype=torch.long)
-
-            # 每个 RS 时相插入 G 个网格 token，序列总长 = Te + G*N_rs
             T_new = Te + G * N_rs
 
-            # 构建交错序列和坐标，每样本 G 相同（batch 内 G 已固定）
-            # 布局: [w0, rs0_g0..rs0_g{G-1}, w1, ..., w13, rs1_g0.., w14, ...]
+            # 序列布局: 每个时相 => [w_t, rs_t_g0..rs_t_g{G-1}]
+            # 同组内全可见，组间因果
             interleaved = torch.zeros(B, T_new, self.hidden_size, device=device, dtype=cat_feat.dtype)
             t_indices = torch.zeros(B, T_new, device=device, dtype=torch.long)
-            token_lat = torch.zeros(B, T_new, device=device)
-            token_lon = torch.zeros(B, T_new, device=device)
+            token_lat = torch.zeros(B, T_new, 1, device=device)
+            token_lon = torch.zeros(B, T_new, 1, device=device)
+            block_boundaries = torch.zeros(B, T_new, device=device)
 
-            # 填充天气 token
-            w_positions = []
-            offset = 0
-            # 县中心坐标 (所有天气 token 共用)
+            # 县中心坐标 (天气 token 用)
             valid = grid_mask.to(dtype=grid_coords.dtype).unsqueeze(-1)
             county_center = (grid_coords * valid).sum(dim=1) / valid.sum(dim=1).clamp_min(1)
-            county_lat = county_center[:, 0] * (math.pi / 180.0)  # (B,)
-            county_lon = county_center[:, 1] * (math.pi / 180.0)
+            county_lat = county_center[:, 0:1] * (math.pi / 180.0)  # (B, 1)
+            county_lon = county_center[:, 1:2] * (math.pi / 180.0)
 
+            w_positions = []
+            offset = 0
             for t in range(Te):
+                # 天气 token
                 w_positions.append(offset)
+                block_boundaries[:, offset] = 1.0  # 新 group 开始
                 interleaved[:, offset, :] = cat_feat[:, t, :]
                 t_indices[:, offset] = t
                 token_lat[:, offset] = county_lat
                 token_lon[:, offset] = county_lon
                 offset += 1
-                # 在 RS 日期插入 G 个网格 RS token（用各自网格坐标）
+
                 if t in rs_days:
                     rs_i = (rs_days == t).nonzero(as_tuple=False)[0].item()
                     for g in range(G):
                         interleaved[:, offset, :] = rs_encoded[:, g, rs_i, :]
                         t_indices[:, offset] = t
-                        token_lat[:, offset] = grid_lat[:, g, 0]
-                        token_lon[:, offset] = grid_lon[:, g, 0]
+                        token_lat[:, offset] = grid_lat[:, g, :1]
+                        token_lon[:, offset] = grid_lon[:, g, :1]
                         offset += 1
 
             w_positions = torch.tensor(w_positions, device=device)
-            interleave_pad = torch.ones(B, T_new, dtype=torch.bool, device=device)
 
+            # WeatherFormer 4-slot 加性位置编码
+            pe = self._compute_st_pe(token_lat, token_lon, t_indices)  # (B, T_new, H)
+            interleaved = interleaved + pe
+
+            interleave_pad = torch.ones(B, T_new, dtype=torch.bool, device=device)
             attn_feat_interleaved, attn_weights_out = self.attention(
                 x=interleaved, pad_mask=interleave_pad,
-                rope=self.rs_rope, rope_t=t_indices,
-                rope_lat=token_lat.unsqueeze(-1), rope_lon=token_lon.unsqueeze(-1),
+                block_boundaries=block_boundaries,
             )
             attn_feat = attn_feat_interleaved[:, w_positions, :]
         else:
@@ -937,6 +879,29 @@ class TFTEncoderForYieldPrediction(nn.Module):
         }
 
         return pred_all, attn_weights_out, aux_dict
+
+    def _compute_st_pe(
+        self, lat: torch.Tensor, lon: torch.Tensor, t_idx: torch.Tensor
+    ) -> torch.Tensor:
+        """WeatherFormer 四槽加性时空位置编码。
+        lat, lon: (B, T, 1) rad; t_idx: (B, T) int; 返回 (B, T, H)."""
+        d = self.hidden_size
+        nf = d // 4
+        device = lat.device
+        i = torch.arange(nf, device=device, dtype=lat.dtype)
+        freq = 10000.0 ** (-4.0 * i / d)
+        freq = freq.view(1, 1, nf)  # (1, 1, nf)
+
+        t = t_idx.unsqueeze(-1).float()  # (B, T, 1)
+        s_lat = lat  # (B, T, 1)
+        s_lon = lon
+
+        pe = torch.zeros(*lat.shape[:-1], d, device=device, dtype=lat.dtype)
+        pe[..., 0::4] = torch.sin(t * freq)
+        pe[..., 1::4] = torch.cos(t * freq)
+        pe[..., 2::4] = torch.sin(s_lat * freq)
+        pe[..., 3::4] = torch.cos(s_lon * freq)
+        return pe
 
     def _forward_remote_sensing(
         self,
