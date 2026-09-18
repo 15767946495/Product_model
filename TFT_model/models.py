@@ -515,16 +515,32 @@ class SpatialAttentionAggregator(nn.Module):
 # ============================================================
 
 class RotaryEmbedding3D(nn.Module):
-    """3D RoPE：对 Q/K 做 (time, lat, lon) 旋转位置编码。
+    """3D RoPE：将 head_dim 三等分，分别做 (time, lat, lon) 旋转位置编码。
 
-    每对相邻维度旋转 angle = t * freq + lat * freq + lon * freq，
-    频率采用 WeatherFormer 的 10000^{-4i/d} 方案。"""
+    每部分 dim_p = head_dim // 3（向下取偶），对应部分对相邻维度对旋转：
+      part_a[0:dim_p]:   angle = t * freq_i
+      part_b[dim_p:2*dim_p]: angle = lat * freq_i
+      part_c[2*dim_p:3*dim_p]: angle = lon * freq_i
+    尾部余数不做旋转，直通。
+    频率 freq_i = 10000^{-2i / dim_p}。"""
 
     def __init__(self, dim: int):
         super().__init__()
         self.dim = dim
-        inv_freq = 1.0 / (10000.0 ** (torch.arange(0, dim, 2).float() / dim))
+        raw_p = dim // 3
+        self.dim_p = max(2, (raw_p // 2) * 2)  # 向下取偶，≥2
+        self.rot_dim = 3 * self.dim_p
+        self.unused_dim = dim - self.rot_dim
+        inv_freq = 1.0 / (10000.0 ** (torch.arange(0, self.dim_p, 2).float() / self.dim_p))
         self.register_buffer("inv_freq", inv_freq)
+
+    def _rotate(self, x: torch.Tensor, angle: torch.Tensor) -> torch.Tensor:
+        cos = torch.cos(angle)
+        sin = torch.sin(angle)
+        x_rot = torch.empty_like(x)
+        x_rot[..., 0::2] = x[..., 0::2] * cos - x[..., 1::2] * sin
+        x_rot[..., 1::2] = x[..., 0::2] * sin + x[..., 1::2] * cos
+        return x_rot
 
     def forward(
         self,
@@ -534,32 +550,27 @@ class RotaryEmbedding3D(nn.Module):
         lat: torch.Tensor,
         lon: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """对 Q 和 K 施加 3D 旋转位置编码。
-
-        Args:
-            q, k: (B, num_heads, T, head_dim)
-            t_indices: (B, T) 时间索引
-            lat, lon: (B, T, 1) 或 (B, 1) 各位置经纬度(弧度)
-        Returns:
-            q_rot, k_rot: 同形状
-        """
-        freqs = self.inv_freq.to(q.device)  # (head_dim/2,)
-        freqs = freqs.view(1, 1, 1, -1)  # (1,1,1, H/2)
+        freqs = self.inv_freq.to(q.device)  # (dim_p/2,)
+        freqs = freqs.view(1, 1, 1, -1)  # (1,1,1, dim_p/2)
 
         t = t_indices.unsqueeze(-1).float().unsqueeze(1)  # (B, 1, T, 1)
-        s_lat = lat.unsqueeze(1)  # (B, *, 1) → (B, 1, *, 1)
+        s_lat = lat.unsqueeze(1)
         s_lon = lon.unsqueeze(1)
 
-        angle = (t + s_lat + s_lon) * freqs  # (B, 1, T, H/2)
-        cos = torch.cos(angle)
-        sin = torch.sin(angle)
-
+        d = self.dim_p
         q_out = torch.empty_like(q)
         k_out = torch.empty_like(k)
-        q_out[..., 0::2] = q[..., 0::2] * cos - q[..., 1::2] * sin
-        q_out[..., 1::2] = q[..., 0::2] * sin + q[..., 1::2] * cos
-        k_out[..., 0::2] = k[..., 0::2] * cos - k[..., 1::2] * sin
-        k_out[..., 1::2] = k[..., 0::2] * sin + k[..., 1::2] * cos
+
+        q_out[..., 0:d]       = self._rotate(q[..., 0:d],       t * freqs)
+        k_out[..., 0:d]       = self._rotate(k[..., 0:d],       t * freqs)
+        q_out[..., d:2*d]     = self._rotate(q[..., d:2*d],     s_lat * freqs)
+        k_out[..., d:2*d]     = self._rotate(k[..., d:2*d],     s_lat * freqs)
+        q_out[..., 2*d:3*d]   = self._rotate(q[..., 2*d:3*d],   s_lon * freqs)
+        k_out[..., 2*d:3*d]   = self._rotate(k[..., 2*d:3*d],   s_lon * freqs)
+
+        if self.unused_dim > 0:
+            q_out[..., 3*d:] = q[..., 3*d:]
+            k_out[..., 3*d:] = k[..., 3*d:]
 
         return q_out, k_out
 
@@ -864,17 +875,20 @@ class TFTEncoderForYieldPrediction(nn.Module):
             # 填充天气 token
             w_positions = []
             offset = 0
+            # 县中心坐标 (所有天气 token 共用)
+            valid = grid_mask.to(dtype=grid_coords.dtype).unsqueeze(-1)
+            county_center = (grid_coords * valid).sum(dim=1) / valid.sum(dim=1).clamp_min(1)
+            county_lat = county_center[:, 0] * (math.pi / 180.0)  # (B,)
+            county_lon = county_center[:, 1] * (math.pi / 180.0)
+
             for t in range(Te):
                 w_positions.append(offset)
                 interleaved[:, offset, :] = cat_feat[:, t, :]
                 t_indices[:, offset] = t
-                # 天气 token 用县中心坐标
-                valid = grid_mask.to(dtype=grid_coords.dtype).unsqueeze(-1)
-                county_center = (grid_coords * valid).sum(dim=1) / valid.sum(dim=1).clamp_min(1)
-                token_lat[:, offset] = county_center[:, 0] * (math.pi / 180.0)
-                token_lon[:, offset] = county_center[:, 1] * (math.pi / 180.0)
+                token_lat[:, offset] = county_lat
+                token_lon[:, offset] = county_lon
                 offset += 1
-                # 在 RS 日期插入 G 个网格 RS token
+                # 在 RS 日期插入 G 个网格 RS token（用各自网格坐标）
                 if t in rs_days:
                     rs_i = (rs_days == t).nonzero(as_tuple=False)[0].item()
                     for g in range(G):
