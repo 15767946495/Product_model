@@ -53,7 +53,7 @@ from data import (
     GDD_FEATURE_NAME,
     CONSTRUCTED_FEATURES,
 )
-from cropnet_protocol import CROPNET_FIVE_STATES, PROTOCOL_MAX_STEPS
+from cropnet_protocol import PROTOCOL_MAX_STEPS
 
 # ========== 常量 ==========
 EARLY_STOP_PATIENCE: int = 2
@@ -71,6 +71,49 @@ class PerSampleMSELoss(nn.Module):
     def forward(self, inputs: torch.Tensor, targets: torch.Tensor, states=None) -> torch.Tensor:
         diff = inputs - targets
         return diff * diff
+
+
+class BetaNLLLoss(nn.Module):
+    """Beta-NLL for heteroscedastic regression in log-yield space."""
+
+    def __init__(self, beta: float = 0.5, min_log_variance: float = -10.0,
+                 max_log_variance: float = 5.0):
+        super().__init__()
+        self.beta = float(beta)
+        self.min_log_variance = float(min_log_variance)
+        self.max_log_variance = float(max_log_variance)
+
+    def forward(self, prediction: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        mean, log_variance = prediction.chunk(2, dim=-1)
+        log_variance = log_variance.clamp(self.min_log_variance, self.max_log_variance)
+        variance = torch.exp(log_variance)
+        squared_error = (target - mean) ** 2
+        # Standard beta-NLL uses the stop-gradient exponentiated variance
+        # estimate as a per-sample weight; beta=0 recovers Gaussian NLL.
+        weight = torch.exp(self.beta * log_variance.detach())
+        return (0.5 * weight * (squared_error / variance + log_variance)).mean()
+
+
+def gaussian_temporal_kl(pred_dist: torch.Tensor, seq_lens: torch.Tensor,
+                         gamma: float = 0.05) -> torch.Tensor:
+    """指数衰减的全时间步到最后时间步高斯 KL。"""
+    mean, log_var = pred_dist[..., 0], pred_dist[..., 1]
+    B, T = mean.shape
+    last = (seq_lens - 1).clamp_min(0).long()
+    batch = torch.arange(B, device=mean.device)
+    teacher_mean = mean[batch, last].detach()
+    teacher_log_var = log_var[batch, last].detach().clamp(-10.0, 5.0)
+    log_var = log_var.clamp(-10.0, 5.0)
+    delta = last[:, None] - torch.arange(T, device=mean.device)[None, :]
+    valid = torch.arange(T, device=mean.device)[None, :] < seq_lens[:, None]
+    weights = torch.exp(-gamma * delta.to(mean.dtype)) * valid.to(mean.dtype)
+    kl = 0.5 * (
+        torch.exp(teacher_log_var[:, None] - log_var)
+        + (mean - teacher_mean[:, None]) ** 2 * torch.exp(-log_var)
+        - 1.0
+        - (teacher_log_var[:, None] - log_var)
+    )
+    return (weights * kl).sum() / weights.sum().clamp_min(1.0)
 
 
 class CRUCIALLoss(nn.Module):
@@ -172,7 +215,7 @@ def train_model(
     train_loader,
     val_loader,
     epochs: int = 500,
-    lr: float = 5e-4,
+    lr: float = 1e-5,
     device: str = "cuda",
     ckpt_path: str = "best_model.pth",
     curve_path: str = "loss_curve.png",
@@ -187,7 +230,8 @@ def train_model(
     返回最佳验证 RMSE。
     """
     model = model.to(device)
-    criterion = CRUCIALLoss() if use_crucial else None
+    _rc = model  # DataParallel wrapper for saving ckpt
+    criterion = CRUCIALLoss() if use_crucial else BetaNLLLoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
 
     best_val_rmse = float("inf")
@@ -197,12 +241,24 @@ def train_model(
     val_rmse_hist: List[float] = []
     val_r2_hist: List[float] = []
     val_corr_hist: List[float] = []
+    grad_modules = {
+        "pvt": model.module.vit_encoder.backbone if isinstance(model, nn.DataParallel) else model.vit_encoder.backbone,
+        "rs_grn": model.module.cat_attn_prep_grn if isinstance(model, nn.DataParallel) else model.cat_attn_prep_grn,
+        "weather_vsn": model.module.grid_vsn if isinstance(model, nn.DataParallel) else model.grid_vsn,
+        "spatial_cls": model.module.spatial_agg if isinstance(model, nn.DataParallel) else model.spatial_agg,
+        "lstm": model.module.lstm_encoder if isinstance(model, nn.DataParallel) else model.lstm_encoder,
+        "temporal_attn": model.module.attention if isinstance(model, nn.DataParallel) else model.attention,
+        "mean_head": model.module.mean_head if isinstance(model, nn.DataParallel) else model.mean_head,
+        "variance_head": model.module.variance_head if isinstance(model, nn.DataParallel) else model.variance_head,
+    }
 
     for epoch in range(epochs):
         # ========== 训练阶段 ==========
         model.train()
         train_loss_sum = 0.0
         train_samples_seen = 0
+        grad_sums = {name: 0.0 for name in grad_modules}
+        grad_counts = {name: 0 for name in grad_modules}
 
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs} [Train]")
         for batch in pbar:
@@ -225,31 +281,43 @@ def train_model(
 
             optimizer.zero_grad()
 
-            pred_all, _, _ = model(
+            pred, _, aux = model(
                 grid_feats=grid_feats,
                 grid_coords=grid_coords,
                 grid_mask=grid_mask,
                 soil_feats=soil_feats,
                 seq_lens=seq_lens,
+                month_ids=month_ids,
+                day_ids=day_ids,
                 ag_images=ag_images,
+                ag_mask=ag_mask,
             )
-            # 每条协议序列只取最后一个有效时间步计算损失。
-            B, T, _ = pred_all.shape
+            # 模型已直接返回每个县的最终预测 (B, 1)。
             has_valid = seq_lens > 0
-            last_valid_idx = last_valid_index(seq_lens)
-            pred_last = pred_all[torch.arange(B, device=device), last_valid_idx]  # (B, 1)
-            per_sample_mse = (pred_last - labels) ** 2                    # (B, 1)
-            per_sample_mse = per_sample_mse * has_valid.unsqueeze(-1).float()  # 无效样本 loss = 0
+            log_labels = torch.log(labels.clamp_min(1e-6))
+            per_sample_mse = (pred[..., :1] - log_labels) ** 2
+            per_sample_mse = per_sample_mse * has_valid.unsqueeze(-1).float()
 
             if use_crucial:
                 loss = criterion._crucial_from_l_raw(per_sample_mse.view(-1))
             else:
-                loss = per_sample_mse.mean()
+                loss = criterion(pred, log_labels) + 0.01 * gaussian_temporal_kl(
+                    aux["grad_tensors"]["pred_dist_all"], seq_lens
+                )
 
             if torch.isnan(loss):
                 continue
 
             loss.backward()
+            for name, module in grad_modules.items():
+                values = [
+                    p.grad.detach().norm().item()
+                    for p in module.parameters()
+                    if p.grad is not None and torch.isfinite(p.grad).all()
+                ]
+                if values:
+                    grad_sums[name] += math.sqrt(sum(value * value for value in values))
+                    grad_counts[name] += 1
             optimizer.step()
 
             train_loss_sum += loss.item() * labels.size(0)
@@ -258,6 +326,10 @@ def train_model(
             pbar.set_postfix({"loss": f"{loss.item():.4f}"})
 
         avg_train_loss = train_loss_sum / max(train_samples_seen, 1)
+        print("  GradNorm | " + " ".join(
+            f"{name}={grad_sums[name] / max(grad_counts[name], 1):.2e}"
+            for name in grad_modules
+        ))
 
         # ========== 验证阶段 ==========
         if (epoch + 1) % valid_freq == 0:
@@ -284,23 +356,20 @@ def train_model(
                     if ag_mask_v is not None:
                         ag_mask_v = ag_mask_v.to(device)
 
-                    pred_all, _, _ = model(
+                    pred, _, _ = model(
                         grid_feats=grid_feats,
                         grid_coords=grid_coords,
                         grid_mask=grid_mask,
                         soil_feats=soil_feats,
                         seq_lens=seq_lens,
+                        month_ids=month_ids,
+                        day_ids=day_ids,
                         ag_images=ag_images_v,
+                        ag_mask=ag_mask_v,
                     )
 
-                    # 在每个样本的有效序列中取最后一步作为输出。
-                    B, T, _ = pred_all.shape
-                    last_valid_idx = last_valid_index(seq_lens)
-                    batch_idx = torch.arange(B, device=device)
-                    pred_last = pred_all[batch_idx, last_valid_idx]        # (B, 1)
-
-                    # 无归一化,预测/标签已在原始单产空间 (bu/ac),直接使用
-                    pred_raw = pred_last.squeeze(-1)   # (B,)
+                    # 模型输出为 log 单产，评估时还原到 bu/ac。
+                    pred_raw = torch.exp(pred[..., 0])  # log-mean -> bu/ac
                     label_raw = labels.squeeze(-1)     # (B,)
 
                     all_pred_raw.extend(pred_raw.detach().cpu().tolist())
@@ -470,14 +539,14 @@ def filter_valid_label(samples: List[Dict]) -> Tuple[List[Dict], int]:
 def main():
     parser = argparse.ArgumentParser(description="cropnet TFT 训练")
     parser.add_argument("--epochs", type=int, default=500)
-    parser.add_argument("--lr", type=float, default=5e-4)
-    parser.add_argument("--batch_size", type=int, default=8,
-                        help="随机采样的 batch 大小(八州协议部分县 G≤134,取 8 防显存溢出)")
+    parser.add_argument("--lr", type=float, default=1e-5)
+    parser.add_argument("--batch_size", type=int, default=2,
+                        help="随机采样的 batch 大小；PVT 全量训练默认使用 2")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--val_year", type=str, default="2022",
                         help="验证年份，可用逗号分隔多个年份，如 '2021,2022'")
     parser.add_argument("--states", type=str, default=None,
-                        help="按州过滤(逗号分隔的小写全称)，默认遥感模式五州/普通模式八州")
+                        help="按州过滤(逗号分隔的小写全称)，默认为所有可用州")
     parser.add_argument("--grid_cache", type=str, default=None,
                         help="网格级气象缓存路径,默认 train_dataset/grid_cache.pt")
     parser.add_argument("--soil", type=str, default=None,
@@ -495,19 +564,9 @@ def main():
                         help="产物输出目录，默认 /data/raid0/hqx/TFT_train/val_<year>/")
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--early_stop_patience", type=int, default=EARLY_STOP_PATIENCE)
-    parser.add_argument("--spatial_mode", type=str, default="attention",
-                        choices=["attention", "mean"],
-                         help="网格→县聚合方式: attention(空间注意力,默认) / mean(直接网格均值,消融对照)")
-    parser.add_argument("--variable_selection_stage", type=str, default="grid",
-                        choices=["grid", "county"],
-                        help="变量选择位置: grid(逐网格 VSN) / county(空间聚合后 VSN)")
-    parser.add_argument("--use_gdd", action="store_true",
-                        help="追加累计积温 CumGDD 通道(base 8°C,由 Avg Temperature 按网格累计)")
     parser.add_argument("--use_constructed", action="store_true",
                         help="追加全部农学构造特征(CumGDD/KDD/CumPRCP/CumDeficit,15 维动态输入)"
-                             ";与 --use_gdd 互斥,开启时以本开关为准")
-    parser.add_argument("--use_remote_sensing", action="store_true",
-                        help="启用遥感模块(DINOv2 ViT-S编码Sentinel-2图像,CorssAttention融合气象)")
+                             ";未开启时默认使用 11 维原始气象 + CumGDD")
     parser.add_argument("--keep_ag_cache", action="store_true",
                         help="训练结束后保留本地遥感缓存(默认自动删除,下次训练重新下载)")
     args = parser.parse_args()
@@ -547,7 +606,7 @@ def main():
     dynamic_feature_names = list(DEFAULT_DYNAMIC_FEATURE_NAMES)
     if args.use_constructed:
         dynamic_feature_names += CONSTRUCTED_FEATURES    # 11+4=15 维农学构造特征
-    elif args.use_gdd:
+    else:
         dynamic_feature_names.append(GDD_FEATURE_NAME)   # 追加 CumGDD 通道(12 维,旧口径)
     pairs = list(zip(meta_lines, cache_entries))
 
@@ -556,18 +615,15 @@ def main():
     soil_dict = load_county_soil(soil_path)
     print(f"    县级土壤: {soil_path} ({len(soil_dict)} 县, 连续 {SOIL_DIM} 维, 不分桶)")
 
-    use_rs = bool(args.use_remote_sensing)
+    use_rs = True
     train_ag = None
     val_ag = None
-    allowed = CROPNET_FIVE_STATES
     if args.states:
-        requested = {s.strip().lower() for s in args.states.split(",") if s.strip()}
-        state_set = requested & allowed
+        permitted = {s.strip().lower() for s in args.states.split(",") if s.strip()}
+        pairs = [p for p in pairs if str(p[0].get("State", "")).lower() in permitted]
+        print(f"  按州过滤 {sorted(permitted)} 后: {len(pairs)} 条")
     else:
-        state_set = allowed
-    tag = "五州(AG)" if use_rs else "八州"
-    pairs = [p for p in pairs if str(p[0].get("State", "")).lower() in state_set]
-    print(f"  按协议{tag}过滤 {sorted(state_set)} 后: {len(pairs)} 条")
+        print(f"  全量样本: {len(pairs)} 条（所有州）")
 
     # 目标 = yield_per_acre(单产, bu/ac),无归一化
     train_pairs, val_pairs = _split_pairs_by_year(pairs, val_years)
@@ -579,38 +635,37 @@ def main():
         raise ValueError("训练集或验证集为空，请检查 --val_year 和数据")
 
     if use_rs:
-        from data import (
-            AG_STATE_ABBR,
-            pre_download_ag,
-            load_ag_manifest,
-            DEFAULT_AG_MANIFEST,
-        )
-        raw_ag = load_ag_manifest(DEFAULT_AG_MANIFEST)
-        ag_available = set()
-        for (state_abbr, year, fips), entries in raw_ag.items():
-            quarters = {
-                e["path"].rstrip(".h5").split("_")[-1][-5:] for e in entries
-            }
-            if "06-30" in quarters and "09-30" in quarters:
-                ag_available.add((state_abbr, int(year), str(fips).zfill(5)))
+        from data import AG_STATE_ABBR, AG_ROOT
+        import h5py
 
-        def _has_ag(meta):
-            abbr = AG_STATE_ABBR.get(str(meta.get("State", "")).strip().lower())
-            if abbr is None:
+        # 预扫描所有 AG h5 文件, 建立 (year,fips) 索引
+        fips_has_ag = set()
+        for h5_path in Path(AG_ROOT).rglob("*.h5"):
+            year = next((int(x) for x in h5_path.parts if x.isdigit() and len(x) == 4), None)
+            if year is None:
+                continue
+            try:
+                with h5py.File(h5_path, "r") as f:
+                    for fips_key in f.keys():
+                        if len(str(fips_key)) == 5 and str(fips_key).isdigit():
+                            fips_has_ag.add((year, str(fips_key)))
+            except OSError:
+                continue
+        print(f"  AG h5 索引: {len(fips_has_ag)} 个 (year,fips) 条目")
+
+        def _local_ag_ok(meta):
+            try:
+                fips = str(meta.get("FIPS", "")).zfill(5)
+                year = int(meta["Year"])
+                return (year, fips) in fips_has_ag
+            except Exception:
                 return False
-            key = (abbr, int(meta["Year"]), str(meta.get("FIPS", "")).zfill(5))
-            return key in ag_available
 
         n_tr, n_val = len(train_pairs), len(val_pairs)
-        train_pairs_ag = [(m, e) for m, e in train_pairs if _has_ag(m)]
-        val_pairs_ag = [(m, e) for m, e in val_pairs if _has_ag(m)]
-        print(f"  AG 过滤 (manifest 有 q2/q3 的五州): Train {len(train_pairs_ag)}/{n_tr}, Val {len(val_pairs_ag)}/{n_val}")
-        all_meta = [m for m, _ in train_pairs_ag] + [m for m, _ in val_pairs_ag]
-        if not args.keep_ag_cache:
-            import atexit
-            from data import cleanup_ag_cache
-            atexit.register(cleanup_ag_cache)
-        pre_download_ag(all_meta)
+        train_pairs_ag = [(m, e) for m, e in train_pairs if _local_ag_ok(m)]
+        val_pairs_ag = [(m, e) for m, e in val_pairs if _local_ag_ok(m)]
+        print(f"  AG 过滤 (本地 q2/q3 文件): Train {len(train_pairs_ag)}/{n_tr}, Val {len(val_pairs_ag)}/{n_val}")
+
         train_ag = AgricultureImageDataset([m for m, _ in train_pairs_ag], train=True, seed=args.seed)
         val_ag = AgricultureImageDataset([m for m, _ in val_pairs_ag], train=False, seed=args.seed)
         train_pairs = train_pairs_ag
@@ -678,17 +733,17 @@ def main():
         dropout=args.dropout,
         output_size=1,
         num_heads=args.num_heads,
-        spatial_mode=args.spatial_mode,
-        variable_selection_stage=args.variable_selection_stage,
-        use_remote_sensing=use_rs,
     )
 
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"  参数总量: {total_params:,}, 可训练: {trainable_params:,}")
-    print(f"  消融开关: use_constructed={args.use_constructed}  use_gdd={args.use_gdd}  "
-          f"spatial_mode={args.spatial_mode}  variable_selection_stage={args.variable_selection_stage}  "
-          f"use_remote_sensing={use_rs}")
+
+    if torch.cuda.is_available() and torch.cuda.device_count() > 1:
+        model = nn.DataParallel(model)
+        print(f"  DataParallel: {torch.cuda.device_count()} GPUs, batch_size={args.batch_size}")
+    print(f"  构造特征: use_constructed={args.use_constructed}  "
+          f"网格级天气-遥感联合注意力")
 
     # 保存模型超参
     hparams = {
@@ -698,12 +753,8 @@ def main():
         "dropout": args.dropout,
         "dynamic_feature_dim": len(dynamic_feature_names),
         "soil_dim": SOIL_DIM,
-        "loss": "crucial" if args.use_crucial else "mse",
-        "spatial_mode": args.spatial_mode,
-        "variable_selection_stage": args.variable_selection_stage,
-        "use_gdd": bool(args.use_gdd),
+        "loss": "crucial" if args.use_crucial else "beta_nll",
         "use_constructed": bool(args.use_constructed),
-        "use_remote_sensing": use_rs,
     }
     with open(os.path.join(output_dir, "model_hparams.json"), "w", encoding="utf-8") as f:
         json.dump(hparams, f, ensure_ascii=False, indent=2)

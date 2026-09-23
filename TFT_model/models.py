@@ -1,9 +1,144 @@
+import os
+os.environ.setdefault("HF_HOME", "/data/raid0/hqx/.cache/huggingface")
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from copy import deepcopy
 import math
 from typing import Any, Dict, List, Tuple, Optional
+
+
+AG_DATE_PAIRS = [
+    (4, 1), (5, 1), (6, 1), (7, 1), (8, 1), (9, 1),
+]
+
+
+def _relative_day_index(month_ids: torch.Tensor, day_ids: torch.Tensor) -> torch.Tensor:
+    """将日历日期转换为相对 4 月 1 日的索引，4 月 1 日为 1。"""
+    month_ids = month_ids.to(dtype=torch.long)
+    day_ids = day_ids.to(device=month_ids.device, dtype=torch.long)
+    month_starts = torch.tensor(
+        [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334],
+        device=month_ids.device,
+        dtype=torch.long,
+    )
+    safe_month = month_ids.clamp(1, 12)
+    result = month_starts[safe_month - 1] + day_ids - month_starts[3]
+    return torch.where((month_ids >= 1) & (day_ids >= 1), result, torch.zeros_like(result))
+
+
+def _broadcast_rs_forward(
+    rs_encoded: torch.Tensor,
+    month_ids: torch.Tensor,
+    day_ids: torch.Tensor,
+    ag_mask: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Forward-fill the latest available RS observation onto the weather dates."""
+    B, G, N_rs, H = rs_encoded.shape
+    if ag_mask.shape != (B, N_rs):
+        raise ValueError(f"ag_mask shape {ag_mask.shape} != {(B, N_rs)}")
+    if N_rs != len(AG_DATE_PAIRS):
+        raise ValueError(f"expected {len(AG_DATE_PAIRS)} RS dates, got {N_rs}")
+    T = month_ids.shape[1]
+    rs_days = torch.tensor(
+        [month * 32 + day for month, day in AG_DATE_PAIRS],
+        device=rs_encoded.device,
+        dtype=torch.long,
+    )
+    weather_days = month_ids.to(rs_encoded.device).long() * 32 + day_ids.to(
+        rs_encoded.device
+    ).long()
+    eligible = (
+        ag_mask.to(device=rs_encoded.device, dtype=torch.bool)[:, None, :]
+        & (rs_days[None, None, :] <= weather_days[:, :, None])
+    )
+    rs_indices = torch.arange(N_rs, device=rs_encoded.device).view(1, 1, N_rs)
+    latest = torch.where(eligible, rs_indices, torch.zeros_like(rs_indices))
+    latest = latest.max(dim=-1).values
+    has_value = eligible.any(dim=-1)
+    gathered = torch.gather(
+        rs_encoded,
+        dim=2,
+        index=latest[:, None, :, None].expand(B, G, T, H),
+    )
+    rs_by_time = gathered * has_value[:, None, :, None].to(rs_encoded.dtype)
+    rs_mask = has_value[:, :, None].expand(B, T, G)
+    return rs_by_time, rs_mask
+
+
+def _build_interleaved_layout(
+    month_ids: torch.Tensor,
+    day_ids: torch.Tensor,
+    seq_lens: torch.Tensor,
+    grid_mask: torch.Tensor,
+    ag_mask: Optional[torch.Tensor],
+    ag_dates: List[Tuple[int, int]],
+) -> Dict[str, torch.Tensor]:
+    """构造按日期分组的天气/遥感 token 布局，并在 batch 维度补齐。"""
+    B, T = month_ids.shape
+    G = grid_mask.shape[1]
+    device = month_ids.device
+    relative_days = _relative_day_index(month_ids, day_ids)
+    seq_lens = seq_lens.to(device=device, dtype=torch.long).clamp(0, T)
+    grid_mask = grid_mask.to(device=device, dtype=torch.bool)
+    if ag_mask is None:
+        ag_mask = torch.ones(B, len(ag_dates), device=device, dtype=torch.bool)
+    else:
+        ag_mask = ag_mask.to(device=device, dtype=torch.bool)
+
+    rows = []
+    max_tokens = 0
+    for b in range(B):
+        row = []
+        valid_t = int(seq_lens[b].item())
+        valid_grids = torch.nonzero(grid_mask[b], as_tuple=False).flatten().tolist()
+        available_rs = {
+            date: i for i, date in enumerate(ag_dates)
+            if i < ag_mask.shape[1] and bool(ag_mask[b, i])
+        }
+        for t in range(valid_t):
+            date = (int(month_ids[b, t].item()), int(day_ids[b, t].item()))
+            rs_i = available_rs.get(date)
+            for g in valid_grids:
+                row.append((t, g, -1))
+                if rs_i is not None:
+                    row.append((t, g, rs_i))
+        rows.append(row)
+        max_tokens = max(max_tokens, len(row))
+
+    weather_positions = torch.full((B, T, G), -1, device=device, dtype=torch.long)
+    pad_mask = torch.zeros(B, max_tokens, device=device, dtype=torch.bool)
+    block_boundaries = torch.zeros(B, max_tokens, device=device, dtype=torch.bool)
+    token_time_indices = torch.zeros(B, max_tokens, device=device, dtype=torch.long)
+    weather_time_indices = torch.full((B, max_tokens), -1, device=device, dtype=torch.long)
+    rs_grid_indices = torch.full((B, max_tokens), -1, device=device, dtype=torch.long)
+    rs_date_indices = torch.full((B, max_tokens), -1, device=device, dtype=torch.long)
+
+    for b, row in enumerate(rows):
+        previous_date = None
+        for pos, (t, grid, rs_i) in enumerate(row):
+            date = (int(month_ids[b, t].item()), int(day_ids[b, t].item()))
+            pad_mask[b, pos] = True
+            block_boundaries[b, pos] = date != previous_date
+            previous_date = date
+            token_time_indices[b, pos] = relative_days[b, t]
+            rs_grid_indices[b, pos] = grid
+            rs_date_indices[b, pos] = rs_i
+            if rs_i < 0:
+                weather_positions[b, t, grid] = pos
+                weather_time_indices[b, pos] = t
+
+    return {
+        "pad_mask": pad_mask,
+        "block_boundaries": block_boundaries,
+        "weather_positions": weather_positions,
+        "token_time_indices": token_time_indices,
+        "weather_time_indices": weather_time_indices,
+        "rs_grid_indices": rs_grid_indices,
+        "rs_date_indices": rs_date_indices,
+        "relative_days": relative_days,
+    }
 
 
 class GatedLinearUnit(nn.Module):
@@ -456,12 +591,16 @@ class SpatialAttentionAggregator(nn.Module):
         d = self.hidden_size
         nf = d // 4
         i = torch.arange(nf, device=coords.device, dtype=coords.dtype)
-        freq = 10000.0 ** (-4.0 * i / d)
-        t = t_idx.to(device=coords.device, dtype=coords.dtype).view(1, 1, -1, 1)
-        lat = (coords[..., 0:1] * (math.pi / 180.0)).unsqueeze(2)
-        lon = (coords[..., 1:2] * (math.pi / 180.0)).unsqueeze(2)
+        freq = (10000.0 ** (-4.0 * i / d)).view(1, 1, 1, nf)
+        t_idx = t_idx.to(device=coords.device, dtype=coords.dtype)
+        if t_idx.ndim == 1:
+            t = t_idx.view(1, 1, -1, 1)
+        else:
+            t = t_idx[:, None, :, None]
+        lat = (coords[..., 0:1] * (math.pi / 180.0))[:, :, None, :]
+        lon = (coords[..., 1:2] * (math.pi / 180.0))[:, :, None, :]
         pe = torch.zeros(
-            *coords.shape[:-1], t_idx.numel(), d,
+            coords.shape[0], coords.shape[1], t_idx.shape[-1], d,
             device=coords.device, dtype=coords.dtype,
         )
         pe[..., 0::4] = torch.sin(t * freq)
@@ -491,23 +630,43 @@ class SpatialAttentionAggregator(nn.Module):
         tokens: torch.Tensor,
         coords: torch.Tensor,
         grid_mask: torch.Tensor,
+        token_mask: Optional[torch.Tensor] = None,
+        time_indices: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Return county features and CLS-to-grid weights shaped (B,T,G)."""
-        # tokens: (B, G, T, H) 该特征每网格的 d 维内容投影
-        # coords: (B, G, 2), grid_mask: (B, G) bool
-        B, _, T, H = tokens.shape
+        """Pool flattened per-time weather/RS tokens with a county CLS query."""
+        # tokens: (B, T, K, H), coords: (B, K, 2)
+        B, T, K, H = tokens.shape
+        if coords.shape != (B, K, 2):
+            raise ValueError(f"coords shape {coords.shape} != {(B, K, 2)}")
+        if token_mask is None:
+            key_valid = grid_mask.unsqueeze(1).expand(B, T, -1)
+            if key_valid.shape[-1] != K:
+                raise ValueError(f"grid_mask must have {K} entries when token_mask is omitted")
+            cls_coords_input = coords
+            cls_grid_mask = grid_mask
+        else:
+            key_valid = token_mask.to(device=tokens.device, dtype=torch.bool)
+            if key_valid.shape != (B, T, K):
+                raise ValueError(f"token_mask shape {key_valid.shape} != {(B, T, K)}")
+            if grid_mask.shape[1] == K:
+                cls_coords_input = coords
+                cls_grid_mask = grid_mask
+            else:
+                cls_coords_input = coords[:, :grid_mask.shape[1]]
+                cls_grid_mask = grid_mask
         t_idx = torch.arange(T, device=tokens.device, dtype=torch.long)
-        cls_coords = self._cls_coords(coords, grid_mask)
-        pe_grid = self._st_pe(coords, t_idx).transpose(1, 2)  # (B,T,G,H)
-        pe_cls = self._st_pe(cls_coords.unsqueeze(1), t_idx).squeeze(1)  # (B,T,H)
+        cls_coords = self._cls_coords(cls_coords_input, cls_grid_mask)
+        if time_indices is None:
+            time_indices = t_idx.unsqueeze(0).expand(B, -1)
+        pe_grid = self._st_pe(coords, time_indices).transpose(1, 2)  # (B,T,K,H)
+        pe_cls = self._st_pe(cls_coords.unsqueeze(1), time_indices).squeeze(1)  # (B,T,H)
         cls = self.cls_token.view(1, 1, H).expand(B, T, H)
         q = self.W_q(cls + pe_cls).unsqueeze(2)          # (B,T,1,H)
-        x = tokens.transpose(1, 2)                       # (B,T,G,H)
+        x = tokens                                             # (B,T,K,H)
         x_with_pe = x + pe_grid
         k = self.W_k(x_with_pe)
         v = self.W_v(x_with_pe)
         scores = torch.matmul(q, k.transpose(-2, -1)).squeeze(2) / self.scale
-        key_valid = grid_mask.unsqueeze(1)                       # (B,1,G)
         scores = scores.masked_fill(~key_valid, float("-inf"))
         w = torch.softmax(scores, dim=-1)                         # (B,T,G)
         w = self.dropout(w)
@@ -521,49 +680,24 @@ class SpatialAttentionAggregator(nn.Module):
 # 遥感特征编码模块
 # ============================================================
 
-AG_DATES = [
-    "04-01", "04-15", "05-01", "05-15", "06-01", "06-15",
-    "07-01", "07-15", "08-01", "08-15", "09-01", "09-15",
-]
-AG_DAY_INDICES = [0, 14, 28, 42, 56, 70, 84, 98, 112, 126, 140, 154]
+AG_DATES = [f"{month:02d}-{day:02d}" for month, day in AG_DATE_PAIRS]
+AG_DAY_INDICES = [0, 30, 61, 91, 122, 153]
 
 
 class PretrainedViTEncoder(nn.Module):
-    """DINOv2 ViT-S（facebook/dinov2-small）遥感图像编码器。
+    """PVT-Tiny 风格编码器，直接输出与天气 token 同维的网格级 token。"""
 
-    DINOv2 在 1.42 亿张多样化图像上自监督预训练，
-    遥感领域广泛使用（Panopticon CVPR2025 / SoftCon IEEE TGRS 等）。
-    冻结 backbone，只训练投影头 (384 → H*2 → H)。"""
-
-    def __init__(self, out_dim: int = 32, freeze_backbone: bool = True, dropout: float = 0.1):
+    def __init__(self, out_dim: int = 32, freeze_backbone: bool = False, dropout: float = 0.1):
         super().__init__()
-        from transformers import AutoModel
-        self.backbone = AutoModel.from_pretrained("facebook/dinov2-small")
-        self.embed_dim = self.backbone.config.hidden_size
+        from pvt import PVTTinyEncoder
+        self.backbone = PVTTinyEncoder(out_dim=out_dim, drop=dropout)
+        self.embed_dim = out_dim
         if freeze_backbone:
             for p in self.backbone.parameters():
                 p.requires_grad = False
-        self.proj = nn.Sequential(
-            nn.Linear(self.embed_dim, out_dim * 2), 
-            nn.GELU(), 
-            nn.Dropout(dropout), 
-            nn.Linear(out_dim * 2, out_dim)
-            )
-        self._init_weights()
-
-    def _init_weights(self):
-        for layer in self.proj:
-            if isinstance(layer, nn.Linear):
-                nn.init.xavier_uniform_(layer.weight)
-                if layer.bias is not None:
-                    nn.init.zeros_(layer.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        with torch.set_grad_enabled(
-            not all(not p.requires_grad for p in self.backbone.parameters())
-        ):
-            out = self.backbone(pixel_values=x)
-        return self.proj(out.last_hidden_state[:, 0, :])
+        return self.backbone(x)
 
 
 class TFTEncoderForYieldPrediction(nn.Module):
@@ -577,18 +711,12 @@ class TFTEncoderForYieldPrediction(nn.Module):
         dropout: float = 0.3,
         output_size = 1,
         num_heads: int = 3,
-        spatial_mode: str = "attention",
-        variable_selection_stage: str = "grid",
-        use_remote_sensing: bool = False,
-        vit_freeze_backbone: bool = True,
+        vit_freeze_backbone: bool = False,
     ):
         super().__init__()
         self.hidden_size = hidden_size
         self.num_heads = num_heads
         self.dynamic_feature_names = list(dynamic_feature_names)
-        self.spatial_mode = spatial_mode
-        self.variable_selection_stage = variable_selection_stage
-        self.use_remote_sensing = use_remote_sensing
 
         # 1. 静态：县级连续土壤(Linear 映射,不分桶)+ 上下文 GRN
         self.soil_static_encoder = SoilStaticEncoder(
@@ -603,26 +731,14 @@ class TFTEncoderForYieldPrediction(nn.Module):
         )
 
         vsn_inputs = {name: hidden_size for name in self.dynamic_feature_names}
-        if variable_selection_stage == "grid":
-            self.grid_vsn = VariableSelectionNetwork(
-                input_sizes=vsn_inputs,
-                hidden_size=hidden_size,
-                dropout=dropout,
-                context_size=hidden_size,
-            )
-            self.county_vsn = None
-        elif variable_selection_stage == "county":
-            self.grid_vsn = None
-            self.county_vsn = VariableSelectionNetwork(
-                input_sizes=vsn_inputs,
-                hidden_size=hidden_size,
-                dropout=dropout,
-                context_size=hidden_size,
-            )
-        else:
-            raise ValueError("variable_selection_stage must be 'grid' or 'county'")
+        self.grid_vsn = VariableSelectionNetwork(
+            input_sizes=vsn_inputs,
+            hidden_size=hidden_size,
+            dropout=dropout,
+            context_size=hidden_size,
+        )
 
-        # 4. LSTM 编码器（仅编码器，无解码器）
+        # 4. LSTM 编码器
         self.lstm_encoder = LSTMEncoder(
             input_size=hidden_size,
             hidden_size=hidden_size,
@@ -648,6 +764,8 @@ class TFTEncoderForYieldPrediction(nn.Module):
             dropout=dropout,
         )
 
+        self.spatial_agg = SpatialAttentionAggregator(hidden_size, dropout)
+
         # 6. 产量预测头
         self.pred_grn = GatedResidualNetwork(
             input_size=hidden_size,
@@ -656,7 +774,14 @@ class TFTEncoderForYieldPrediction(nn.Module):
             context_size=None,
             dropout=dropout,
         )
-        self.pred_head = nn.Sequential(
+        self.mean_head = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size),
+            nn.Dropout(dropout),
+            nn.ELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_size, output_size),
+        )
+        self.variance_head = nn.Sequential(
             nn.Linear(hidden_size, hidden_size),
             nn.Dropout(dropout),
             nn.ELU(),
@@ -664,22 +789,10 @@ class TFTEncoderForYieldPrediction(nn.Module):
             nn.Linear(hidden_size, output_size),
         )
 
-        # 网格级:逐特征 WeatherFormer 注意力(Q/K/V 均由内容+位置编码生成)
-        # spatial_mode="mean" 为消融对照:退化为掩码加权平均(直接网格均值),不创建 spatial_agg
-        if spatial_mode == "attention":
-            self.spatial_agg = SpatialAttentionAggregator(hidden_size, dropout)
-        elif spatial_mode == "mean":
-            self.spatial_agg = None
-        else:
-            raise ValueError(f"未知 spatial_mode: {spatial_mode}，可选 'attention' / 'mean'")
-
-        # ========== 遥感模块 ==========
-        if use_remote_sensing:
-            self.vit_encoder = PretrainedViTEncoder(
-                out_dim=hidden_size, freeze_backbone=vit_freeze_backbone, dropout=dropout,
-            )
-        else:
-            self.vit_encoder = None
+        # 遥感模块是当前模型的必需输入分支。
+        self.vit_encoder = PretrainedViTEncoder(
+            out_dim=hidden_size, freeze_backbone=vit_freeze_backbone, dropout=dropout,
+        )
 
     def forward(
         self,
@@ -688,7 +801,10 @@ class TFTEncoderForYieldPrediction(nn.Module):
         grid_mask: torch.Tensor,
         soil_feats: torch.Tensor,
         seq_lens: torch.Tensor,
+        month_ids: Optional[torch.Tensor] = None,
+        day_ids: Optional[torch.Tensor] = None,
         ag_images: Optional[torch.Tensor] = None,
+        ag_mask: Optional[torch.Tensor] = None,
         diagnose_mode: Optional[Dict[str, bool]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, Any]]:
         """
@@ -698,174 +814,128 @@ class TFTEncoderForYieldPrediction(nn.Module):
             grid_mask: (B, G) bool 有效网格
             ...
             diagnose_mode: 可选诊断开关，支持:
-                disable_rs: 强制跳过遥感分支
-                force_mean_spatial: 强制将空间注意力替换为掩码均值
             soil_feats: (B, soil_dim) 县级连续土壤静态特征(已标准化,不进网格注意力)
             seq_lens: (batch_size,) 有效时序长度
-            ag_images: (B, 12, G, 3, 224, 224) 可选遥感图像, 仅 use_remote_sensing=True 生效
+            ag_images: (B, 6, G, 3, 224, 224) 遥感图像
 
         Returns:
-            pred_all: (B, T, 1) 逐时间步产量预测
-            attn_weights_out: (B, T, T) 注意力权重
+            pred_all: (B, 1) 县级最终产量预测
+            attn_weights_out: (B, T_new, T_new) 联合序列注意力权重
             aux_dict: 含 grad_tensors、pred_all
         """
         B, _, T, _ = grid_feats.shape
-        max_seq_len = int(T)
         device = grid_feats.device
 
         # 诊断模式开关
         diag = diagnose_mode or {}
-        _disable_rs = bool(diag.get("disable_rs", False))
-        _force_mean = bool(diag.get("force_mean_spatial", False))
-        _eff_spatial_mode = "mean" if _force_mean else self.spatial_mode
 
         c_s, c_e, c_c, c_h = self.soil_static_encoder(soil_feats)
-        c_s_expanded = c_s.unsqueeze(1).repeat(1, max_seq_len, 1)
-
         G = grid_feats.shape[1]
         projected = {
             name: self.per_feature_linear[name](grid_feats[..., j:j + 1])
             for j, name in enumerate(self.dynamic_feature_names)
         }
-        if self.variable_selection_stage == "grid":
-            grid_inputs = {
-                name: tensor.reshape(B * G, T, self.hidden_size)
-                for name, tensor in projected.items()
-            }
-            grid_seq_lens = seq_lens.repeat_interleave(G)
-            grid_context = c_s.unsqueeze(1).expand(B, G, self.hidden_size)
-            grid_context = grid_context.reshape(B * G, self.hidden_size)
-            grid_context = grid_context.unsqueeze(1).expand(B * G, T, self.hidden_size)
-            grid_token, grid_vsn_weights = self.grid_vsn(
-                grid_inputs, grid_seq_lens, context=grid_context
-            )
-            grid_token = grid_token.reshape(B, G, T, self.hidden_size)
-            grid_token = grid_token * grid_mask[:, :, None, None].to(grid_token.dtype)
-            if _eff_spatial_mode == "attention":
-                temporal_feat, spatial_weights = self.spatial_agg.forward_weights(
-                    grid_token, grid_coords, grid_mask
-                )
-            else:
-                denom = grid_mask.sum(dim=1, keepdim=True).clamp(min=1.0)
-                temporal_feat = grid_token.sum(dim=1) / denom.unsqueeze(-1)
-                spatial_weights = None
-            county_vsn_weights = None
-        else:
-            county_inputs = {}
-            feature_spatial_weights = []
-            for name, tensor in projected.items():
-                tensor = tensor * grid_mask[:, :, None, None].to(tensor.dtype)
-                if _eff_spatial_mode == "attention":
-                    pooled, weights = self.spatial_agg.forward_weights(
-                        tensor, grid_coords, grid_mask
-                    )
-                    feature_spatial_weights.append(weights)
-                else:
-                    denom = grid_mask.sum(dim=1, keepdim=True).clamp(min=1.0)
-                    pooled = tensor.sum(dim=1) / denom.unsqueeze(-1)
-                county_inputs[name] = pooled
-            temporal_feat, county_vsn_weights = self.county_vsn(
-                county_inputs, seq_lens, context=c_s_expanded
-            )
-            grid_vsn_weights = None
-            spatial_weights = (
-                torch.stack(feature_spatial_weights, dim=-1)
-                if feature_spatial_weights else None
-            )
+        grid_inputs = {
+            name: tensor.reshape(B * G, T, self.hidden_size)
+            for name, tensor in projected.items()
+        }
+        grid_seq_lens = seq_lens.repeat_interleave(G)
+        grid_context = c_s.unsqueeze(1).expand(B, G, self.hidden_size)
+        grid_context = grid_context.reshape(B * G, self.hidden_size)
+        grid_context = grid_context.unsqueeze(1).expand(B * G, T, self.hidden_size)
+        grid_token, grid_vsn_weights = self.grid_vsn(
+            grid_inputs, grid_seq_lens, context=grid_context
+        )
+        grid_token = grid_token.reshape(B, G, T, self.hidden_size)
+        grid_token = grid_token * grid_mask[:, :, None, None].to(grid_token.dtype)
 
-        # ========== 遥感: ViT → 网格级 RS token（不聚合）==========
-        rs_encoded = None
-        if self.use_remote_sensing and ag_images is not None and not _disable_rs:
-            rs_encoded = self._forward_remote_sensing(
-                ag_images, grid_coords, grid_mask, device,
-            )  # (B, G, 12, H)
+        # VSN 后保留网格级逐日气象 token，先与同日遥感做空间融合，
+        # 再把空间融合后的县级时序 token 送入共享 LSTM。
+        weather_feat = self.cat_attn_prep_grn(
+            grid_token,
+            context=c_s[:, None, None, :].expand_as(grid_token),
+        )
+        weather_feat = weather_feat * grid_mask[:, :, None, None].to(weather_feat.dtype)
 
-        # ========== 4. LSTM 编码器 ==========
+        if ag_images is None or ag_mask is None:
+            raise ValueError("当前模型必须传入 ag_images 和 ag_mask")
+        rs_encoded = self._forward_remote_sensing(
+            ag_images, grid_coords, grid_mask, device,
+        )  # (B, G, N_rs, H)
+        rs_encoded_pre_grn = rs_encoded
+        rs_context = c_s[:, None, None, :].expand_as(rs_encoded)
+        rs_encoded = self.cat_attn_prep_grn(rs_encoded, context=rs_context)
+
+        # ========== 5. 同时相空间融合 -> 时间 TFT 注意力 ==========
+        Te = int(T)
+        pad_mask = torch.arange(Te, device=device).unsqueeze(0) < seq_lens.unsqueeze(1)
+        if month_ids is None or day_ids is None:
+            raise ValueError("必须传入 month_ids 和 day_ids")
+        rs_by_time, rs_mask = _broadcast_rs_forward(
+            rs_encoded,
+            month_ids[:, :Te],
+            day_ids[:, :Te],
+            ag_mask,
+        )
+        rs_by_time = rs_by_time * grid_mask[:, :, None, None].to(rs_by_time.dtype)
+        rs_mask = rs_mask & grid_mask[:, None, :]
+
+        mixed_tokens = torch.cat([weather_feat, rs_by_time], dim=1).transpose(1, 2)
+        mixed_coords = torch.cat([grid_coords, grid_coords], dim=1)
+        mixed_mask = torch.cat(
+            [grid_mask[:, None, :].expand(B, Te, G), rs_mask], dim=-1
+        )
+        time_indices = _relative_day_index(month_ids[:, :Te], day_ids[:, :Te])
+        temporal_feat, spatial_weights = self.spatial_agg.forward_weights(
+            mixed_tokens,
+            mixed_coords,
+            torch.cat([grid_mask, grid_mask], dim=1),
+            token_mask=mixed_mask,
+            time_indices=time_indices,
+        )
+        # 空间融合后才进入时间编码，避免每个网格分别保存一套 LSTM 激活。
         lstm_feat_raw, _, _, _ = self.lstm_encoder(
             temporal_feat, seq_lens=seq_lens, c_c=c_c, c_h=c_h
         )
+        temporal_context = c_e[:, None, :].expand(B, Te, self.hidden_size)
+        temporal_feat = self.cat_attn_prep_grn(
+            lstm_feat_raw, context=temporal_context
+        )
+        temporal_feat = temporal_feat * pad_mask.unsqueeze(-1).to(temporal_feat.dtype)
+        attn_feat, attn_weights_out = self.attention(
+            x=temporal_feat + self._compute_st_pe(
+                grid_coords.new_zeros(B, Te, 1),
+                grid_coords.new_zeros(B, Te, 1),
+                time_indices,
+            ).to(temporal_feat.dtype),
+            pad_mask=pad_mask,
+        )
+        pred_features = self.pred_grn(attn_feat)
+        pred_dist_all = torch.cat(
+            [self.mean_head(pred_features), self.variance_head(pred_features)], dim=-1
+        )  # (B,T,2)
+        last_token_idx = pad_mask.sum(dim=1).clamp_min(1) - 1
+        batch_idx = torch.arange(B, device=device)
+        last_token = attn_feat[batch_idx, last_token_idx]
 
-        # ========== 5. GRN 准备 + 时空交错 + 因果注意力 ==========
-        Te = int(lstm_feat_raw.size(1))
-        pad_mask = torch.arange(Te, device=device).unsqueeze(0) < seq_lens.unsqueeze(1)
-        pm_f = pad_mask.unsqueeze(-1).to(dtype=lstm_feat_raw.dtype)
-        c_e_expanded = c_e.unsqueeze(1).repeat(1, Te, 1) * pm_f
-        cat_feat = self.cat_attn_prep_grn(lstm_feat_raw, context=c_e_expanded)
-        cat_feat = cat_feat * pm_f
-
-        if self.use_remote_sensing and rs_encoded is not None:
-            _, G, N_rs, _ = rs_encoded.shape
-
-            grid_lat = grid_coords[:, :, 0:1] * (math.pi / 180.0)  # (B,G,1) rad
-            grid_lon = grid_coords[:, :, 1:2] * (math.pi / 180.0)
-
-            rs_days = torch.tensor(AG_DAY_INDICES, device=device, dtype=torch.long)
-            T_new = Te + G * N_rs
-
-            # 序列布局: 每个时相 => [w_t, rs_t_g0..rs_t_g{G-1}]
-            # 同组内全可见，组间因果
-            interleaved = torch.zeros(B, T_new, self.hidden_size, device=device, dtype=cat_feat.dtype)
-            t_indices = torch.zeros(B, T_new, device=device, dtype=torch.long)
-            token_lat = torch.zeros(B, T_new, 1, device=device)
-            token_lon = torch.zeros(B, T_new, 1, device=device)
-            block_boundaries = torch.zeros(B, T_new, device=device)
-
-            # 县中心坐标 (天气 token 用)
-            valid = grid_mask.to(dtype=grid_coords.dtype).unsqueeze(-1)
-            county_center = (grid_coords * valid).sum(dim=1) / valid.sum(dim=1).clamp_min(1)
-            county_lat = county_center[:, 0:1] * (math.pi / 180.0)  # (B, 1)
-            county_lon = county_center[:, 1:2] * (math.pi / 180.0)
-
-            w_positions = []
-            offset = 0
-            for t in range(Te):
-                # 天气 token
-                w_positions.append(offset)
-                block_boundaries[:, offset] = 1.0  # 新 group 开始
-                interleaved[:, offset, :] = cat_feat[:, t, :]
-                t_indices[:, offset] = t
-                token_lat[:, offset] = county_lat
-                token_lon[:, offset] = county_lon
-                offset += 1
-
-                if t in rs_days:
-                    rs_i = (rs_days == t).nonzero(as_tuple=False)[0].item()
-                    for g in range(G):
-                        interleaved[:, offset, :] = rs_encoded[:, g, rs_i, :]
-                        t_indices[:, offset] = t
-                        token_lat[:, offset] = grid_lat[:, g, :1]
-                        token_lon[:, offset] = grid_lon[:, g, :1]
-                        offset += 1
-
-            w_positions = torch.tensor(w_positions, device=device)
-
-            # WeatherFormer 4-slot 加性位置编码
-            pe = self._compute_st_pe(token_lat, token_lon, t_indices)  # (B, T_new, H)
-            interleaved = interleaved + pe
-
-            interleave_pad = torch.ones(B, T_new, dtype=torch.bool, device=device)
-            attn_feat_interleaved, attn_weights_out = self.attention(
-                x=interleaved, pad_mask=interleave_pad,
-                block_boundaries=block_boundaries,
-            )
-            attn_feat = attn_feat_interleaved[:, w_positions, :]
-        else:
-            attn_feat, attn_weights_out = self.attention(
-                x=cat_feat, pad_mask=pad_mask,
-            )
-
-        # ========== 6. 产量预测头（逐时间步）==========
-        pred_all = self.pred_head(self.pred_grn(attn_feat))  # (B, T, 1)
+        # 最终预测取最后有效时间步；所有时间步分布保留给一致性损失。
+        pred_all = pred_dist_all[batch_idx, last_token_idx]  # (B, 2)
 
         grad_tensors = {
             "static_feat": c_s,
             "grid_vsn_weights": grid_vsn_weights,
-            "county_vsn_weights": county_vsn_weights,
+            "county_vsn_weights": None,
             "temporal_feat": temporal_feat,
-            "cat_feat": cat_feat,
+            "cat_feat": temporal_feat,
             "lstm_feat_raw": lstm_feat_raw,
+            "last_token": last_token,
+            "pred_features": pred_features,
+            "pred_dist_all": pred_dist_all,
             "pred_all": pred_all,
         }
+        if rs_encoded_pre_grn is not None:
+            grad_tensors["rs_encoded_pre_grn"] = rs_encoded_pre_grn
+            grad_tensors["rs_encoded"] = rs_encoded
         for tensor in grad_tensors.values():
             if isinstance(tensor, torch.Tensor) and tensor.requires_grad:
                 tensor.retain_grad()
@@ -874,7 +944,7 @@ class TFTEncoderForYieldPrediction(nn.Module):
             "grad_tensors": grad_tensors,
             "pred_all": pred_all,
             "grid_vsn_weights": grid_vsn_weights,
-            "county_vsn_weights": county_vsn_weights,
+            "county_vsn_weights": None,
             "spatial_weights": spatial_weights,
         }
 
@@ -918,7 +988,13 @@ class TFTEncoderForYieldPrediction(nn.Module):
 
         images = ag_images.permute(0, 2, 1, 3, 4, 5).reshape(B * G, N_rs, C, H_img, W_img)
         images = images.reshape(B * G * N_rs, C, H_img, W_img)
-        rs_encoded = self.vit_encoder(images)
+        # PVT is fully trainable; process image tokens in chunks to avoid
+        # holding all B*G*N_rs backbone activations at once.
+        chunk_size = 16
+        encoded_chunks = []
+        for start in range(0, images.shape[0], chunk_size):
+            encoded_chunks.append(self.vit_encoder(images[start:start + chunk_size]))
+        rs_encoded = torch.cat(encoded_chunks, dim=0)
         rs_encoded = rs_encoded.reshape(B, G, N_rs, H)
         rs_encoded = rs_encoded * grid_mask[:, :, None, None].to(rs_encoded.dtype)
         return rs_encoded
