@@ -1,9 +1,4 @@
 """Shared CropNet data protocol constants and validation helpers."""
-
-ALLOWED_STATES = {
-    "minnesota", "wisconsin", "michigan", "illinois",
-    "indiana", "ohio", "missouri", "kentucky",
-}
 CROPNET_FIVE_STATES = {
     "illinois", "iowa", "louisiana", "mississippi", "new_york",
 }

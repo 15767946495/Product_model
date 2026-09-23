@@ -53,7 +53,7 @@ from data import (
     DEFAULT_GRID_CACHE,
     DEFAULT_COUNTY_SOIL,
 )
-from cropnet_protocol import ALLOWED_STATES
+from cropnet_protocol import CROPNET_FIVE_STATES
 from train import (
     train_model,
     _split_pairs_by_year,
@@ -66,7 +66,7 @@ MODES = [
     {"name": "mean",       "spatial_mode": "mean",       "desc": "直接网格均值"},
     {"name": "attention",  "spatial_mode": "attention",  "desc": "空间注意力聚合(本文)"},
 ]
-STATES = ALLOWED_STATES
+STATES = CROPNET_FIVE_STATES
 
 
 def filter_allowed_pairs(pairs):

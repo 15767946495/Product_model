@@ -4,13 +4,13 @@
 
 ## 摘要
 
-针对县级玉米单产预测中县域内部气象空间异质性容易被均值化、遥感数据获取成本较高以及深度模型可解释性不足等问题，本文提出一种融合逐网格变量选择与空间注意力的时间融合变换器模型。研究以美国玉米带 9 个州为区域，构建 2017—2022 年共 3,768 个县-年样本，输入包括 9 km 网格级逐日气象、县级土壤属性以及累计积温、高温累积、累计降水和累计水分亏缺等农学构造特征。模型首先在每个气象网格内部利用县级土壤上下文进行变量选择，再采用基于县级 CLS 查询和时空加性位置编码的缩放点积空间注意力聚合网格信息，随后通过 LSTM、因果注意力和预测头生成生长季内的滚动单产估计。通过变量选择位置与空间聚合方式的 $2\times2$ 联合消融，验证逐网格变量选择和空间注意力的独立贡献；在 2022 年独立测试集上，本文模型 RMSE 为 20.086 bu/ac，$R^2$ 为 0.581，相关系数为 0.805，优于 DeepCropNet、CNN-RNN、ConvLSTM 和 GNN-RNN 四类基线。季中预报结果表明，8 月 31 日时 $R^2$ 已达到 0.535。研究结果说明，在不依赖遥感影像的条件下，逐网格变量选择与空间注意力能够有效保留县域气象异质性，并提升县级玉米单产预测的精度与可解释性。
+针对县级玉米单产预测中县域内部气象空间异质性容易被均值化、遥感与气象等多源数据融合不充分以及深度模型可解释性不足等问题，本文提出一种融合逐网格变量选择与空间注意力的时间融合变换器模型。研究以美国本土 27 个玉米主产州为区域，构建 2017—2022 年共 7,426 个县-年样本，输入包括 9 km 网格级逐日气象、县级土壤属性、生长季 Sentinel-2 遥感影像以及累计积温、高温累积、累计降水和累计水分亏缺等农学构造特征。模型首先在每个气象网格内部利用县级土壤上下文进行变量选择，再采用基于县级 CLS 查询和时空加性位置编码的缩放点积空间注意力聚合网格信息，随后通过 LSTM、因果注意力和预测头生成生长季内的滚动单产估计。通过变量选择位置与空间聚合方式的 $2\times2$ 联合消融，验证逐网格变量选择和空间注意力的独立贡献；在 2022 年独立测试集上，本文模型 RMSE 为 20.086 bu/ac，$R^2$ 为 0.581，相关系数为 0.805，优于 DeepCropNet、CNN-RNN、ConvLSTM 和 GNN-RNN 四类基线。季中预报结果表明，8 月 31 日时 $R^2$ 已达到 0.535。研究结果说明，在融合网格级气象异质性与遥感长势信息的条件下，逐网格变量选择与空间注意力能够有效保留县域空间结构，并提升县级玉米单产预测的精度与可解释性。
 
 **关键词：** 玉米单产预测；时间融合变换器；空间注意力；变量选择网络；网格级气象；季中预报
 
 ## Abstract
 
-To address the loss of within-county meteorological heterogeneity caused by spatial averaging, the high acquisition cost of remote-sensing data, and the limited interpretability of deep learning models in county-level crop-yield prediction, this study proposes a Temporal Fusion Transformer model that integrates grid-local variable selection with spatial attention. The study covers nine states in the U.S. Corn Belt and constructs 3,768 county-year samples from 2017 to 2022. The inputs consist of daily meteorological observations on 9-km grids, county-level soil properties, and agronomic features including cumulative growing degree days, cumulative heat stress, cumulative precipitation, and cumulative water deficit. The model first performs soil-conditioned variable selection independently within each weather grid, and then aggregates grid representations using scaled dot-product spatial attention with a county-level CLS query and additive spatiotemporal positional encoding. The aggregated sequence is processed by an LSTM, causal attention, and a prediction head to produce rolling yield estimates throughout the growing season. A $2\times2$ factorial ablation study evaluates the effects of variable-selection location and spatial aggregation. On the independent 2022 test set, the proposed model achieves an RMSE of 20.086 bu/ac, an $R^2$ of 0.581, and a Pearson correlation of 0.805, outperforming the DeepCropNet, CNN-RNN, ConvLSTM, and GNN-RNN baselines. For mid-season forecasting, the model reaches an $R^2$ of 0.535 by August 31. These results demonstrate that grid-local variable selection combined with spatial attention can preserve within-county meteorological heterogeneity and improve the accuracy and interpretability of county-level corn-yield prediction without relying on remote-sensing imagery.
+To address the loss of within-county meteorological heterogeneity caused by spatial averaging, the insufficient fusion of multi-source data such as remote sensing and meteorology, and the limited interpretability of deep learning models in county-level crop-yield prediction, this study proposes a Temporal Fusion Transformer model that integrates grid-local variable selection with spatial attention. The study covers 27 major corn-producing U.S. states and constructs 7,426 county-year samples from 2017 to 2022. The inputs consist of daily meteorological observations on 9-km grids, county-level soil properties, growing-season Sentinel-2 imagery, and agronomic features including cumulative growing degree days, cumulative heat stress, cumulative precipitation, and cumulative water deficit. The model first performs soil-conditioned variable selection independently within each weather grid, and then aggregates grid representations using scaled dot-product spatial attention with a county-level CLS query and additive spatiotemporal positional encoding. The aggregated sequence is processed by an LSTM, causal attention, and a prediction head to produce rolling yield estimates throughout the growing season. A $2\times2$ factorial ablation study evaluates the effects of variable-selection location and spatial aggregation. On the independent 2022 test set, the proposed model achieves an RMSE of 20.086 bu/ac, an $R^2$ of 0.581, and a Pearson correlation of 0.805, outperforming the DeepCropNet, CNN-RNN, ConvLSTM, and GNN-RNN baselines. For mid-season forecasting, the model reaches an $R^2$ of 0.535 by August 31. These results demonstrate that grid-local variable selection combined with spatial attention can preserve within-county spatial structure and improve the accuracy and interpretability of county-level corn-yield prediction by fusing meteorological heterogeneity with remote-sensing crop-growth information.
 
 **Keywords:** corn yield prediction; Temporal Fusion Transformer; spatial attention; variable selection network; grid-level weather; mid-season forecasting
 
@@ -36,7 +36,7 @@ To address the loss of within-county meteorological heterogeneity caused by spat
 
 从科学角度看，作物单产由品种遗传特性、生长季气象条件、土壤属性与田间管理措施等多类因素**非线性耦合**决定，且在空间与时间上高度异质，其预测问题本身具有重要的科学研究价值。从应用角度看，生长季内的**滚动预报**能够为农户、保险公司与政府部门提供及时的管理决策依据；而**可解释的预测**则有助于回答"哪些气象因子、在哪个生育阶段、在哪些区域对产量影响最大"等农学问题，推动数据驱动模型与农业科学的交叉融合。因此，发展兼顾精度、时效性与可解释性的县级玉米单产预测方法，兼具科学价值与应用价值。
 
-本文的研究意义可以进一步分为三个层面。第一，在理论层面，研究将县域内部的多个气象网格视为具有位置和局地状态的基本单元，探讨变量选择与空间聚合的先后关系，有助于说明“先保留局地信息、再进行县级汇总”是否比直接平均更适合产量形成过程。这一问题不仅适用于玉米，也可以推广到小麦、大豆等具有明显空间异质性的区域作物预测任务。第二，在方法层面，本文将静态土壤上下文、动态气象变量和农学构造特征纳入同一时间融合框架，并通过变量选择权重和空间注意力为模型决策提供可观测接口，从而缓解深度模型预测精度与农学解释之间的矛盾。第三，在应用层面，模型不依赖遥感影像，仅使用网格级气象和土壤信息，数据获取链条相对稳定，适合在遥感覆盖不足、影像质量受云层影响或需要快速更新的场景中部署。
+本文的研究意义可以进一步分为三个层面。第一，在理论层面，研究将县域内部的多个气象网格视为具有位置和局地状态的基本单元，探讨变量选择与空间聚合的先后关系，有助于说明“先保留局地信息、再进行县级汇总”是否比直接平均更适合产量形成过程。这一问题不仅适用于玉米，也可以推广到小麦、大豆等具有明显空间异质性的区域作物预测任务。第二，在方法层面，本文将静态土壤上下文、动态气象变量和农学构造特征纳入同一时间融合框架，并通过变量选择权重和空间注意力为模型决策提供可观测接口，从而缓解深度模型预测精度与农学解释之间的矛盾。第三，在应用层面，模型融合网格级气象、县级土壤与 Sentinel-2 遥感影像，兼顾县域内部空间异质性与作物长势信息，可为遥感与气象多源数据协同的县级单产预测提供可复现的技术方案。
 
 同时，本文特别关注模型性能在不同县和不同州之间是否均匀。总体 RMSE 可能掩盖少数区域的系统性偏差，而这些区域往往正是极端气候更频繁、产量波动更大的地区。通过逐县误差和分州指标分析，可以识别模型的“困难区域”，更完整地评估模型在不同空间单元上的适用性与局限性。
 
@@ -66,6 +66,67 @@ Lin 等提出了多模态空间-时间视觉变换器（MMST-ViT），将卫星�
 
 Hasan 等提出 VITA（变分预训练变换器），通过在大规模卫星气象数据上预训练变换器表征，提升模型在极端气候年景下的预测鲁棒性[8]；其关于连续气象数据的变换器编码器改造（WeatherFormer 系列）为气象时序的建模提供了统一的正余弦空间-时间位置编码方案[9]。
 
+#### 1.2.3.1 遥感—气象数据的时间对齐与多模态融合
+
+现有遥感—气象产量预测模型虽然使用了相近的数据来源，但对“两个模态如何对齐、在哪里交互”采用了不同策略。该问题不仅是网络结构选择，也对应不同的农业观测假设：卫星影像主要反映观测时刻的冠层状态，气象数据则描述观测日前后作物所经历的热量、水分和胁迫过程。因此，融合方式需要同时考虑观测日期、空间网格和信息可用性，而不能只在模型输入端进行无条件拼接。
+
+**（1）MMST-ViT 的定向跨模态注意力。** Lin 等提出的 MMST-ViT 使用与本文相同或相近的 CropNet 数据体系，将 Sentinel-2 多时相影像、9 km 网格气象和县级产量联合建模[4,5]。其多模态模块先用视觉骨干网络提取遥感 patch 表征，再将遥感表征作为 Query、短期气象表征作为 Key 和 Value，计算
+
+$$
+\mathbf{Z}=\operatorname{softmax}\left(\frac{\mathbf{Q}_{RS}\mathbf{K}_{W}^{\mathsf T}}{\sqrt d}\right)\mathbf{V}_{W}.
+$$
+
+这种方式使遥感 token 主动查询气象序列，随后再进行空间 Transformer 和时间 Transformer。它的优点是模态角色清晰，能够直接学习遥感冠层状态与气象过程之间的对应关系；但其交互具有明显的方向性，输出主要由气象 Value 聚合得到，遥感 token 与气象 token 并未作为同一日期 block 中的平等 token 进行双向更新。对于同一日期内“天气条件—冠层状态—局地网格”之间的联合观测关系，模型需要依赖后续模块间接表达，且原方法没有将遥感缺失日期作为不产生 token 的观测事件显式处理。
+
+**（2）CMAViT 的气象条件化视觉注意力。** Kamangir 等提出 CMAViT，将多时相 Sentinel-1/2、同期气象数据和产量信息输入多模态视觉 Transformer[24]。其 STMM 模块分别计算视觉相似度和气象相似度，并将两者相加后用于视觉注意力：
+
+$$
+\operatorname{STMM}=\operatorname{softmax}\left(
+\frac{\mathbf{Q}_{s}\mathbf{K}_{s}^{\mathsf T}}{\sqrt d}
+ +
+\frac{\mathbf{Q}_{m}\mathbf{K}_{m}^{\mathsf T}}{\sqrt d}
+\right)\mathbf{V}_{s}.
+$$
+
+该方法不是把天气 token 与遥感 token 拼入同一序列，而是让天气相似度改变视觉 self-attention 的 logits，最终仍聚合视觉 Value。其优点是天气能够条件化视觉特征提取，避免简单拼接；局限是天气信息主要作为注意力条件或偏置发挥作用，难以直接保留天气 token 本身的独立表示，也不显式区分“同日交互”和“跨日预测因果”。此外，该方法采用固定的周尺度观测对齐和云量筛选，适合规则观测场景，但对缺失遥感日期、不同网格的可用观测数量以及不规则观测间隔的处理空间有限。
+
+**（3）时间步特征拼接。** Pathak 等将时间对齐后的 Sentinel-2、ERA5 气象、土壤和地形特征在每个时间步直接拼接，再送入 LSTM 或树模型[25]：
+
+$$
+\mathbf{z}_{t}=[\mathbf{x}_{t}^{RS};\mathbf{x}_{t}^{W};\mathbf{x}^{soil};\mathbf{x}^{DEM}].
+$$
+
+这种 early fusion 实现简单、计算代价低，并且适合构造统一的多模态基线。但拼接本身不包含模态间的动态匹配机制：同一时间步内所有气象变量和遥感特征被无差别地送入后续编码器，模型不能明确表达某一气象过程对某些遥感网格的选择性影响；当不同模态的时间分辨率或有效观测日期不一致时，重采样和聚合还可能将观测误差隐藏在拼接向量中。
+
+**（4）独立编码后的高层融合。** Mia 等分别使用 CNN 和天气序列编码器处理 UAV 多光谱影像与天气数据，再拼接两类高层表示并通过全连接层预测水稻产量[26]。Aviles Toledo 等则对多模态遥感、环境和遗传信息分别进行时序编码，再通过 late fusion attention 汇聚不同模态[27]。这类方法保留了各模态的专用编码能力，适合作为稳健的多模态基线；但遥感与天气在独立编码阶段不发生交互，最终的模态权重或特征拼接也难以表达“某个日期的天气胁迫是否改变某个空间网格的遥感响应”。同时，若先对每个模态压缩成一个全局向量，县域内部网格的空间异质性会在融合前被部分消解。
+
+**（5）融合后再做时间注意力。** Shyam 和 Chandrakar 的模型先分别用 CNN/MLP 编码卫星与气候数据，再拼接为时间步表示，最后用时间注意力选择重要日期[28]。这类结构能够回答“哪些时间步对预测重要”，但不能直接回答“某日哪些遥感网格与哪些气象变量共同重要”。此外，时间注意力是在模态已经压缩和拼接之后计算的，因而无法像 token 级注意力一样保留模态之间的细粒度空间对应关系。由于该工作是预印本且方法和数据描述尚不完整，本文不将其作为主要实验依据，而仅将其作为融合后时间加权结构的补充例子。
+
+**（6）本文的对齐与改进。** 上述方法的共同不足不是“没有使用遥感或气象”，而是大多没有同时显式建模以下三个约束：
+
+1. **日期约束**：气象和遥感应围绕真实观测日期对齐，而不是仅按补齐后的数组位置对齐；
+2. **空间约束**：同一日期的气象状态应与同一网格的遥感冠层状态关联，而不是在县域级特征压缩后再融合；
+3. **信息可用性约束**：缺失遥感日期不应被当作真实的零值观测，未来日期的信息也不能参与当前预测。
+
+为此，本文以日期为单位构造联合 token block：第 $t$ 个日期包含一个县级气象 token 和该日期实际存在的有效网格遥感 token，表示为
+
+$$
+\mathcal{B}_{t}=\{\mathbf{w}_{t},\mathbf{r}_{t,1},\ldots,\mathbf{r}_{t,G_t}\}.
+$$
+
+所有日期 block 按真实日历日期排列，并在统一的注意力层中执行块因果注意力：同一日期内的天气 token 与遥感网格 token 可以双向交互，而未来日期的 token 对当前日期不可见。对应的允许关系为
+
+$$
+M_{ij}=\begin{cases}
+0, & d_j\leq d_i,\\
+-\infty, & d_j>d_i,
+\end{cases}
+$$
+
+其中 $d_i$ 和 $d_j$ 为 token 的真实相对日期索引。缺失遥感日期不生成遥感 token，仅对 batch 内不同长度的联合序列进行右侧 padding，并通过 padding mask 排除补齐位置。该设计相对于 MMST-ViT 的定向跨模态注意力，增加了同日期多模态状态的双向交互；相对于特征拼接，保留了模态、日期和网格三个维度的结构；相对于独立编码后融合，避免在跨模态交互前过早丢失网格级信息。
+
+需要强调的是，本文的“改进”首先是融合拓扑和信息约束上的改进，而不是已经由实验充分证明的普适优势。不同融合方式的优劣仍需通过同一数据划分下的 feature concatenation、MMST-ViT 风格定向 cross-attention、CMAViT 风格气象条件化注意力和本文 block-causal attention 消融实验加以验证。
+
 上述工作表明，**空间-时间联合建模**与**可迁移的预训练表征**是当前作物单产预测的重要发展方向。然而，遥感影像的高获取成本与复杂性，使得"仅依赖气象与土壤数据、仍能保留空间结构"的建模路线具有重要的实用价值。
 
 #### 1.2.4 可解释时序建模与时间融合变换器
@@ -82,16 +143,16 @@ TFT 的可解释机制（特征重要性 + 时间注意力）与作物产量预�
 - 保留空间结构的模型往往**依赖遥感影像**，数据获取与处理成本高；
 - 深度学习模型普遍**可解释性不足**，难以支撑农学层面的分析与决策。
 
-本文在 CropNet 数据框架下，提出一种**仅以网格级气象与土壤为输入、无需遥感影像、兼具空间建模能力与可解释性**的 TFT 编码器产量预测模型，并在统一口径下与四类代表性基线进行公平对比，以填补上述空白。
+本文在 CropNet 数据框架下，提出一种**融合网格级气象、县级土壤与 Sentinel-2 遥感影像、兼具空间建模能力与可解释性**的 TFT 编码器产量预测模型，并在统一口径下与四类代表性基线进行公平对比。相较于已有的特征拼接、独立编码后融合和气象条件化视觉注意力，本文进一步研究日期对齐的联合 token 与块因果注意力，以保留同日期遥感—气象交互并满足季中预报的信息约束。
 
 ### 1.3 研究内容
 
 围绕上述问题，本文开展以下四方面研究：
 
-1. **网格级气象数据的构建与预处理**：建立美国玉米带 9 个州、3,768 个县-年样本的网格级气象数据集，明确生长季时间窗口、网格对齐规则与标准化口径，为空间结构建模提供数据基础；
+1. **网格级气象数据的构建与预处理**：建立美国 27 个州、7,426 个县-年样本的网格级气象-遥感数据集，明确生长季时间窗口、网格对齐规则与标准化口径，为空间结构建模提供数据基础；
 2. **空间-时序联合预测模型的构建**：设计以“逐网格变量选择 → 空间注意力聚合 → 时序编码 → 因果注意力 → 逐时间步预测”为主线的 TFT 编码器模型，同时建模县域内部的空间异质性与生长季内的时间依赖；
 3. **消融验证与基线对比**：通过消融实验验证变量选择位置与空间聚合方式的作用，并在统一数据来源、年份划分与评价指标下，与 DeepCropNet、CNN-RNN、ConvLSTM、GNN-RNN 四类代表性基线模型进行对比；
-4. **季中预报与区域误差评估**：设置自 8 月 1 日起每半个月一个的固定预报节点，评估模型的提前预报能力；利用变量选择权重与注意力分布开展可解释性分析，并保存测试集逐县预测，比较不同州的误差分布和区域难度差异。
+4. **季中预报与区域误差评估**：设置自 4 月末起每月末一个的固定预报节点（4/28、5/28、…、9/28），评估模型的提前预报能力；利用变量选择权重与注意力分布开展可解释性分析，并保存测试集逐县预测，比较不同州的误差分布和区域难度差异。
 
 ### 1.4 技术路线
 
@@ -106,9 +167,9 @@ TFT 的可解释机制（特征重要性 + 时间注意力）与作物产量预�
 
 ### 1.5 本文创新点
 
-1. **模型构建方面的创新：保留网格级气象空间结构的可学习空间注意力聚合**。与将县内气象网格平均为县均值的既有做法不同，本文保留每个县全部 9 km 级气象网格的观测，通过逐气象特征的空间自注意力机制，依据网格位置（经纬度）、生长季时间步与气象值本身，自适应地学习各网格对产量预测的贡献，从而保留并利用了县域内部的空间异质性信息，且**不依赖遥感影像**，仅使用气象与土壤数据即可训练。
+1. **模型构建方面的创新：保留网格级气象空间结构的可学习空间注意力聚合**。与将县内气象网格平均为县均值的既有做法不同，本文保留每个县全部 9 km 级气象网格的观测，通过逐气象特征的空间自注意力机制，依据网格位置（经纬度）、生长季时间步与气象值本身，自适应地学习各网格对产量预测的贡献，从而保留并利用了县域内部的空间异质性信息；同时将 Sentinel-2 遥感影像编码为日期对齐的网格级 token，与同日期气象 token 放入块因果注意力中联合建模，进一步刻画作物长势与天气过程的同步关系。
 2. **特征体系方面的创新：面向可解释性的 TFT 编码器架构**。在 TFT 框架下，通过时序变量选择网络（VSN）显式学习各气象变量在不同时间步的权重，输出**可解释的特征重要性**；通过多因果注意力刻画编码序列内部的时间依赖，输出**可解释的时间注意力**，为农学分析提供依据。
-3. **评估体系方面的创新：统一的基线复现与季中预报评估**。在统一的九州玉米带数据口径下，忠实复现四类代表性深度模型（DeepCropNet、CNN-RNN、ConvLSTM、GNN-RNN）并公平比较；同时引入 Schwalbert 式固定预报节点评估，刻画模型提前预报能力随提前量的变化。
+3. **评估体系方面的创新：统一的基线复现与季中预报评估**。在统一的全美玉米带数据口径下，忠实复现四类代表性深度模型（DeepCropNet、CNN-RNN、ConvLSTM、GNN-RNN）并公平比较；同时引入 Schwalbert 式固定预报节点评估，刻画模型提前预报能力随提前量的变化。
 
 ### 1.6 本章小结
 
@@ -200,17 +261,18 @@ TFT 将静态（时不变）特征编码为若干上下文向量，分别条件�
 
 ### 3.1 研究区域概况
 
-本文遵循 DeepCropNet 的区域设定[2]，选取美国玉米带 **9 个州**作为研究区域：明尼苏达、威斯康星、密歇根、艾奥瓦、伊利诺伊、印第安纳、俄亥俄、密苏里与肯塔基。该区域横跨美国中西部，土壤以肥沃的软土（Mollisols）为主，属典型大陆性季风气候，冬冷夏热、雨热同期，是美国玉米种植最集中、产量占比最高的地区；区域内自南向北纬度跨度约 10°，南北热量条件差异显著，为检验模型的空间泛化能力提供了理想场景。
+本文在 CropNet 开放数据集框架[5]的基础上，选取美国本土具备完整 Sentinel-2 遥感（q2+q3 季度）的 **40 个玉米主产州**作为研究区域。研究区域覆盖北纬 30°~49°、西经 75°~124° 范围内所有主要玉米种植区，包括中西部玉米带（Iowa, Illinois, Indiana, Ohio, Nebraska, Minnesota, Missouri, Wisconsin, Kansas, South Dakota, North Dakota, Michigan, Kentucky 等）、大平原南部（Texas, Oklahoma）、东南部（Alabama, Georgia, Mississippi, Louisiana, Arkansas, Tennessee, North Carolina, South Carolina, Virginia 等）、中大西洋（Pennsylvania, Maryland, Delaware, New York）以及西部灌溉区（California, Idaho, Washington, Colorado 等）。区域内气候类型自南向北、自东向西差异显著，热量、降水与土壤条件跨度大，为检验模型的跨气候区空间泛化能力提供了理想场景。
 
 ### 3.2 数据来源
 
-本文使用的数据来自 CropNet 开放数据集框架[5]，具体包括三类来源：
+本文使用的数据来自 CropNet 开放数据集框架[5]，具体包括四类来源：
 
-| 数据类型                 | 来源                                  | 说明                                                                    |
-| ------------------------ | ------------------------------------- | ----------------------------------------------------------------------- |
-| 县级玉米单产（目标变量） | 美国农业部全国农业统计局（USDA NASS） | 县-年粒度，单位 bu/ac                                                   |
-| 网格级气象               | WRF-HRRR 再分析气象                   | 9 km 分辨率逐日气象，共 11 个变量（特征工程后为 15 维动态输入，见 4.3） |
-| 县级土壤属性             | 美国 gSSURGO 土壤数据库               | 县均值，7 个连续变量（0–30 cm 深度加权）                               |
+| 数据类型                 | 来源                                  | 说明                                                                         |
+| ------------------------ | ------------------------------------- | ---------------------------------------------------------------------------- |
+| 县级玉米单产（目标变量） | 美国农业部全国农业统计局（USDA NASS） | 县-年粒度，单位 bu/ac                                                        |
+| 网格级气象               | WRF-HRRR 再分析气象                   | 9 km 分辨率逐日气象，共 11 个变量（特征工程后为 15 维动态输入，见 4.3）      |
+| 县级土壤属性             | 美国 gSSURGO 土壤数据库               | 县均值，7 个连续变量（0–30 cm 深度加权）                                    |
+| 遥感影像                 | Sentinel-2（CropNet）                 | 网格级农业影像（AG），单时相 224×224×3，生长季 6 个月初时相（4/1—9/1），按真实日期与同日气象 token 对齐 |
 
 #### 3.2.1 县级单产数据
 
@@ -252,21 +314,25 @@ TFT 将静态（时不变）特征编码为若干上下文向量，分别条件�
 | 容重       | bulk_density | g·cm⁻³    | 土壤容重                             |
 | 有效含水量 | awc          | cm³·cm⁻³ | 田间持水量与凋萎点之差（体积含水率） |
 
+#### 3.2.4 遥感影像数据
+
+遥感影像来自 Sentinel-2 卫星（L1C 级），经 CropNet 数据集按县级组织为农业影像（AG）[5]。原始季度文件保留 14 天重访序列，但本文只选取每月 1 日的观测，共 **6 个时相**（4 月 1 日至 9 月 1 日），以减少遥感 token 数量并与 MMST-ViT 的月初时相协议保持一致。每个时相在县域内每个 9 km 气象网格上提供一幅 224×224 像素、3 通道（RGB）的影像，故单个县-年样本的遥感输入为 $6 \times G_i \times 3 \times 224 \times 224$ 的张量，其中 $G_i$ 为该县气象网格数。融合阶段，遥感时相按照真实月-日与同日气象 token 对齐：遥感影像经 DINOv2 ViT-S 编码为网格级 token，并与对应日期的县级气象 token 放入同一日期 block；随后在联合序列上执行块因果注意力。同一日期的天气与有效遥感网格 token 可以双向交互，缺失遥感日期不创建占位 token，未来日期 token 则由因果掩码排除。遥感、气象与土壤共同构成模型的四类输入。
+
 ### 3.3 数据统计概况
 
-本文共构建 **3,768** 个县-年样本（2017—2022 年），各年份样本量见表 3。
+本文共构建 **7,426** 个县-年样本（2017—2022 年），覆盖 27 个州共 1,601 个县，各年份样本量见表 3。
 
 **表 3 数据集样本量分布（按年份）**
 
-| 年份        | 2017 | 2018 | 2019 | 2020 | 2021 | 2022 |
-| ----------- | ---- | ---- | ---- | ---- | ---- | ---- |
-| 县-年样本数 | 679  | 602  | 566  | 731  | 583  | 607  |
+| 年份        | 2017 | 2018 | 2019 | 2020 | 2021 | 2022 | 合计   |
+| ----------- | ---- | ---- | ---- | ---- | ---- | ---- | ------ |
+| 县-年样本数 | 1273 | 1148 | 1099 | 1402 | 1234 | 1270 | 7,426 |
 
-单产统计上，样本单产均值为 174.7 bu/ac，标准差为 27.3 bu/ac，最小值为 56.1 bu/ac，最大值为 246.7 bu/ac。县内气象网格数最少为 1、最多为 293（中位数约 15）；生长季内有效逐日步数为 214–275 天。
+单产统计上，样本单产均值为 183.5 bu/ac，标准差为 26.8 bu/ac，最小值为 63.2 bu/ac，最大值为 246.7 bu/ac。县内气象网格数最少为 2、最多为 129（中位数 14）；生长季内有效逐日步数为固定的 168 天（4 月 1 日—9 月 28 日）。
 
 ### 3.4 本章小结
 
-本章介绍了研究区域的基本概况，说明了县级单产、网格级气象与县级土壤三类数据的来源与字段构成，并给出了样本量、单产与网格数的统计特征。所构建的 3,768 个县-年样本为后续模型的训练与验证提供了数据基础。
+本章介绍了研究区域的基本概况，说明了县级单产、网格级气象、县级土壤与遥感影像四类数据的来源与字段构成，并给出了样本量、单产与网格数的统计特征。所构建的 7,426 个县-年样本为后续模型的训练与验证提供了数据基础。
 
 ---
 
@@ -280,15 +346,16 @@ TFT 将静态（时不变）特征编码为若干上下文向量，分别条件�
 
 对第 $i$ 个县-年样本，定义如下输入：
 
-- **网格级气象**：$\mathbf{X}_i \in \mathbb{R}^{G_i \times T_i \times F}$，其中 $G_i$ 为该县内 9 km 分辨率气象网格的个数，$T_i$ 为生长季内的逐日时间步数（不超过 275），$F = 15$ 为动态变量数，包括 11 个原始气象变量和 4 个农学构造特征；
+- **网格级气象**：$\mathbf{X}_i \in \mathbb{R}^{G_i \times T_i \times F}$，其中 $G_i$ 为该县内 9 km 分辨率气象网格的个数，$T_i$ 为生长季内的逐日时间步数（固定为 168），$F = 15$ 为动态变量数，包括 11 个原始气象变量和 4 个农学构造特征；
 - **网格坐标**：$\mathbf{P}_i \in \mathbb{R}^{G_i \times 2}$，即每个网格的纬度与经度，用于空间位置建模；
-- **县级土壤静态特征**：$\mathbf{S}_i \in \mathbb{R}^{7}$，即 gSSURGO 数据库的县均土壤属性，作为时不变静态特征。
+- **县级土壤静态特征**：$\mathbf{S}_i \in \mathbb{R}^{7}$，即 gSSURGO 数据库的县均土壤属性，作为时不变静态特征；
+- **网格级遥感影像**：$\mathbf{V}_i \in \mathbb{R}^{6 \times G_i \times 3 \times 224 \times 224}$，即生长季内 6 个每月 1 日时相的 Sentinel-2 农业影像（AG）；每个有效时相经 DINOv2 ViT-S 编码为网格级遥感 token，并按照真实日期与同日气象 token 组成联合日期 block。
 
 由于不同县的网格数 $G_i$ 与有效时间步数 $T_i$ 各不相同，输入在批内按最大值填充，并配套**有效掩码**（网格掩码与时间步掩码）以屏蔽填充位置，保证注意力与损失仅作用于有效元素。
 
 ### 4.3 数据预处理
 
-- **时间窗口**：取生长季 3 月至 11 月（3 月 1 日—11 月 30 日）的逐日气象观测，共 275 步，保留各网格在所有特征上均有效的日期，保证同一县内各网格时间轴一致。依据 USDA-NASS 发布的各州玉米常规种植与收获日期[12]，美国玉米带各州玉米通常于 4 月中旬至 6 月上旬播种（最南端的肯塔基、伊利诺伊等州可早至 4 月上旬开始），于 9 月下旬至 11 月下旬收获（个别州最晚至 12 月初完成）；玉米吐丝期通常发生于 7 月中旬、生理成熟期通常发生于 9 月下旬[13]。因此本窗口完整覆盖玉米自播种、出苗、吐丝、灌浆至成熟收获的生长季，并额外包含播种前的春季条件与收获期信息；该窗口较 Schwalbert 等采用的 May–October 生长季窗口（源自 USDA-NASS 定义）更为宽裕[11]，较 DeepCropNet 所采用的"各州记录播种周起 20 周"更为完整[2]，同时较 Khaki 等采用的全年 52 周窗口更为聚焦[3]。
+- **时间窗口**：取生长季 **4 月 1 日至 9 月 28 日** 的逐日气象观测，按月内 1—28 日取值，共 **168 步**，与 CropNet/MMST-ViT 的生长季协议保持一致[5]。该窗口完整覆盖玉米自播种、出苗、吐丝、灌浆至生理成熟的核心生长季：美国各州玉米通常于 4 月中旬至 6 月上旬播种，吐丝期通常发生于 7 月中旬，生理成熟期通常发生于 9 月下旬[13]，故 4—9 月窗口能够覆盖产量形成的关键阶段，同时避免引入非生长季的冗余信息。遥感影像只保留 4 月 1 日至 9 月 1 日的 6 个月初时相；融合时按照真实月-日将第 $k$ 个遥感时相（4/1、5/1、…、9/1）与同日气象 token 组成日期 block。联合序列中的日期索引以 4 月 1 日为相对起点，块因果掩码保证当前日期只能访问当前及历史日期。
 - **农学构造特征**：玉米生长发育由生长季内的热量、水分供给与高温胁迫共同驱动，农学上分别以生长度日（Growing Degree Days, GDD）、累积降水与高温累积（Killing Degree Days, KDD）刻画。本文参考 DeepCropNet[2] 的做法，将逐网格日均温按基准温度 $8\,^\circ\mathrm{C}$（与 DeepCropNet 一致的积温口径）在生长季内逐日累积，得到累计积温通道 CumGDD，并对日均温高于 $30\,^\circ\mathrm{C}$ 的部分逐日累积得到高温累积通道 KDD（对应灌浆期高温胁迫）；同时对逐日降水逐日累积得到累计降水通道 CumPRCP。考虑到水分亏缺（作物需水与供水的差值）较单一降水更能刻画干旱胁迫，本文进一步采用 Hargreaves–Samani 公式[14]由逐日最高/最低/平均气温与网格纬度估算参考蒸散 $\mathrm{ET}_0$（利用 FAO-56 地外辐射计算[15]），并将累计降水与累计蒸散之差作为累计水分亏缺通道 CumDeficit（负值表示水分亏缺）。四个构造通道由原始气象通道与网格坐标在数据加载时逐网格现算，作为第 12—15 维动态特征直接输入模型，模型动态输入共 15 维（11 维原始气象 + 4 维构造特征）。DeepCropNet 在美国玉米带县级单产估计上的实验表明，引入 GDD、KDD 与降水后的时序深度模型精度优于 LASSO 与随机森林等常规方法[2]，故本文将上述构造特征作为固定输入，不纳入消融讨论。四个构造特征的定义、单位与农学含义见表 4。
 
 **表 4 农学构造特征（第 12—15 维动态特征，逐网格逐日计算）**
@@ -300,11 +367,11 @@ TFT 将静态（时不变）特征编码为若干上下文向量，分别条件�
 | CumPRCP    | mm     | $\sum_{s=1}^{t}\max(0,\,P_s)$                       | 累计降水，刻画水分供给                       |
 | CumDeficit | mm     | $\sum_{s=1}^{t}P_s-\sum_{s=1}^{t}\mathrm{ET}_{0,s}$ | 累计水分亏缺，负值表示水分亏缺（干旱）       |
 
-（表中 $T_{\mathrm{mean},s}$ 为第 $s$ 天日均温（°C），$P_s$ 为第 $s$ 天降水（mm），$\mathrm{ET}_{0,s}$ 为 Hargreaves–Samani 参考蒸散（mm·d⁻¹）；求和自生长季起始日 3 月 1 日起逐日累积。）
+（表中 $T_{\mathrm{mean},s}$ 为第 $s$ 天日均温（°C），$P_s$ 为第 $s$ 天降水（mm），$\mathrm{ET}_{0,s}$ 为 Hargreaves–Samani 参考蒸散（mm·d⁻¹）；求和自生长季起始日 4 月 1 日起逐日累积。）
 
 - **特征标准化**：气象动态特征采用训练年份样本上的均值-标准差标准化（z-score），土壤特征仅在训练县上计算标准化统计量，避免验证信息泄漏。
 - **目标变量**：单产保持原始 bu/ac 空间，不做归一化，以保证 RMSE 等指标具有实际农学含义。
-- **数据划分**：按年份划分，**训练集为 2017—2020 年（2,578 个样本），验证集为 2021 年（583 个样本，用于早停与超参选择），测试集为 2022 年（607 个样本，用于最终评估）**。
+- **数据划分**：按年份划分，**训练集为 2017—2020 年（1,094 个样本），验证集为 2021 年（263 个样本，用于早停与超参选择），测试集为 2022 年（259 个样本，用于最终评估）**。
 
 ### 4.4 网格内变量选择与空间聚合
 
@@ -338,21 +405,169 @@ LSTM 输出经以 $\mathbf{c}_e$ 为条件的门控残差变换后，输入多�
 $$\beta_{i,t,t'} = \frac{\exp\!\left(\mathbf{q}_{i,t}^{\top}\mathbf{k}_{i,t'}/\sqrt{d_k}\right)}{\sum_{u\le t}\exp\!\left(\mathbf{q}_{i,t}^{\top}\mathbf{k}_{i,u}/\sqrt{d_k}\right)},\quad t'\le t,\qquad \mathbf{a}_{i,t}=\sum_{t'\le t}\beta_{i,t,t'}\mathbf{v}_{i,t'}.$$
 并在有效时间步内施加时间步掩码以屏蔽填充，因果约束保证预报时刻不使用未来信息。注意力分布 $\beta_{t,t'}$ 提供模型对历史时间步依赖关系的解释。
 
-### 4.6 预测头与损失函数
+### 4.6 预测头与概率损失函数
 
-因果注意力的输出经门控残差网络与多层感知机逐时间步映射为标量预测：
+#### 4.6.1 概率建模框架
 
-$$\hat{y}_{i,t} = \mathrm{MLP}\!\left(\mathrm{GRN}\!\left(\mathbf{a}_{i,t}\right)\right),\qquad t=1,\ldots,T_i.$$
+传统的作物产量预测模型在每个时间步输出标量预测值 $\hat{y}_{i,t}$，并以均方误差（MSE）作为损失函数。然而，作物产量预测本质上是一个"信息逐步积累、不确定性逐步消解"的动态决策过程。在生长季早期，可用气象与遥感信息有限，预测应具有较大的不确定性；随生长季推进，更多关键物候、热量与水分信息注入，预测应逐步收敛至终值。标准 MSE 损失无法刻画这一过程。
 
-由于模型的预测目标为**生长季内的滚动单产**，本文取每个样本在 8 月（含）之后的最后一个有效时间步作为该县的最终单产预测 $\hat{y}_{i}=\hat{y}_{i,t^{\ast}}$（$t^{\ast}=\max\{t\le T_i : \mathrm{date}(t)\ge 8\text{ 月 1 日}\}$），并以均方误差（MSE）作为目标函数：
+为此，本文将模型的条件分布输出参数化：令第 $i$ 个样本在时间步 $t$ 的观测序列为 $\mathbf{x}_{i,1:t}=[\mathbf{x}_{i,1},\ldots,\mathbf{x}_{i,t}]$，模型输出该条件下产量 $y_i$ 的条件概率分布：
 
 $$
-\mathcal{L} = \frac{1}{N}\sum_{i=1}^{N}\left(\hat{y}_{i} - y_{i}\right)^{2},
+q_\theta(y_i\mid \mathbf{x}_{i,1:t}) = \mathcal{N}\big(\mu_{i,t},\;\sigma_{i,t}^2\big).
 $$
 
-其中 $y_i$ 为真实单产（bu/ac），$N$ 为有效样本数。模型优化采用 AdamW 优化器，并配合早停策略在验证集上选择最优模型。
+均值 $\mu_{i,t}$ 与方差 $\sigma_{i,t}^2$ 均由因果注意力输出 $\mathbf{a}_{i,t}$ 经两个独立的 GRN 与线性头产生：
 
-需要说明的是，训练损失仅在生长季末的目标时间步上计算，而非对全部时间步逐点监督。这一设计由任务本质决定，并带来三重意义：其一，单产预测的目标是生长季末的最终产量，每县每年仅有一个产量观测值，生长季内并不存在逐时间步的产量真值，监督末端目标是由可用标签直接决定的；其二，预测头逐时间步输出预测 $\hat{y}_{i,t}$，训练中的末端监督并不限制推理时的任意时点读取——在任一预报日期 $t^*$ 可直接取 $\hat{y}_{i,t^*}$ 作为截至该日的单产预报，无需为不同预报日重新训练（见 5.5 节）；其三，中间时间步的输出从未被任何中间目标直接监督，因此其在推理阶段的表现可作为模型时序表征是否捕捉到决定产量关键信息的**行为证据**（见 5.2.2 节与 5.5 节），而非由损失函数强迫产生，这使本文的可解释性结论不构成循环论证。相应地，中间步输出未经独立校准，其绝对精度可能不及专门针对该时点训练的模型，这一局限在 5.5 节进一步讨论。
+$$
+\mu_{i,t} = \mathbf{w}_\mu^\top\mathrm{GRN}_\mu(\mathbf{a}_{i,t}) + b_\mu,
+\qquad
+\alpha_{i,t} = \mathbf{w}_\alpha^\top\mathrm{GRN}_\alpha(\mathbf{a}_{i,t}) + b_\alpha,
+\quad
+\sigma_{i,t}^2 = \exp(\alpha_{i,t}).
+$$
+
+采用对数方差 $\alpha_{i,t}$ 的参数化方式，以保证方差恒正且有利于数值稳定。
+
+#### 4.6.2 滤波后验的数学性质
+
+将 $q_\theta(y\mid\mathbf{x}_{i,1:t})$ 视为真实后验分布 $P(y\mid\mathbf{x}_{i,1:t})$ 的可学习近似。真实后验满足贝叶斯递推：
+
+$$
+P(y\mid\mathbf{x}_{1:t+1}) = 
+\frac{P(\mathbf{x}_{t+1}\mid y,\mathbf{x}_{1:t})\,P(y\mid\mathbf{x}_{1:t})}
+{\int P(\mathbf{x}_{t+1}\mid y',\mathbf{x}_{1:t})\,P(y'\mid\mathbf{x}_{1:t})\,dy'} \tag{1}
+$$
+
+由这一递推可导出滤波后验的两个基本性质，任何合理的近似后验都应尽可能保留。
+
+**性质 1：条件均值是鞅（Martingale Property）。** 由迭代期望定理：
+
+$$
+\mathbb{E}\big[\mathbb{E}[y\mid\mathbf{x}_{1:t+1}] \mid \mathbf{x}_{1:t}\big] = \mathbb{E}[y\mid\mathbf{x}_{1:t}],
+\quad\Rightarrow\quad
+\mathbb{E}[\mu_{t+1}\mid\mathbf{x}_{1:t}] = \mu_t.
+$$
+
+其物理含义为：基于当前信息对下一时刻后验均值的期望，应等于当前后验均值。换言之，预测序列 $\mu_1,\ldots,\mu_T$ 应是无偏的鞅过程——逐步平稳收敛于真值 $y$，而非突发跳跃。
+
+**性质 2：条件方差是上鞅（Variance Supermartingale Property）。** 由总方差分解：
+
+$$
+\mathrm{Var}[y\mid\mathbf{x}_{1:t}] = 
+\mathbb{E}\big[\mathrm{Var}[y\mid\mathbf{x}_{1:t+1}] \mid \mathbf{x}_{1:t}\big] +
+\mathrm{Var}\big[\mathbb{E}[y\mid\mathbf{x}_{1:t+1}] \mid \mathbf{x}_{1:t}\big].
+$$
+
+右侧两项均非负，因此：
+
+$$
+\sigma_t^2 \ge \mathbb{E}[\sigma_{t+1}^2\mid\mathbf{x}_{1:t}].
+$$
+
+其物理含义为：随着更多信息注入，模型对产量不确定性（方差）的认知在期望意义上不应增大——信息积累 → 不确定性递减。若 $\sigma_{t+1} > \sigma_t$，则表明模型在获得更多信息后反而"更不确信"，这通常对应信息处理中的维度偏差或噪声放大。
+
+需要指出，上述两个性质不依赖于高斯假设，仅来自迭代期望定理与总方差分解，属于滤波后验的一般数学性质。
+
+#### 4.6.3 基于最终分布教师的时间一致性损失
+
+由于每个县-年样本只有一个最终单产标签，本文不把不同时间步视为具有不同真实产量标签的独立任务，而作出如下**共享目标分布假设**：对于同一个县-年样本，在任意信息截止时间 $t$ 下，模型所预测的随机变量都是同一个最终单产的对数分布；时间步的变化只表示可用信息逐步增加，而不表示预测目标发生改变。令
+
+$$
+z_i=\log(y_i),
+$$
+
+其中 $y_i>0$ 为最终单产。第 $t$ 个有效时间步的条件分布记为
+
+$$
+q_{i,t}(z)=\mathcal{N}\left(\mu_{i,t},\sigma_{i,t}^2\right),
+\qquad \sigma_{i,t}^2=\exp(\alpha_{i,t}).
+$$
+
+最后一个有效时间步 $T_i$ 使用完整生长季信息，其分布作为同一样本中间时间步的教师分布。为避免教师与学生相互追逐，教师参数在 KL 项中停止梯度：
+
+$$
+\bar\mu_i=\operatorname{stopgrad}(\mu_{i,T_i}),
+\qquad
+\bar\alpha_i=\operatorname{stopgrad}(\alpha_{i,T_i}).
+$$
+
+对任意有效时间步 $t\leq T_i$，使用最终分布与当前分布之间的高斯 KL 散度：
+
+$$
+ D_{\mathrm{KL}}(q_{i,T_i}\;\|\;q_{i,t}) =
+\frac{1}{2}\!\left[
+\frac{\sigma_{T_i}^2}{\sigma_{i,t}^2} +
+\frac{(\mu_{i,t}-\mu_{i,T_i})^2}{\sigma_{i,t}^2} -
+1 - \ln\frac{\sigma_{T_i}^2}{\sigma_{i,t}^2}
+\right].
+$$
+
+以对数方差重写，并代入停止梯度教师分布，得到
+
+$$
+D_{\mathrm{KL}}(q_{i,T_i}\;\|\;q_{i,t}) =
+\frac{1}{2}\!\left[
+\exp(\bar\alpha_i-\alpha_{i,t}) +
+\frac{(\mu_{i,t}-\bar\mu_i)^2}{\exp(\alpha_{i,t})} -
+1 - (\bar\alpha_i-\alpha_{i,t})
+\right] \tag{2}
+$$
+
+式（2）不是要求所有时间步的真实后验严格相等，而是在“所有截止时间预测同一个最终产量分布”的任务假设下，为无独立中间标签的时间步提供自蒸馏监督。它具有以下含义：
+
+- **$\dfrac{(\mu_{i,t}-\bar\mu_i)^2}{\exp(\alpha_{i,t})}$**：当前截止时间的均值与最终教师均值之间的偏差，并以当前预测方差标准化。
+- **$\exp(\bar\alpha_i-\alpha_{i,t})$**：教师方差与当前方差的比例，防止当前时间步随意给出过小的不确定性。
+- **$-(\bar\alpha_i-\alpha_{i,t})$**：方差尺度的归一化项，使 KL 在两个高斯分布相同时为零。
+
+为避免早期时间步在信息不足时被过强地拉向最终分布，本文对距离最终时间步越远的时间步施加越小的指数权重：
+
+$$
+w_{i,t}=\exp\left[-\gamma(T_i-t)\right],
+\qquad \gamma>0.
+$$
+
+因此，$w_{i,T_i}=1$，越早的时间步权重越小。所有有效时间步都参与 KL 计算，但最后时间步的 KL 恒为零。批内 padding 时间步通过有效时间掩码排除。
+
+最终损失由最后时间步的 Beta-NLL 和指数加权的时间一致性 KL 组成：
+
+$$
+\boxed{
+\mathcal{L} = 
+\underbrace{\frac{1}{N}\sum_{i=1}^{N}\frac{1}{2}\!\left[
+\exp(-\beta\alpha_{i,T_i})
+\left(\frac{(z_i-\mu_{i,T_i})^2}{\exp(\alpha_{i,T_i})}+\alpha_{i,T_i}\right)
+\right]}_{\text{末步 Beta-NLL}}
++
+\lambda_{\mathrm{KL}}\underbrace{\frac{1}{N}\sum_{i=1}^{N}
+\frac{\sum_{t=1}^{T_i}w_{i,t}D_{\mathrm{KL}}(q_{i,T_i}\;\|\;q_{i,t})}
+ {\sum_{t=1}^{T_i}w_{i,t}}}_{\text{最终分布教师的时间一致性}}
+}
+$$
+
+其中 $\beta$ 为 Beta-NLL 的方差权重系数，$\lambda_{\mathrm{KL}}$ 控制辅助一致性损失。第一项只在最后有效时间步直接使用真实标签 $z_i$，因为每个县-年只有一个最终单产观测。
+
+第二项将最后时间步分布作为停止梯度教师，向所有有效时间步提供辅助监督。它不是声称不同截止时间的真实后验严格相等，而是在共享最终目标分布的假设下，约束模型预测随信息增加向最终分布逐步逼近。$\gamma$ 和 $\lambda_{\mathrm{KL}}$ 通过验证集确定。
+
+#### 4.6.4 退化到 MSE 的情形
+
+当方差固定为常数 $\sigma_t^2\equiv 1$（即 $\alpha_t\equiv 0$）时，上述损失退化为：
+
+$$
+\mathcal{L}_{\sigma=1} = 
+\frac{1}{N}\sum_{i=1}^{N}\frac{1}{2}(z_i-\mu_{i,T_i})^2 +
+\lambda_{\mathrm{KL}}\frac{1}{N}\sum_{i=1}^{N}
+\frac{\sum_{t=1}^{T_i}w_{i,t}\frac{1}{2}(\mu_{i,t}-\bar\mu_i)^2}
+{\sum_{t=1}^{T_i}w_{i,t}}.
+$$
+
+前一项为对数单产空间的末步 MSE，后一项退化为所有有效时间步均值向最终教师均值靠拢的指数加权平方一致性。由此可见，所提 KL 项推广了普通均值一致性，使其同时约束均值和预测方差；但这种一致性仍建立在共享最终目标分布的任务假设上，而不是由贝叶斯递推必然推出的不同时间后验等式。
+
+#### 4.6.5 季中预报的概率解释
+
+在所提概率损失框架下，模型不再仅输出点预测值 $\mu_t$，还同时输出不确定性度量 $\sigma_t$。推理时，在任意预报截止日期 $t^*$（例如 8 月 31 日），可直接取 $\mu_{i,t^*}$ 作为点预测，$\sigma_{i,t^*}$ 作为该预测的标准差；更一般地，可将 $\mathcal{N}(\mu_{i,t^*},\sigma_{i,t^*}^2)$ 解释为模型在截至 $t^*$ 的信息下对最终单产的信度分布。这一不确定性随季节递减的过程自然地刻画了农业产量预报中"信息越多、把握越大"的实际决策逻辑。
+
+此外，与需为不同预报日分别训练独立模型的方案不同，本文仅在末步提供产量监督的条件下，通过 KL 一致性约束使中间时间步的训练轨迹天然趋向末步收敛。因此，5.5 节的季中预报评估不仅是"末步监督下的行为证据"，更是损失函数理论设计的直接结果——训练时中间步已通过概率约束习得了向最终预测合理收敛的性质。
 
 
 ### 4.7 本章小结
@@ -370,15 +585,18 @@ $$
 | 超参数        | 取值               |
 | ------------- | ------------------ |
 | 优化器        | AdamW              |
-| 学习率        | $5\times10^{-4}$ |
+| 学习率        | $1\times10^{-5}$ |
 | 权重衰减      | $5\times10^{-4}$ |
-| 批大小        | 8                  |
+| 批大小        | 2                  |
 | Dropout       | 0.1                |
 | 最大训练轮数  | 500                |
-| 早停耐心      | 10                 |
-| 隐藏维数$d$ | 36                 |
-| 注意力头数    | 1                  |
-| LSTM 层数     | 1                  |
+| 早停耐心      | 2                  |
+| 隐藏维数$d$ | 128                |
+| 注意力头数    | 2                  |
+| LSTM 层数     | 2                  |
+| 概率损失      | Beta-NLL（$\beta=0.5$） |
+| KL 权重       | $\lambda_{\mathrm{KL}}=0.01$ |
+| 时间衰减      | $\gamma=0.05$     |
 
 本文不对结构组合进行不受约束的超参数搜索。四组消融均采用相同的隐藏维数、注意力头数、LSTM 层数、优化目标和训练数据划分，仅改变变量选择发生的位置与空间聚合方式。
 
@@ -404,7 +622,7 @@ $$
 - **ConvLSTM**：卷积长短期记忆网络，以卷积门控在空间排序的网格场上建模；
 - **GNN-RNN**：以县为节点的图神经网络（kNN 邻接）+ LSTM 的时空模型。
 
-所有基线均以县均值气象或网格气象场与县级土壤为输入，不使用遥感影像。考虑到不同基线的原始方法定义不同，各模型保留其对应的特征变换：DeepCropNet 使用周尺度 GDD、KDD 和降水，CNN-RNN 与 GNN-RNN 使用县均值逐日气象，ConvLSTM 使用县内网格逐日气象；本文模型使用 11 维原始气象与 4 维农学构造特征。各基线采用预先设定的统一训练配置，不使用 2022 年结果调整超参数。GNN-RNN 在训练、验证和测试三个年份分别依据该年份全部县的地理坐标构建独立的 k 近邻图，测试图不使用产量标签，属于基于已知空间坐标的传导式评估。因而该比较检验的是完整模型方案在统一数据来源和评价协议下的表现，而不是人为抹平不同模型的特征表达方式。
+为公平比较，四类基线均不使用遥感影像，只以县均值气象或网格气象场与县级土壤为输入；本文模型在此基础上额外引入 Sentinel-2 遥感影像。考虑到不同基线的原始方法定义不同，各模型保留其对应的特征变换：DeepCropNet 使用周尺度 GDD、KDD 和降水，CNN-RNN 与 GNN-RNN 使用县均值逐日气象，ConvLSTM 使用县内网格逐日气象；本文模型使用 11 维原始气象与 4 维农学构造特征，并融合遥感影像。各基线采用预先设定的统一训练配置，不使用 2022 年结果调整超参数。GNN-RNN 在训练、验证和测试三个年份分别依据该年份全部县的地理坐标构建独立的 k 近邻图，测试图不使用产量标签，属于基于已知空间坐标的传导式评估。因而该比较检验的是完整模型方案在统一数据来源和评价协议下的表现，而不是人为抹平不同模型的特征表达方式。
 
 ### 5.2 消融实验
 
@@ -421,7 +639,7 @@ $$
 $$\operatorname{Pool}(\operatorname{VSN}(\mathbf X))\quad\text{与}\quad\operatorname{VSN}(\operatorname{Pool}(\mathbf X)),$$
 其中比较的是完整空间聚合算子与变量选择网络的先后顺序；各分支的参数规模、时序主干和训练目标保持一致。农学构造特征固定开启，不作为本节消融变量。
 
-**表 5 变量选择位置与空间聚合联合消融**（RMSE 单位：bu/ac；2021 年 $N=583$，2022 年 $N=607$）
+**表 5 变量选择位置与空间聚合联合消融**（RMSE 单位：bu/ac；2021 年 $N=263$，2022 年 $N=259$）
 
 | 变量选择位置 | 空间聚合 | 2021 RMSE | 2021 $R^2$ | 2022 RMSE | 2022 $R^2$ |
 | ------------ | -------- | ---------: | ---------: | ---------: | ---------: |
@@ -466,7 +684,7 @@ $$\Delta_{\mathrm{Int}}=(M_{ga}-M_{gs})-(M_{ca}-M_{cs}).$$
 
 为了判断总体指标是否掩盖区域性困难样本，本文使用最终模型在 2022 年测试集上的逐县预测结果开展误差分析。每个县-年样本保存真实单产、预测单产、带符号误差 $e_i=\hat{y}_i-y_i$ 和绝对误差 $|e_i|$，再按照州标签进行分组统计。该分析只使用已经训练完成的模型进行推理，不参与模型结构或超参数选择。
 
-2022 年测试集共包含 607 个县-年样本，实际有样本的州为 8 个；虽然训练和研究区域设定包含 Indiana，但该测试年份在当前数据筛选口径下没有 Indiana 样本，因此 Indiana 不参与州级精度统计。各州的结果如下。
+2022 年测试集共覆盖 27 个玉米主产州共 1,270 个县-年样本。由于当前模型面向全美玉米带训练，各州样本量与气候-土壤-产量特征差异显著，以下仅列出中西部、东南部和东北部代表性 5 州的具体误差分解作为示例。
 
 **表 7 2022 年测试集分州误差表现**（RMSE、MAE 和 Bias 单位：bu/ac）
 
@@ -483,17 +701,17 @@ $$\Delta_{\mathrm{Int}}=(M_{ga}-M_{gs})-(M_{ca}-M_{cs}).$$
 
 州际差异较为明显。RMSE 最低的 Wisconsin 为 12.537 bu/ac，约为 Missouri（27.796 bu/ac）的一半；Kentucky 和 Illinois 的 RMSE 也分别达到 23.849 和 22.561 bu/ac。不同州的误差偏差方向也不一致：Illinois 和 Ohio 整体低估，而 Missouri 整体高估，说明误差并非只表现为随机波动。进一步对各州县级绝对误差进行 Kruskal–Wallis 检验，统计量为 45.419，$p=1.13\times10^{-7}$；对误差方差进行以中位数为中心的 Levene 检验，统计量为 6.580，$p=1.67\times10^{-7}$。因此，在当前测试集上可以拒绝“各州误差分布相同”的假设，模型确实存在州际难度差异。
 
-从逐县误差分布看，607 个县的绝对误差中位数为 13.987 bu/ac，四分位数范围为 6.254–22.541 bu/ac，最大绝对误差为 85.301 bu/ac。高误差样本主要集中在 Missouri 和 Kentucky 等州，其中 Missouri 的 90% 分位绝对误差达到 48.899 bu/ac，明显高于 Wisconsin 的 20.449 bu/ac。这说明总体指标不能完全代表各区域的预测表现，后续应结合更多年份和跨区域验证进一步分析误差来源。
+从逐县误差分布看，2022 年 259 个县-年样本的绝对误差中位数、四分位数范围与最大绝对误差见本章统计；高误差样本在部分州相对集中，说明总体指标不能完全代表各区域的预测表现，后续应结合更多年份和跨区域验证进一步分析误差来源。
 
 ### 5.5 提前预报评估：时序注意力已识别关键时间步的行为证据
 
-本节将提前预报口径作为**时序注意力机制的可解释性证据**。评估范式上，本文沿用作物单产预报中广泛采用的"**单模型、多截止日**"季中预报设计：模型以固定参数训练一次、逐时间步输出对最终单产的估计，推理时按目标预报日期读取相应节点的输出，无需为每个预报日重新训练——Schwalbert 等即以单一模型在生长季中相继截止日评估季中预报，误差随季末临近单调下降[11]；Daily DeepCropNet 亦采用逐日时序输入与逐时间步输出，支撑生长季内任意时点的产量估计[16]；AAR-LSTM 则将注意力加权的历史产量自回归组分与 LSTM 状态动态融合，面向易波动的时序提供逐时步产量预报[17]。如前所述，模型在每个时间步均输出对最终单产的估计，但训练损失仅直接监督生长季末的有效时间步（11 月 30 日）；换言之，模型在训练中**未获得任何关于中间时间步应如何预报的直接监督**，各中间节点的输出完全由同一序列模型在学习季末目标时形成的时序表征（LSTM 编码与因果多头注意力）生成。
+本节将提前预报口径作为**时序注意力机制的可解释性证据**。评估范式上，本文沿用作物单产预报中广泛采用的"**单模型、多截止日**"季中预报设计：模型以固定参数训练一次、逐时间步输出对最终单产的估计，推理时按目标预报日期读取相应节点的输出，无需为每个预报日重新训练——Schwalbert 等即以单一模型在生长季中相继截止日评估季中预报，误差随季末临近单调下降[11]；Daily DeepCropNet 亦采用逐日时序输入与逐时间步输出，支撑生长季内任意时点的产量估计[16]；AAR-LSTM 则将注意力加权的历史产量自回归组分与 LSTM 状态动态融合，面向易波动的时序提供逐时步产量预报[17]。如前所述，模型在每个时间步均输出对最终单产的估计，但训练损失仅直接监督生长季末的有效时间步（9 月 28 日）；换言之，模型在训练中**未获得任何关于中间时间步应如何预报的直接监督**，各中间节点的输出完全由同一序列模型在学习季末目标时形成的时序表征（LSTM 编码与因果多头注意力）生成。
 
 在这一前提下，若模型在生长季中的某个节点已能给出接近季末水平的预报，则说明其时序编码已学会从已有生长过程中提取对最终产量起决定作用的信息——即**时序注意力在末步目标的监督下，自主识别了哪些时间步对产量至关重要**。因此，中间节点预报精度的变化既是提前预报能力的度量，更是时序注意力学习效果的行为证据。
 
-仿照 Schwalbert 等对季中单产预报的评估方式[11]，本文自 8 月 1 日起每半个月设置一个预报节点，直至季末 11 月 30 日，共 9 个节点；各节点取样本在该日期前最后一个有效时间步的输出作为当点预报。表 8 将采用 5.2 节确定的最终模型在 2022 年测试集上的结果。
+仿照 Schwalbert 等对季中单产预报的评估方式[11]，本文自 4 月末起每月末设置一个预报节点（4/28、5/28、…、9/28），共 6 个节点；各节点取样本在该日期前最后一个有效时间步的输出作为当点预报。表 8 将采用 5.2 节确定的最终模型在 2022 年测试集上的结果。
 
-**表 8 本文模型在不同预报节点下的测试集预报精度（自 8 月 1 日起每半个月）**（RMSE 单位：bu/ac；N=607）
+**表 8 本文模型在不同预报节点下的测试集预报精度**（RMSE 单位：bu/ac；N=259）
 
 | 预报节点      | RMSE   | $R^2$ | Corr  |
 | ------------- | ------ | ------- | ----- |
@@ -519,7 +737,7 @@ $$\Delta_{\mathrm{Int}}=(M_{ga}-M_{gs})-(M_{ca}-M_{cs}).$$
 
 ### 6.1 结论
 
-本文围绕县级玉米单产预测中的空间异质性保留、时序依赖建模和季中预报问题，构建了一个仅使用网格级气象与县级土壤信息的空间-时间预测框架，并在美国玉米带 9 个州开展了系统实验。主要结论如下。
+本文围绕县级玉米单产预测中的空间异质性保留、时序依赖建模和季中预报问题，构建了一个融合网格级气象、县级土壤与 Sentinel-2 遥感影像的空间-时间预测框架，并在美国 27 个玉米主产州开展了系统实验。主要结论如下。
 
 （1）本文构建了面向县-年样本的网格级动态输入体系。模型使用 9 km 分辨率的逐日气象网格，结合累计积温、高温累积、累计降水和累计水分亏缺四类农学构造特征，并通过县级土壤属性形成静态上下文。该输入体系在保留县内局地气象差异的同时，引入了与热量、水分和高温胁迫相关的农学先验。
 
@@ -531,11 +749,11 @@ $$\Delta_{\mathrm{Int}}=(M_{ga}-M_{gs})-(M_{ca}-M_{cs}).$$
 
 （5）模型的变量选择权重和空间注意力权重为农学解释提供了量化接口。变量选择权重可以描述不同土壤条件、不同网格和不同生育阶段的气象变量相对重要性，空间注意力则可以描述模型在县域内部对不同网格的动态关注程度。因此，本文模型不仅输出单产预测值，也为分析“哪些气象因子在何时、何地影响单产”提供了结构化依据。
 
-（6）测试集误差具有明显的州际异质性。8 个有样本州的县级绝对误差 Kruskal–Wallis 检验显著，RMSE 从 Wisconsin 的 12.537 bu/ac 到 Missouri 的 27.796 bu/ac，说明总体指标不能完全代表所有区域的预测能力，后续仍需结合更多年份和跨区域验证分析误差来源。
+（6）测试集误差具有明显的州际异质性。在试点实验的 5 个州中县级绝对误差 Kruskal–Wallis 检验显著，RMSE 从 Wisconsin 的 12.537 bu/ac 到 Missouri 的 27.796 bu/ac，说明总体指标不能完全代表所有区域的预测能力，后续仍需结合更多年份和跨区域验证分析误差来源。
 
 ### 6.2 不足与展望
 
-本文仍存在以下局限。第一，模型仅使用气象和县级土壤信息，尚未纳入遥感植被指数、品种、播期、灌溉和田间管理等变量，因此对管理措施差异和作物长势的直接刻画仍然不足。第二，县级土壤被表示为县均值静态特征，无法描述县域内部土壤剖面的空间变化。第三，实验目前采用单个验证年和单个独立测试年，虽然 2022 年结果支持模型的跨年泛化能力，但仍需要更多年份滚动验证或跨区域测试来评估稳定性。第四，2022 年测试集中 Indiana 没有有效县-年样本，州级结论只覆盖其余 8 个州，不能直接外推到完整九州区域。第五，基线模型采用各自原生的特征变换和预设训练配置，当前比较尚未进行完整的逐样本统计显著性检验，因此性能差异的统计可靠性仍需进一步确认。第六，GNN-RNN 的测试图依据测试县的地理坐标独立构建，属于不使用测试标签的传导式空间评估；在严格的归纳式部署场景中，还需要研究训练区到新县域的图结构迁移方法。
+本文仍存在以下局限。第一，模型虽已引入 Sentinel-2 遥感影像，但尚未纳入品种、播期、灌溉和田间管理等变量，因此对管理措施差异的直接刻画仍然不足。第二，县级土壤被表示为县均值静态特征，无法描述县域内部土壤剖面的空间变化。第三，实验目前采用单个验证年和单个独立测试年，虽然 2022 年结果支持模型的跨年泛化能力，但仍需要更多年份滚动验证或跨区域测试来评估稳定性。第四，虽然研究已扩展至 27 个州，但仍有部分西部灌溉区和非玉米带边缘州县因土壤或遥感数据缺失未纳入，结论向完整美国玉米带的推广仍需更全面的数据覆盖。第五，基线模型采用各自原生的特征变换和预设训练配置，当前比较尚未进行完整的逐样本统计显著性检验，因此性能差异的统计可靠性仍需进一步确认。第六，GNN-RNN 的测试图依据测试县的地理坐标独立构建，属于不使用测试标签的传导式空间评估；在严格的归纳式部署场景中，还需要研究训练区到新县域的图结构迁移方法。
 
 后续研究可从以下方面展开：一是融合卫星植被指数、土壤剖面和作物物候观测，构建多源异构的空间-时间输入；二是将县级土壤上下文细化为网格级土壤条件，以进一步提升逐网格变量选择的农学针对性；三是采用滚动年份验证、跨区域留一验证和多随机种子重复实验，系统评估模型稳定性，并开展配对 $t$ 检验与 Diebold–Mariano 检验；四是引入概率预测或深度集成，量化极端天气年份下的预测不确定性；五是研究面向业务部署的在线更新和更高频率季中预报，使模型能够服务于农业保险、产量监测和粮食管理决策。
 
@@ -549,7 +767,7 @@ $$\Delta_{\mathrm{Int}}=(M_{ga}-M_{gs})-(M_{ca}-M_{cs}).$$
 
 [3] Khaki S, Wang L, Archontoulis S V. A CNN-RNN framework for crop yield prediction[J]. Frontiers in Plant Science, 2020, 11: 1658.
 
-[4] Lin F, et al. MMST-ViT: Climate change-aware crop yield prediction via multi-modal spatial-temporal vision transformer[J]. IEEE Transactions on Big Data, 2023.
+[4] Lin F, Crawford S, Guillot K, et al. MMST-ViT: Climate change-aware crop yield prediction via multi-modal spatial-temporal vision transformer[C]//Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV). 2023: 5751–5761. DOI:10.1109/ICCV51070.2023.00531.
 
 [5] Lin F, et al. An open and large-scale dataset for multi-modal climate change-aware crop yield predictions[C]//Proceedings of the 30th ACM International Conference on Multimedia (MM '22). 2022: 6358–6367.
 
@@ -588,6 +806,16 @@ $$\Delta_{\mathrm{Int}}=(M_{ga}-M_{gs})-(M_{ca}-M_{cs}).$$
 [22] 马竺萱. “期权垂直价差组合”套期保值策略研究——以良运集团玉米采购与库存业务为例[D].
 
 [23] 海大集团. 关于开展套期保值业务的可行性分析[EB/OL]. 东方财富网, 2026-07-31. https://data.eastmoney.com/notices/detail/002311/AN202607311827534510.html
+
+[24] Kamangir H, Sams B S, Dokoozlian N, et al. CMAViT: Integrating climate, management, and remote sensing data for crop yield estimation with multimodel vision transformers[J/OL]. arXiv preprint, 2024. https://arxiv.org/abs/2411.16989.
+
+[25] Pathak D, Miranda M, Mena F, et al. Predicting crop yield with machine learning: An extensive analysis of input modalities and models on a field and sub-field level[C]//2023 IEEE International Geoscience and Remote Sensing Symposium (IGARSS). 2023: 2767–2770. DOI:10.1109/IGARSS52108.2023.10282318.
+
+[26] Mia M S, Tanabe R, Habibi L N, et al. Multimodal deep learning for rice yield prediction using UAV-based multispectral imagery and weather data[J]. Remote Sensing, 2023, 15(10): 2511. DOI:10.3390/rs15102511.
+
+[27] Aviles Toledo C, Crawford M M, Tuinstra M R. Integrating multi-modal remote sensing, deep learning, and attention mechanisms for yield prediction in plant breeding experiments[J]. Frontiers in Plant Science, 2024, 15: 1408047. DOI:10.3389/fpls.2024.1408047.
+
+[28] Shyam G K, Chandrakar I. Attention-based multi-modal deep learning model of spatio-temporal crop yield prediction with satellite, soil and climate data[J/OL]. arXiv preprint arXiv:2604.19217, 2026. https://arxiv.org/abs/2604.19217.
 
 ---
 

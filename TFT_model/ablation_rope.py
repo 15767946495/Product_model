@@ -31,7 +31,7 @@ _THIS_DIR = Path(__file__).resolve().parent
 _PROJECT_DIR = _THIS_DIR.parent
 if str(_PROJECT_DIR) not in sys.path:
     sys.path.insert(0, str(_PROJECT_DIR))
-from cropnet_protocol import ALLOWED_STATES
+from cropnet_protocol import CROPNET_FIVE_STATES
 
 _DATA_JSONL = _PROJECT_DIR / "train_dataset" / "dataset.jsonl"
 _GRID_CACHE = _PROJECT_DIR / "train_dataset" / "grid_cache.pt"
@@ -140,7 +140,7 @@ def run_combo(
                "--early_stop_patience", str(args.early_stop_patience),
                "--batch_size", str(args.batch_size),
                "--lr", str(args.lr),
-               "--states", ",".join(sorted(ALLOWED_STATES)),
+               "--states", ",".join(sorted(CROPNET_FIVE_STATES)),
                "--data_jsonl", str(_DATA_JSONL),
                "--grid_cache", str(_GRID_CACHE),
                "--output_dir", str(combo_dir)]
@@ -162,7 +162,7 @@ def run_combo(
         print("  !! 无 checkpoint,无法推理", flush=True)
         return cn, {"no_checkpoint": True}
     cmd = [sys.executable, "infer.py", "--val_year", args.val_year,
-           "--states", ",".join(sorted(ALLOWED_STATES)),
+           "--states", ",".join(sorted(CROPNET_FIVE_STATES)),
            "--data_jsonl", str(_DATA_JSONL),
            "--grid_cache", str(_GRID_CACHE),
            "--output_dir", str(combo_dir)]
@@ -291,7 +291,7 @@ def main():
         cn = combo_name(f)
         r = results.get(cn, {})
         sm = f.get("spatial_mode", "attention")[:3]
-        g = "on" if (f.get("use_constructed", False) or f.get("use_gdd", False)) else "-"
+        g = "on" if f.get("use_constructed", False) else "default-gdd"
         encoding = "none" if f["spatial_mode"] == "mean" else "additive"
         t_rmse = r.get("best_train_val_rmse")
         i_rmse, i_r2, i_corr = r.get("last_rmse"), r.get("last_r2"), r.get("last_corr")

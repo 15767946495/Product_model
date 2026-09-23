@@ -182,19 +182,17 @@ def infer():
 
     # ========== 3. DataLoader ==========
     print(f"[3] 构建 DataLoader")
-    # 特征名与训练一致(use_gdd 时含 CumGDD 通道),从 hparams 读取
+    # 特征名与训练一致：默认含 CumGDD，use_constructed 时使用全部构造特征。
     hparams_path0 = os.path.join(output_dir, "model_hparams.json")
-    use_gdd_hp = False
     use_constructed_hp = False
     if os.path.exists(hparams_path0):
         with open(hparams_path0, "r", encoding="utf-8") as f:
             hp0 = json.load(f)
-            use_gdd_hp = bool(hp0.get("use_gdd", False))
             use_constructed_hp = bool(hp0.get("use_constructed", False))
     dynamic_feature_names = list(DEFAULT_DYNAMIC_FEATURE_NAMES)
     if use_constructed_hp:
         dynamic_feature_names += CONSTRUCTED_FEATURES   # 11+4=15 维
-    elif use_gdd_hp:
+    else:
         dynamic_feature_names.append(GDD_FEATURE_NAME)  # 旧口径 12 维
     collate_fn = make_grid_collate_fn(global_stats, dynamic_feature_names)
 
@@ -226,10 +224,8 @@ def infer():
     num_heads = int(hp["num_heads"])
     num_lstm_layers = int(hp["num_lstm_layers"])
     dropout = float(hp["dropout"])
-    spatial_mode = str(hp["spatial_mode"])
-    variable_selection_stage = str(hp.get("variable_selection_stage", "grid"))
     print(f"    超参: hidden_size={hidden_size}, num_heads={num_heads}, "
-          f"num_lstm_layers={num_lstm_layers}, dropout={dropout}, spatial_mode={spatial_mode}")
+          f"num_lstm_layers={num_lstm_layers}, dropout={dropout}")
     model = TFTEncoderForYieldPrediction(
         soil_dim=SOIL_DIM,
         dynamic_feature_names=dynamic_feature_names,
@@ -238,8 +234,6 @@ def infer():
         dropout=dropout,
         output_size=1,
         num_heads=num_heads,
-        spatial_mode=spatial_mode,
-        variable_selection_stage=variable_selection_stage,
     )
     model.load_state_dict(torch.load(ckpt_path, map_location=device))
     model = model.to(device)
@@ -269,6 +263,9 @@ def infer():
             fips = _rest[2] if len(_rest) >= 3 else [""] * grid_feats.size(0)
             counties = _rest[3] if len(_rest) >= 4 else [""] * grid_feats.size(0)
             ag_images = _rest[4] if len(_rest) >= 5 else None
+            if ag_images is not None:
+                ag_images = ag_images.to(device)
+            ag_mask = _rest[5].to(device) if len(_rest) >= 6 and _rest[5] is not None else None
             grid_feats = grid_feats.to(device)
             grid_coords = grid_coords.to(device)
             grid_mask = grid_mask.to(device)
@@ -278,50 +275,41 @@ def infer():
             labels = labels.to(device)
             seq_lens = seq_lens.to(device)
 
-            pred_all, _, _ = model(
+            pred, _, _ = model(
                 grid_feats=grid_feats,
                 grid_coords=grid_coords,
                 grid_mask=grid_mask,
                 soil_feats=soil_feats,
                 seq_lens=seq_lens,
+                month_ids=month_ids,
+                day_ids=day_ids,
                 ag_images=ag_images,
-            )  # (B, T, 1)
+                ag_mask=ag_mask,
+            )  # (B, 1)
 
-            B, T, _ = pred_all.shape
-
-            # 无归一化,预测/标签已在原始单产空间 (bu/ac)
-            pred_raw = pred_all.squeeze(-1)   # (B, T)
-            label_raw = labels.expand(-1, T)  # labels 形状 (B,1) -> (B, T)
-
-            # 逐时间步收集协议窗口内的有效步。
-            pad_mask = torch.arange(T, device=device).unsqueeze(0) < seq_lens.unsqueeze(1)
-            valid_mask = pad_mask
+            # 模型直接输出最终县级单产预测。
+            pred_raw = torch.exp(pred[..., 0])   # log-mean -> bu/ac
+            label_raw = labels.squeeze(-1) # (B,)
+            B = pred_raw.shape[0]
 
             # 提前预报节点:每节点取"截至该日期前最后一个有效时间步"的预测。
             for b in range(B):
                 sl = int(seq_lens[b].item())
                 yr = int(years[b])
-                lab = float(label_raw[b, 0].item())
-                final_idx = int(last_valid_index(seq_lens[b:b + 1])[0].item())
+                lab = float(label_raw[b].item())
                 final_states.append(str(states[b]))
                 final_years.append(yr)
                 final_fips.append(str(fips[b]))
                 final_counties.append(str(counties[b]))
-                final_preds.append(float(pred_raw[b, final_idx].item()))
+                final_preds.append(float(pred_raw[b].item()))
                 final_labels.append(lab)
-                for (mm, dd) in cutoff_list:
-                    t_idx = cutoff_index(month_ids[b], day_ids[b], sl, (mm, dd))
-                    if t_idx >= 0:
-                        node_preds[(mm, dd)].append(float(pred_raw[b, t_idx].item()))
-                        node_labels[(mm, dd)].append(lab)
+                # 当前模型只输出季末最终预测，不生成逐 cutoff 预测。
+                if cutoff_list:
+                    node_preds[cutoff_list[-1]].append(float(pred_raw[b].item()))
+                    node_labels[cutoff_list[-1]].append(lab)
 
-            for t in range(T):
-                t_mask = valid_mask[:, t]
-                if t_mask.any():
-                    p = pred_raw[t_mask, t].detach().cpu().tolist()
-                    l = label_raw[t_mask, t].detach().cpu().tolist()
-                    step_preds.setdefault(t, []).extend(p)
-                    step_labels.setdefault(t, []).extend(l)
+            step_preds.setdefault(0, []).extend(pred_raw.detach().cpu().tolist())
+            step_labels.setdefault(0, []).extend(label_raw.detach().cpu().tolist())
 
     # ========== 6. 计算逐时间步指标 ==========
     print(f"[6] 计算指标")

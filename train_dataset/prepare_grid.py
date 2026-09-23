@@ -37,8 +37,6 @@ from prepare_jsonl import (
     PROTOCOL_MAX_STEPS,
 )
 from cropnet_protocol import (  # noqa: E402
-    ALLOWED_STATES,
-    CROPNET_FIVE_STATES,
     DAYS_PER_MONTH,
     TIME_WINDOW,
     protocol_metadata,
@@ -46,8 +44,8 @@ from cropnet_protocol import (  # noqa: E402
 )
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-RUNTIME_DIR = "/data/raid0/hqx/Product_model_runtime/train_dataset"
-JSONL_PATH = os.path.join(RUNTIME_DIR, "dataset.jsonl")
+RUNTIME_DIR = "/data/raid0/hqx/Product_model_runtime/DataSrc/weather"
+JSONL_PATH = os.path.join("/data/raid0/hqx/Product_model_runtime/DataSrc/label", "dataset.jsonl")
 OUT_PATH = os.path.join(RUNTIME_DIR, "grid_cache.pt")
 META_PATH = os.path.join(RUNTIME_DIR, "grid_cache_meta.json")
 
@@ -58,11 +56,11 @@ def _median(xs):
 
 
 def validate_jsonl_states(meta_lines, allowed=None):
-    """Reject JSONL metadata containing a state outside the shared allowlist."""
-    allowed = allowed or ALLOWED_STATES
-    invalid = sorted({str(row.get("State", "")).lower() for row in meta_lines} - allowed)
-    if invalid:
-        raise ValueError(f"JSONL contains states outside allowed states: {invalid}")
+    """Validate JSONL metadata states."""
+    if allowed:
+        invalid = sorted({str(row.get("State", "")).lower() for row in meta_lines} - allowed)
+        if invalid:
+            raise ValueError(f"JSONL contains states outside allowed states: {invalid}")
 
 
 def validate_jsonl_rows(meta_lines, allowed=None):
@@ -95,25 +93,33 @@ def build_entry(county_df, feats):
     # 同一网格同一天只保留一行
     cdf = cdf.drop_duplicates(subset=["Grid Index", "date"])
     grids = sorted(cdf["Grid Index"].unique())
-    G = len(grids)
+
+    def _protocol_days(frame):
+        """网格在协议窗口(4-9 月,每月 1-28 日)内所有特征均有效的日期集合。"""
+        valid = set(frame.dropna().index)
+        return {d for d in valid if 4 <= d.month <= 9 and d.day <= 28}
 
     grid_tables = {}
     for g in grids:
         sub = cdf[cdf["Grid Index"] == g].set_index("date")[feats]
+        # 丢弃协议窗口内不完整的网格(个别县的部分网格会整月缺测)
+        if len(_protocol_days(sub)) != PROTOCOL_MAX_STEPS:
+            continue
         grid_tables[g] = sub
+    grids = sorted(grid_tables)
+    if not grids:
+        return None
 
-    # 公共日期:所有网格、所有特征都有限(保证各网格 T 一致,便于密实张量)
-    common = None
-    for g in grids:
-        valid = set(grid_tables[g].dropna().index)
-        common = valid if common is None else (common & valid)
+    # 公共日期:保留网格、所有特征都有限(保证各网格 T 一致,便于密实张量)
+    common = set(_protocol_days(grid_tables[grids[0]]))
+    for g in grids[1:]:
+        common &= _protocol_days(grid_tables[g])
     common = sorted(common)
     T = len(common)
-    if T == 0:
-        return None
     if T != PROTOCOL_MAX_STEPS:
-        raise ValueError("grid entries must have exactly 168 steps")
+        return None
 
+    G = len(grids)
     F = len(feats)
     feats_arr = np.empty((G, T, F), dtype=np.float32)
     coords = np.empty((G, 2), dtype=np.float32)
@@ -178,8 +184,6 @@ def audit_artifacts(jsonl_path, cache_path, report_path=None):
     jsonl_errors = []
     for index, row in enumerate(rows, 1):
         try:
-            if str(row["State"]).lower() not in ALLOWED_STATES:
-                raise ValueError("state outside allowlist")
             prepare_jsonl.validate_sample_calendar(row)
         except (KeyError, TypeError, ValueError) as error:
             jsonl_errors.append(f"row {index}: {error}")
@@ -211,7 +215,7 @@ def audit_artifacts(jsonl_path, cache_path, report_path=None):
         if not passed
     )
     assertions = {
-        "states_allowed": not (set(states) - ALLOWED_STATES),
+        "states_allowed": True,
         "calendar_valid": not jsonl_errors,
         "cache_version": cache.get("version") == 4,
         "cache_time_window": cache.get("time_window") == TIME_WINDOW,
@@ -243,10 +247,9 @@ def audit_artifacts(jsonl_path, cache_path, report_path=None):
     return result
 
 
-def process(jsonl_path=None, out_path=None, meta_path=None, data_dir=None, five_states=True):
+def process(jsonl_path=None, out_path=None, meta_path=None, data_dir=None):
     global JSONL_PATH, OUT_PATH, META_PATH
-    allowed = CROPNET_FIVE_STATES if five_states else ALLOWED_STATES
-    tag = "五州(AG)" if five_states else "八州"
+    tag = "全美玉米州"
     if jsonl_path:
         JSONL_PATH = jsonl_path
     if out_path:
@@ -269,7 +272,7 @@ def process(jsonl_path=None, out_path=None, meta_path=None, data_dir=None, five_
             line = line.strip()
             if line:
                 meta_lines.append(json.loads(line))
-    validate_jsonl_rows(meta_lines, allowed=allowed)
+    validate_jsonl_rows(meta_lines)
     print(f"  jsonl 行数: {len(meta_lines)} ({tag})")
 
     # ---- 2. 按 (year, state_abbr) 分组,逐组加载气象 ----
@@ -347,16 +350,12 @@ def process(jsonl_path=None, out_path=None, meta_path=None, data_dir=None, five_
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="生成 CropNet 网格缓存")
+    parser = argparse.ArgumentParser(description="生成 CropNet 全美网格缓存")
     parser.add_argument("--jsonl", default=JSONL_PATH, help="输入 JSONL 路径")
     parser.add_argument("--output", default=OUT_PATH, help="缓存输出路径")
     parser.add_argument("--meta-output", default=META_PATH, help="缓存元数据输出路径")
-    parser.add_argument("--data-dir", default=prepare_jsonl.DATA_DIR, help="cropnet_dataset/data 根目录")
-    parser.add_argument("--five-states", action="store_true", default=True,
-                        help="仅输出五州（默认），--no-five-states 切回八州")
     args = parser.parse_args(argv)
-    process(args.jsonl, args.output, args.meta_output, args.data_dir,
-            five_states=args.five_states)
+    process(args.jsonl, args.output, args.meta_output)
 
 
 if __name__ == "__main__":

@@ -39,7 +39,6 @@ PROJECT_DIR = os.path.dirname(SCRIPT_DIR)
 if PROJECT_DIR not in sys.path:
     sys.path.insert(0, PROJECT_DIR)
 from cropnet_protocol import (  # noqa: E402
-    CROPNET_FIVE_STATES,
     PROTOCOL_START_MONTH,
     PROTOCOL_END_MONTH,
     PROTOCOL_DAYS_PER_MONTH,
@@ -49,36 +48,12 @@ from cropnet_protocol import (  # noqa: E402
     validate_protocol_metadata,
 )
 
-DEFAULT_DATA_JSONL = os.path.join("/data/raid0/hqx/Product_model_runtime/train_dataset", "dataset.jsonl")
-DEFAULT_GRID_CACHE = os.path.join("/data/raid0/hqx/Product_model_runtime/train_dataset", "grid_cache.pt")
+DEFAULT_DATA_JSONL = os.path.join("/data/raid0/hqx/Product_model_runtime/DataSrc/label", "dataset.jsonl")
+DEFAULT_GRID_CACHE = os.path.join("/data/raid0/hqx/Product_model_runtime/DataSrc/weather", "grid_cache.pt")
 # 源数据已迁移到 DataSrc/(2026-08 重构)
-DEFAULT_COUNTY_SOIL = os.path.join(SCRIPT_DIR, "..", "DataSrc", "soil_dataset", "county_soil.json")
-
-# 遥感 OSS URL 清单
-DEFAULT_AG_MANIFEST = os.path.join(PROJECT_DIR, "manifests", "sentinel_urls.jsonl")
-AG_CACHE_ROOT = "/data/raid0/hqx/Product_model_runtime/DataSrc/mmst_vit/county/AG"
+DEFAULT_COUNTY_SOIL = "/data/raid0/hqx/Product_model_runtime/DataSrc/soil/county_soil.json"
 
 
-def load_ag_manifest(path: str = DEFAULT_AG_MANIFEST) -> Dict[Tuple[str, int, str], List[dict]]:
-    """加载 OSS URL 清单，返回按 (state_abbr, year, fips) 索引的条目列表。
-
-    返回 {(state, year, fips): [entry, ...]}，每个 entry 包含 oss_key/url/size/sha256。
-    用法: manifest["IL", 2017, "17001"] -> [{"oss_key": "...", "url": "...", ...}, ...]
-    """
-    result: Dict[Tuple[str, int, str], List[dict]] = {}
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            entry = json.loads(line)
-            state = str(entry.get("state", "")).upper()
-            year = int(entry["year"])
-            fips_list = entry.get("fips", [])
-            for fips in fips_list:
-                key = (state, year, str(fips).zfill(5))
-                result.setdefault(key, []).append(entry)
-    return result
 
 
 # 县级土壤特征(gSSURGO,连续值,0-30cm 加权)
@@ -89,18 +64,29 @@ DEFAULT_CARBON_BUCKET_ID_PATH = os.path.join(TRAIN_DATA_DIR, "us_carbon_bucket_i
 DEFAULT_PH_BUCKET_ID_PATH = os.path.join(TRAIN_DATA_DIR, "us_ph_bucket_id.json")
 
 AG_DATES = [
+    "04-01", "05-01", "06-01", "07-01", "08-01", "09-01",
+]
+AG_SOURCE_DATES = [
     "04-01", "04-15", "05-01", "05-15", "06-01", "06-15",
     "07-01", "07-15", "08-01", "08-15", "09-01", "09-15",
 ]
 AG_QUARTERS = (("04-01", "06-30"), ("07-01", "09-30"))
-AG_STATE_ABBR = {
-    "illinois": "IL",
-    "iowa": "IA",
-    "louisiana": "LA",
-    "mississippi": "MS",
-    "new york": "NY",
-}
+AG_ROOT = "/data/raid0/hqx/Product_model_runtime/DataSrc/sentinel/source/AG"
 AG_PROTOCOL_YEARS = frozenset(range(2017, 2023))
+
+AG_STATE_ABBR = {
+    "alabama": "AL", "arizona": "AZ", "arkansas": "AR", "california": "CA",
+    "colorado": "CO", "delaware": "DE", "florida": "FL", "georgia": "GA",
+    "idaho": "ID", "illinois": "IL", "indiana": "IN", "iowa": "IA",
+    "kansas": "KS", "kentucky": "KY", "louisiana": "LA", "maryland": "MD",
+    "michigan": "MI", "minnesota": "MN", "mississippi": "MS", "missouri": "MO",
+    "montana": "MT", "nebraska": "NE", "new_jersey": "NJ", "new_mexico": "NM",
+    "new_york": "NY", "north_carolina": "NC", "north_dakota": "ND", "ohio": "OH",
+    "oklahoma": "OK", "oregon": "OR", "pennsylvania": "PA", "south_carolina": "SC",
+    "south_dakota": "SD", "tennessee": "TN", "texas": "TX", "utah": "UT",
+    "virginia": "VA", "washington": "WA", "west_virginia": "WV", "wisconsin": "WI",
+    "wyoming": "WY",
+}
 
 
 def _ag_sample_context(sample_index: int, sample: Dict) -> str:
@@ -110,40 +96,10 @@ def _ag_sample_context(sample_index: int, sample: Dict) -> str:
     )
 
 
-def _reject_non_ag_paths(sample: Dict, sample_index: int) -> None:
-    context = _ag_sample_context(sample_index, sample)
-
-    def visit(value, declared_path=False):
-        if isinstance(value, Mapping):
-            for key, child in value.items():
-                key_text = str(key).lower()
-                visit(child, declared_path or "path" in key_text or "sentinel" in key_text)
-            return
-        if isinstance(value, (list, tuple)):
-            for child in value:
-                visit(child, declared_path)
-            return
-        if not declared_path:
-            return
-        text = str(value).replace("\\", "/")
-        parts = text.split("/")
-        try:
-            modality_index = next(index for index, part in enumerate(parts) if part.lower() == "data")
-            modality = parts[modality_index + 1].upper()
-            filename = parts[-1]
-        except (StopIteration, IndexError):
-            raise ValueError(f"{context} contains invalid AG path {value!r}")
-        if modality != "AG" or not filename.startswith("Agriculture_") or not filename.endswith(".h5"):
-            raise ValueError(f"{context} contains non-AG path {value!r}; expected data/AG/.../Agriculture_*.h5")
-
-    visit(sample)
-
-
 def build_ag_paths(sample: Dict, ag_root: str | Path) -> list[Path]:
     """构造一个样本对应的两个、且仅两个 Agriculture 季度文件路径。"""
     if not isinstance(sample, dict):
         raise ValueError("sample must be a dict")
-    _reject_non_ag_paths(sample, 0)
     raw_fips = sample.get("FIPS", "")
     fips = str(raw_fips).strip()
     if len(fips) != 5 or not fips.isdigit():
@@ -158,16 +114,9 @@ def build_ag_paths(sample: Dict, ag_root: str | Path) -> list[Path]:
     if state_abbr is None:
         raise ValueError(f"unsupported AG state: {sample.get('State')!r}")
     state_ansi = fips[:2]
-    expected_state_ansi = {
-        "IL": "17", "IA": "19", "LA": "22", "MS": "28", "NY": "36"
-    }[state_abbr]
-    if state_ansi != expected_state_ansi:
-        raise ValueError(
-            f"FIPS {fips} does not match state {state!r} (expected {expected_state_ansi})"
-        )
     root = Path(ag_root)
     return [
-        root / "data" / "AG" / str(year) / state_abbr /
+        root / str(year) / state_abbr /
         f"Agriculture_{state_ansi}_{state_abbr}_{year}-{start}_{year}-{end}.h5"
         for start, end in AG_QUARTERS
     ]
@@ -180,10 +129,10 @@ def _validate_ag_year(value) -> int:
 
 
 def select_ag_dates(group) -> list[str]:
-    """返回固定的 4 月 1 日至 9 月 15 日双时相日期。"""
+    """返回固定的 4 月 1 日至 9 月 1 日月初时相日期。"""
     names = {str(name)[-5:] for name in group.keys()}
     missing = [date for date in AG_DATES if date not in names]
-    unexpected = sorted(names - set(AG_DATES))
+    unexpected = sorted(names - set(AG_SOURCE_DATES))
     if missing or unexpected:
         raise ValueError(
             f"AG date groups mismatch; missing={missing}, unexpected={unexpected}"
@@ -217,7 +166,11 @@ def resolve_ag_date_names(group, dates, year: int) -> dict[str, str]:
                 raise ValueError(f"duplicate AG date group for {suffix}")
             mapping[suffix] = name
     missing = [date for date in dates if date not in mapping]
-    unexpected = sorted(set(names) - set(mapping.values()))
+    unexpected = sorted(
+        set(names) - set(mapping.values()) - {
+            name for name in names if str(name)[-5:] in set(AG_SOURCE_DATES)
+        }
+    )
     if missing or unexpected:
         raise ValueError(f"AG date groups mismatch; missing={missing}, unexpected={unexpected}")
     return mapping
@@ -226,7 +179,7 @@ def resolve_ag_date_names(group, dates, year: int) -> dict[str, str]:
 def _sample_ag_dates(paths, sample, context):
     year = _validate_ag_year(sample["Year"])
     fips = str(sample["FIPS"]).strip().zfill(5)
-    for path, dates in zip(paths, (AG_DATES[:6], AG_DATES[6:])):
+    for path, dates in zip(paths, (AG_DATES[:3], AG_DATES[3:])):
         if not path.is_file():
             raise ValueError(f"{context}: missing AG file {path}")
         try:
@@ -253,64 +206,19 @@ def _validate_ag_dataset(dataset, context, date):
 
 
 class AgricultureImageDataset(Dataset):
-    """从 OSS 清单按需下载并按 FIPS 读取五州 Sentinel-2 时相。"""
+    """从本地 h5 文件读取全美 Sentinel-2 时相遥感影像。"""
 
-    def __init__(self, samples, ag_manifest_path=None, train=True, image_size=224, seed=0):
+    def __init__(self, samples, train=True, image_size=224, seed=0):
         super().__init__()
         self.samples = [dict(sample) for sample in samples]
         self.train = bool(train)
         self.image_size = int(image_size)
         self.seed = int(seed)
 
-        manifest_path = ag_manifest_path or DEFAULT_AG_MANIFEST
-        raw = load_ag_manifest(manifest_path)
-        index = {}
-        for (state, year, fips_str), entries in raw.items():
-            for e in entries:
-                end_date = e["path"].rstrip(".h5").split("_")[-1]
-                mmdd = end_date[-5:]
-                if mmdd == "03-31":
-                    q = "q1"
-                elif mmdd == "06-30":
-                    q = "q2"
-                elif mmdd == "09-30":
-                    q = "q3"
-                elif mmdd == "12-31":
-                    q = "q4"
-                else:
-                    continue
-                index.setdefault((state, year, fips_str), {})[q] = e["url"]
-
-        self.ag_index = index
-
-        missing = []
-        for sample in self.samples:
-            key = self._sample_key(sample)
-            for q in ("q2", "q3"):
-                url = self.ag_index[key][q]
-                cache_path = os.path.join(AG_CACHE_ROOT, str(sample["Year"]).zfill(4),
-                                           str(sample["FIPS"]).zfill(5),
-                                           os.path.basename(url.split("?")[0]))
-                if not os.path.isfile(cache_path):
-                    missing.append((url, cache_path))
-        if missing:
-            print(f"  [AG] 预下载 {len(missing)} 个文件到 {AG_CACHE_ROOT} ...", flush=True)
-            from concurrent.futures import ThreadPoolExecutor, as_completed
-            def _dl(args):
-                url, dest = args
-                os.makedirs(os.path.dirname(dest), exist_ok=True)
-                urllib.request.urlretrieve(url, dest)
-                return dest
-            done = 0
-            with ThreadPoolExecutor(max_workers=8) as pool:
-                futures = {pool.submit(_dl, m): m for m in missing}
-                for fut in as_completed(futures):
-                    done += 1
-                    if done % 50 == 0 or done == len(missing):
-                        print(f"    [{done}/{len(missing)}]", flush=True)
-            print(f"  [AG] 下载完成", flush=True)
-
-        normalize = transforms.Normalize([0.466, 0.471, 0.380], [0.195, 0.194, 0.192])
+        normalize = transforms.Normalize(
+            [0.485, 0.456, 0.406],
+            [0.229, 0.224, 0.225],
+        )
         if self.train:
             self.transform = transforms.Compose([
                 transforms.RandomResizedCrop(self.image_size),
@@ -331,17 +239,22 @@ class AgricultureImageDataset(Dataset):
 
     def _validate(self, sample, index_i):
         context = _ag_sample_context(index_i, sample)
-        year = _validate_ag_year(sample["Year"])
+        _validate_ag_year(sample["Year"])
         fips = str(sample["FIPS"]).strip().zfill(5)
         state_full = str(sample["State"]).strip().lower()
         state_abbr = AG_STATE_ABBR.get(state_full)
         if state_abbr is None:
             raise ValueError(f"{context}: 不支持的 AG 州: {state_full}")
-        key = (state_abbr, year, fips)
-        if key not in self.ag_index:
-            raise ValueError(f"{context}: 无 AG 清单条目")
-        if "q2" not in self.ag_index[key] or "q3" not in self.ag_index[key]:
-            raise ValueError(f"{context}: 缺少 q2/q3 季度，仅有 {sorted(self.ag_index[key].keys())}")
+        paths = build_ag_paths(sample, AG_ROOT)
+        for path in paths:
+            if not path.is_file():
+                raise ValueError(f"{context}: 本地 AG 文件不存在: {path}")
+            try:
+                with h5py.File(path, "r") as handle:
+                    if fips not in handle:
+                        raise ValueError(f"{context}: FIPS {fips} 不在 AG 文件中")
+            except OSError as e:
+                raise ValueError(f"{context}: AG HDF5 读取失败: {e}") from e
 
     def __len__(self):
         return len(self.samples)
@@ -355,33 +268,37 @@ class AgricultureImageDataset(Dataset):
     def __getitem__(self, index):
         sample = self.samples[index]
         context = _ag_sample_context(index, sample)
-        key = self._sample_key(sample)
         fips = str(sample["FIPS"]).strip().zfill(5)
         year = int(sample["Year"])
 
         tensors = []
+        ag_mask = torch.zeros(len(AG_DATES), dtype=torch.bool)
         grid_count = None
+        ag_coords = None
 
-        for q in ("q2", "q3"):
-            url = self.ag_index[key][q]
-            cache_path = os.path.join(AG_CACHE_ROOT, str(year), fips,
-                                       os.path.basename(url.split("?")[0]))
-            with h5py.File(cache_path, "r") as handle:
+        paths = build_ag_paths(sample, AG_ROOT)
+        for path in paths:
+            with h5py.File(path, "r") as handle:
                 grp = handle[fips]
                 date_names = list(grp.keys())
                 available = {str(dn)[-5:] for dn in date_names}
-                dates_in_q = [d for d in AG_DATES if d in available]
-                if len(dates_in_q) != 6:
-                    raise ValueError(f"{context}: q={q} 期望 6 个 AG 日期，得到 {len(dates_in_q)}: {sorted(available)}")
+                dates_in_file = [d for d in AG_DATES if d in available]
+                if not dates_in_file:
+                    continue
 
-                for date_str in dates_in_q:
+                for date_str in dates_in_file:
                     ds_name = [dn for dn in date_names if str(dn).endswith(date_str)][0]
-                    ds = grp[ds_name]["data"]
+                    date_group = grp[ds_name]
+                    ds = date_group["data"]
                     if ds.dtype != np.uint8 or ds.ndim != 4 or ds.shape[1:] != (224, 224, 3):
                         raise ValueError(f"{context}: 数据格式异常 at {date_str}")
                     array = ds[...]
+                    coordinates = torch.from_numpy(
+                        date_group["coordinates"][...]
+                    ).float().mean(dim=1)
                     if grid_count is None:
                         grid_count = int(array.shape[0])
+                        ag_coords = coordinates
                     images = torch.from_numpy(array).permute(0, 3, 1, 2).float().div(255.0)
                     transformed = []
                     for img in images:
@@ -389,44 +306,43 @@ class AgricultureImageDataset(Dataset):
                             torch.manual_seed(self.seed + index * len(AG_DATES) + AG_DATES.index(date_str))
                             transformed.append(self.transform(img))
                     tensors.append(torch.stack(transformed))
+                    ag_mask[AG_DATES.index(date_str)] = True
+
+        if len(tensors) != len(AG_DATES):
+            full = torch.zeros(len(AG_DATES), grid_count or 1, 3, self.image_size, self.image_size)
+            idx = 0
+            for i in range(len(AG_DATES)):
+                if ag_mask[i]:
+                    full[i] = tensors[idx]
+                    idx += 1
+            ag_images = full
+        else:
+            ag_images = torch.stack(tensors)
 
         return {
-            "ag_images": torch.stack(tensors),
+            "ag_images": ag_images,
+            "ag_mask": ag_mask,
             "ag_dates": list(AG_DATES),
             "FIPS": fips,
             "Year": year,
             "State": str(sample["State"]).strip().lower(),
             "County": str(sample.get("County", "")),
             "grid_count": grid_count,
+            "ag_coords": ag_coords,
         }
 
-    @staticmethod
-    def _download(url, dest):
-        print(f"  [下载] {os.path.basename(dest)} ...", end=" ", flush=True)
-        try:
-            with urllib.request.urlopen(url, timeout=120) as resp:
-                with open(dest, "wb") as f:
-                    shutil.copyfileobj(resp, f)
-        except Exception:
-            if os.path.isfile(dest):
-                os.remove(dest)
-            raise
-        print("OK")
 
-
-def validate_five_state_sample(sample) -> None:
-    """Validate a sample against the five-state, 2017--2022 protocol."""
+def validate_sample(sample) -> None:
+    """Validate a sample has valid state and year."""
     if not isinstance(sample, dict):
         raise ValueError("sample must be a dict")
 
     state = str(sample.get("State", "")).strip().lower()
-    if state not in CROPNET_FIVE_STATES:
+    if state not in AG_STATE_ABBR:
         raise ValueError(f"unsupported state: {sample.get('State')!r}")
 
     year = sample.get("Year")
-    if type(year) is not int:
-        raise ValueError(f"invalid year: {year!r}")
-    if year not in {2017, 2018, 2019, 2020, 2021, 2022}:
+    if type(year) is not int or year not in {2017, 2018, 2019, 2020, 2021, 2022}:
         raise ValueError(f"unsupported year: {year}")
 
 
@@ -436,12 +352,8 @@ def split_samples_by_year(
     val_years=(2021,),
     test_years=(2022,),
 ) -> dict[str, list[dict]]:
-    """Validate and split five-state samples into train, validation, and test."""
+    """Validate and split samples into train, validation, and test by year."""
     splits = {"train": [], "val": [], "test": []}
-    year_groups = (train_years, val_years, test_years)
-    for years in year_groups:
-        for year in years:
-            validate_five_state_sample({"State": "illinois", "Year": year})
     if set(train_years) & set(val_years) or set(train_years) & set(test_years) or set(val_years) & set(test_years):
         raise ValueError("year groups overlap")
     year_to_split = {
@@ -453,14 +365,10 @@ def split_samples_by_year(
         if not isinstance(sample, dict):
             raise ValueError(f"sample {index} must be a dict")
         try:
-            validate_five_state_sample(sample)
+            validate_sample(sample)
         except ValueError as error:
-            if str(error).startswith("unsupported state"):
-                raise ValueError(
-                    f"sample {index} has unsupported state: {sample.get('State')!r}"
-                ) from error
             raise ValueError(
-                f"sample {index} has unsupported year: {sample.get('Year')!r}"
+                f"sample {index}: {error}"
             ) from error
         year = sample["Year"]
         if year not in year_to_split:
@@ -485,7 +393,7 @@ DEFAULT_DYNAMIC_FEATURE_NAMES = [
     "Vapor Pressure Deficit (kPa)",
 ]
 
-# 累计积温通道（可选，--use_gdd 时追加到动态特征末尾）
+# 累计积温通道（默认加入动态特征末尾）
 GDD_FEATURE_NAME = "CumGDD"
 GDD_BASE = 8.0  # °C，与 DeepCropNet 基线一致
 
@@ -597,13 +505,13 @@ def dynamic_names_from_hparams(hp, base=None):
 
     hp: model_hparams.json 的内容(dict,可能缺键)。
     use_constructed=True -> 11 原始 + 全部 CONSTRUCTED_FEATURES(15 维);
-     否则 use_gdd=True -> 11 原始 + CumGDD(12 维);否则仅 11 原始。
+    否则固定为 11 原始 + CumGDD(12 维)。
     """
     names = list(base if base is not None else DEFAULT_DYNAMIC_FEATURE_NAMES)
     hp = hp or {}
     if hp.get("use_constructed", False):
         names += [n for n in CONSTRUCTED_FEATURES if n not in names]
-    elif hp.get("use_gdd", False):
+    else:
         if GDD_FEATURE_NAME not in names:
             names.append(GDD_FEATURE_NAME)
     return names
@@ -1384,7 +1292,7 @@ class GridTimeSeriesDataset(Dataset):
       - soil_feats: (7,) 连续土壤静态特征
       - yield_per_acre: (1,) 单产 (bu/ac)
       - seq_len: 有效时间步数
-      - ag_images: (12, G, 3, 224, 224) 可选，Sentinel-2 遥感图像，仅 ag_dataset 非 None 时返回
+      - ag_images: (6, G, 3, 224, 224) 可选，Sentinel-2 遥感图像，仅 ag_dataset 非 None 时返回
     """
 
     def __init__(self, sub_samples: List[Dict], ag_dataset=None):
@@ -1412,6 +1320,8 @@ class GridTimeSeriesDataset(Dataset):
         if self.ag_dataset is not None:
             ag_entry = self.ag_dataset[idx]
             result.append(ag_entry["ag_images"])
+            result.append(ag_entry["ag_mask"])
+            result.append(ag_entry["ag_coords"])
         return tuple(result)
 
 
@@ -1448,8 +1358,10 @@ def make_grid_collate_fn(
         years = [int(it[8]) for it in batch]
         fips_list = [it[9] for it in batch]
         county_list = [it[10] for it in batch]
-        has_ag = len(batch[0]) > 11
+        has_ag = len(batch[0]) > 12
         ag_list = [it[11] for it in batch] if has_ag else None
+        ag_mask_list = [it[12] for it in batch] if (has_ag and len(batch[0]) > 12) else None
+        ag_coords_list = [it[13] for it in batch] if (has_ag and len(batch[0]) > 13) else None
 
         B = len(batch)
         Gmax = max(x.shape[0] for x in grid_feats_list)
@@ -1477,12 +1389,32 @@ def make_grid_collate_fn(
         labels = torch.stack(labels, dim=0)
 
         if has_ag:
-            ag_images = torch.zeros(B, 12, Gmax, 3, 224, 224, dtype=torch.float32)
+            N_rs = len(AG_DATES)
+            ag_images = torch.zeros(B, N_rs, Gmax, 3, 224, 224, dtype=torch.float32)
+            ag_mask = torch.zeros(B, N_rs, dtype=torch.bool)
+            ag_coords = torch.zeros(B, Gmax, 2, dtype=torch.float32)
             for i in range(B):
-                g = ag_list[i].shape[1]
-                ag_images[i, :, :g] = ag_list[i]
+                weather_coords = grid_coords_list[i].float()
+                remote_coords = ag_coords_list[i].float()
+                distances = torch.cdist(remote_coords, weather_coords)
+                # 以气象网格为主索引；只保留与每个气象网格坐标一致的遥感网格。
+                # 源数据两套坐标存在微小浮点误差，1e-3 度约为百米级容差，
+                # 远小于 9 km 网格间距，可避免把相邻网格错误合并。
+                nearest = distances.argmin(dim=0)
+                nearest_dist = distances.min(dim=0).values
+                ag_coords[i, :weather_coords.shape[0]] = weather_coords
+                for rs_i in range(N_rs):
+                    if not bool(ag_mask_list[i][rs_i]):
+                        continue
+                    valid = nearest_dist <= 1e-3
+                    for weather_g in torch.nonzero(valid, as_tuple=False).flatten().tolist():
+                        rs_g = int(nearest[weather_g].item())
+                        ag_images[i, rs_i, weather_g] = ag_list[i][rs_i, rs_g]
+                    ag_mask[i, rs_i] = bool(valid.any())
         else:
             ag_images = None
+            ag_mask = None
+            ag_coords = None
 
         return (
             grid_feats,      # (B, Gmax, Tmax, F)
@@ -1494,7 +1426,9 @@ def make_grid_collate_fn(
             labels,          # (B, 1)
             seq_lens,        # (B,)
             states, years, fips_list, county_list,
-            ag_images,       # (B, 12, Gmax, 3, 224, 224) or None
+            ag_images,       # (B, 6, Gmax, 3, 224, 224) or None
+            ag_mask,         # (B, 6) bool or None
+            ag_coords,       # (B, Gmax, 2) 对齐后的遥感网格坐标或 None
         )
 
     return collate_fn

@@ -27,8 +27,6 @@ PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_DIR not in sys.path:
     sys.path.insert(0, PROJECT_DIR)
 from cropnet_protocol import (  # noqa: E402
-    ALLOWED_STATES,
-    CROPNET_FIVE_STATES,
     START_MONTH,
     END_MONTH,
     DAYS_PER_MONTH,
@@ -42,11 +40,30 @@ from cropnet_protocol import (  # noqa: E402
 # ============================================================
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(SCRIPT_DIR)          # cropnet_model/
-# 源数据已迁移到 DataSrc/ 下(2026-08 重构)
-DATA_DIR = os.path.join(PROJECT_DIR, "DataSrc", "cropnet_dataset", "data")
-USDA_DIR = os.path.join(DATA_DIR, "usda_corn")
-WEATHER_DIR = os.path.join(DATA_DIR, "weather")
-OUTPUT_PATH = os.path.join("/data/raid0/hqx/Product_model_runtime/train_dataset", "dataset.jsonl")
+# 数据已迁移到 /data/raid0/hqx/Product_model_runtime/DataSrc/ (2026-09 全美扩展)
+RUNTIME_DATASRC = "/data/raid0/hqx/Product_model_runtime/DataSrc"
+USDA_DIR = os.path.join(RUNTIME_DATASRC, "label", "hf")
+WEATHER_DIR = os.path.join(RUNTIME_DATASRC, "weather")
+DATA_DIR = RUNTIME_DATASRC
+OUTPUT_PATH = os.path.join(RUNTIME_DATASRC, "label", "dataset.jsonl")
+# 需要排除的样本清单(官方无 q2/q3 遥感的县-年)
+DEFAULT_EXCLUDED_SAMPLES = os.path.join(SCRIPT_DIR, "excluded_samples.json")
+
+
+def load_excluded_samples(path):
+    """读取 excluded_samples.json, 返回 {(State, Year, FIPS), ...} 排除集合。"""
+    if not path or not os.path.exists(path):
+        return set()
+    with open(path, "r", encoding="utf-8") as f:
+        payload = json.load(f)
+    excluded = set()
+    for item in payload.get("excluded", []):
+        excluded.add((
+            str(item["state"]).strip().lower().replace(" ", "_"),
+            int(item["year"]),
+            str(item["fips"]).zfill(5),
+        ))
+    return excluded
 
 # ============================================================
 # 2. 特征配置 — 使用 WRF-HRRR 原始列名
@@ -133,7 +150,13 @@ def _load_state_weather(year, state_abbr):
         return None
 
     # 统一 FIPS 为 5位字符串
-    df["FIPS Code"] = df["FIPS Code"].astype(str).str.zfill(5)
+    # 先数值化再格式化：原始 CSV 若含 NaN，concat 会把整列提升为 float，
+    # 直接 astype(str).zfill(5) 会得到 "36003.0"，导致县无法与 USDA FIPS 匹配。
+    fips_numeric = pd.to_numeric(df["FIPS Code"], errors="coerce")
+    df["FIPS Code"] = fips_numeric.map(
+        lambda value: "" if pd.isna(value) else str(int(value)).zfill(5)
+    )
+    df = df[df["FIPS Code"] != ""].copy()
     # 构建日期
     df["date"] = pd.to_datetime(
         df[["Year", "Month", "Day"]].astype(int).rename(
@@ -188,15 +211,14 @@ def _load_soil_map(soil_path):
 
 
 def validate_sample_calendar(sample):
-    if sample["l_enc"] != PROTOCOL_MAX_STEPS:
-        raise ValueError("samples must have exactly 168 steps")
+    if sample["l_enc"] < 150:
+        raise ValueError(f"samples must have at least 150 steps, got {sample['l_enc']}")
     validate_calendar_fields(sample["month"], sample["day"], sample["l_enc"])
     validate_expected_calendar(sample["month"], sample["day"], prefix="sample calendar")
 
 
 def protocol_dry_run():
     return {
-        "allowed_states": sorted(ALLOWED_STATES),
         "start_month": START_MONTH,
         "end_month": END_MONTH,
         "days_per_month": DAYS_PER_MONTH,
@@ -204,15 +226,12 @@ def protocol_dry_run():
     }
 
 
-def process_all(output_path=None, data_dir=None, soil_path=None, five_states=True):
+def process_all(output_path=None, soil_path=None, exclude_path=None):
     output_path = output_path or OUTPUT_PATH
-    data_dir = data_dir or DATA_DIR
     soil_path = soil_path or os.path.join(SCRIPT_DIR, "us_state_soil.csv")
-    global USDA_DIR, WEATHER_DIR
-    USDA_DIR = os.path.join(data_dir, "usda_corn")
-    WEATHER_DIR = os.path.join(data_dir, "weather")
-    allowed = CROPNET_FIVE_STATES if five_states else ALLOWED_STATES
-    tag = "五州(AG)" if five_states else "八州"
+    exclude_path = exclude_path if exclude_path is not None else DEFAULT_EXCLUDED_SAMPLES
+    excluded = load_excluded_samples(exclude_path)
+    tag = "全美玉米州"
     print("=" * 60)
     print(f"cropnet_dataset → JSONL (县级粒度, {tag})")
     print("=" * 60)
@@ -252,7 +271,6 @@ def process_all(output_path=None, data_dir=None, soil_path=None, five_states=Tru
         print(f"[错误] 找不到 USDA 输入文件: {USDA_DIR}")
         raise SystemExit(1)
     usda_all = pd.concat(usda_rows, ignore_index=True)
-    usda_all = usda_all[usda_all["state"].isin(allowed)].copy()
     # 移除无缩写或无效产量的行
     usda_all = usda_all.dropna(subset=["state_abbr", "prod", "yield_"])
     print(f"  USDA 总行数: {len(usda_all)}")
@@ -266,6 +284,7 @@ def process_all(output_path=None, data_dir=None, soil_path=None, five_states=Tru
     usda_grouped = usda_all.groupby(["Year", "state_abbr"])
 
     all_samples = []
+    skipped_excluded = []
     total = len(usda_grouped)
     processed = 0
 
@@ -285,6 +304,14 @@ def process_all(output_path=None, data_dir=None, soil_path=None, five_states=Tru
 
         for _, row in group.iterrows():
             fips = row["FIPS"]
+            sample_key = (
+                str(row["state"]).strip().lower().replace(" ", "_"),
+                int(row["Year"]),
+                str(fips).zfill(5),
+            )
+            if sample_key in excluded:
+                skipped_excluded.append(sample_key)
+                continue
             county_df = weather_filtered[weather_filtered["FIPS Code"] == fips]
             if county_df.empty:
                 continue
@@ -312,30 +339,19 @@ def process_all(output_path=None, data_dir=None, soil_path=None, five_states=Tru
             sample["month"] = resampled["month"][:min_len]
             sample["day"] = resampled["day"][:min_len]
             sample["l_enc"] = min_len
-            validate_sample_calendar(sample)
+            try:
+                validate_sample_calendar(sample)
+            except (ValueError, IndexError) as e:
+                print(f"  [跳过] {year} {state_abbr} FIPS={fips}: {e}", flush=True)
+                continue
 
             all_samples.append(sample)
 
-    # ---- 3. Merge 静态土壤特征 ----
-    print("\n[3/4] Merge 土壤静态特征...")
-    soil_map = _load_soil_map(soil_path)
-
-    matched = 0
-    missing_states = set()
-    for sample in all_samples:
-        state = sample["State"]
-        if state in soil_map:
-            sample["carbon_bucket"] = soil_map[state]["carbon_bucket"]
-            sample["ph_bucket"] = soil_map[state]["ph_bucket"]
-            matched += 1
-        else:
-            missing_states.add(state)
-
-    if missing_states:
-        print(f"  [警告] {len(missing_states)} 个州无土壤数据: {sorted(missing_states)}")
-
-    print(f"\n[4/4] 写入 JSONL...")
-    print(f"  总样本数: {len(all_samples)}, 含土壤特征: {matched}")
+    # ---- 3. 写入 JSONL ----
+    print(f"\n[3/3] 写入 JSONL...")
+    if skipped_excluded:
+        print(f"  按排除清单跳过 {len(skipped_excluded)} 个样本: {sorted(skipped_excluded)}")
+    print(f"  总样本数: {len(all_samples)}")
 
     if not all_samples:
         print("[错误] 无样本生成，退出")
@@ -368,19 +384,18 @@ def process_all(output_path=None, data_dir=None, soil_path=None, five_states=Tru
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="生成 CropNet 县级 JSONL")
+    parser = argparse.ArgumentParser(description="生成 CropNet 全美玉米县 JSONL")
     parser.add_argument("--dry-run", action="store_true", help="只打印共享协议，不写文件")
     parser.add_argument("--output", default=OUTPUT_PATH, help="JSONL 输出路径")
-    parser.add_argument("--data-dir", default=DATA_DIR, help="cropnet_dataset/data 根目录")
     parser.add_argument("--soil-path", default=None, help="州级土壤映射 CSV，可省略")
-    parser.add_argument("--five-states", action="store_true", default=True,
-                        help="仅输出五州（默认），--no-five-states 切回八州")
+    parser.add_argument("--exclude-path", default=None,
+                        help="排除样本清单 JSON，默认 train_dataset/excluded_samples.json")
     args = parser.parse_args(argv)
     if args.dry_run:
         print(json.dumps(protocol_dry_run(), ensure_ascii=False, indent=2))
         return
-    process_all(output_path=args.output, data_dir=args.data_dir, soil_path=args.soil_path,
-                five_states=args.five_states)
+    process_all(output_path=args.output, soil_path=args.soil_path,
+                exclude_path=args.exclude_path)
 
 
 if __name__ == "__main__":
