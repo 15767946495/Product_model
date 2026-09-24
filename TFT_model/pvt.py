@@ -126,7 +126,7 @@ class PVTTinyEncoder(nn.Module):
             nn.init.ones_(module.weight)
             nn.init.zeros_(module.bias)
 
-    def forward(self, x):
+    def forward_tokens(self, x, include_cls=True):
         for stage_idx, (patch, blocks, pos) in enumerate(
             zip(self.stages, self.blocks, self.pos_embeds)
         ):
@@ -147,4 +147,8 @@ class PVTTinyEncoder(nn.Module):
                 x = tokens.transpose(1, 2).reshape(
                     tokens.size(0), self.embed_dims[stage_idx], height, width
                 )
-        return self.norm(tokens[:, 0])
+        tokens = self.norm(tokens)
+        return tokens if include_cls else tokens[:, 1:]
+
+    def forward(self, x):
+        return self.forward_tokens(x, include_cls=True)[:, 0]

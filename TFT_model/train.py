@@ -53,7 +53,7 @@ from data import (
     GDD_FEATURE_NAME,
     CONSTRUCTED_FEATURES,
 )
-from cropnet_protocol import PROTOCOL_MAX_STEPS
+from cropnet_protocol import CROPNET_FIVE_STATES, PROTOCOL_MAX_STEPS
 
 # ========== 常量 ==========
 EARLY_STOP_PATIENCE: int = 2
@@ -243,7 +243,9 @@ def train_model(
     val_corr_hist: List[float] = []
     grad_modules = {
         "pvt": model.module.vit_encoder.backbone if isinstance(model, nn.DataParallel) else model.vit_encoder.backbone,
-        "rs_grn": model.module.cat_attn_prep_grn if isinstance(model, nn.DataParallel) else model.cat_attn_prep_grn,
+        "weather_grn": model.module.weather_context_grn if isinstance(model, nn.DataParallel) else model.weather_context_grn,
+        "rs_grn": model.module.remote_context_grn if isinstance(model, nn.DataParallel) else model.remote_context_grn,
+        "cross_modal": model.module.weather_remote_attn if isinstance(model, nn.DataParallel) else model.weather_remote_attn,
         "weather_vsn": model.module.grid_vsn if isinstance(model, nn.DataParallel) else model.grid_vsn,
         "spatial_cls": model.module.spatial_agg if isinstance(model, nn.DataParallel) else model.spatial_agg,
         "lstm": model.module.lstm_encoder if isinstance(model, nn.DataParallel) else model.lstm_encoder,
@@ -620,10 +622,10 @@ def main():
     val_ag = None
     if args.states:
         permitted = {s.strip().lower() for s in args.states.split(",") if s.strip()}
-        pairs = [p for p in pairs if str(p[0].get("State", "")).lower() in permitted]
-        print(f"  按州过滤 {sorted(permitted)} 后: {len(pairs)} 条")
     else:
-        print(f"  全量样本: {len(pairs)} 条（所有州）")
+        permitted = set(CROPNET_FIVE_STATES)
+    pairs = [p for p in pairs if str(p[0].get("State", "")).lower() in permitted]
+    print(f"  按州过滤 {sorted(permitted)} 后: {len(pairs)} 条")
 
     # 目标 = yield_per_acre(单产, bu/ac),无归一化
     train_pairs, val_pairs = _split_pairs_by_year(pairs, val_years)
