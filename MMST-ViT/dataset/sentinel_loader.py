@@ -54,7 +54,7 @@ class Sentinel_Dataset(Dataset):
 
 
 if __name__ == '__main__':
-    root_dir = "/mnt/data/Tiny CropNet"
+    root_dir = "/data/raid0/hqx/Product_model_runtime/DataSrc"
     # train = "./../data/soybean_train.json"
     train = "./../data/soybean_val.json"
     dataset = Sentinel_Dataset(root_dir, train)

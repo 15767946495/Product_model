@@ -14,20 +14,6 @@ AG_DATE_PAIRS = [
 ]
 
 
-def _relative_day_index(month_ids: torch.Tensor, day_ids: torch.Tensor) -> torch.Tensor:
-    """将日历日期转换为相对 4 月 1 日的索引，4 月 1 日为 1。"""
-    month_ids = month_ids.to(dtype=torch.long)
-    day_ids = day_ids.to(device=month_ids.device, dtype=torch.long)
-    month_starts = torch.tensor(
-        [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334],
-        device=month_ids.device,
-        dtype=torch.long,
-    )
-    safe_month = month_ids.clamp(1, 12)
-    result = month_starts[safe_month - 1] + day_ids - month_starts[3]
-    return torch.where((month_ids >= 1) & (day_ids >= 1), result, torch.zeros_like(result))
-
-
 def _broadcast_rs_forward(
     rs_encoded: torch.Tensor,
     month_ids: torch.Tensor,
@@ -79,7 +65,6 @@ def _build_interleaved_layout(
     B, T = month_ids.shape
     G = grid_mask.shape[1]
     device = month_ids.device
-    relative_days = _relative_day_index(month_ids, day_ids)
     seq_lens = seq_lens.to(device=device, dtype=torch.long).clamp(0, T)
     grid_mask = grid_mask.to(device=device, dtype=torch.bool)
     if ag_mask is None:
@@ -122,7 +107,7 @@ def _build_interleaved_layout(
             pad_mask[b, pos] = True
             block_boundaries[b, pos] = date != previous_date
             previous_date = date
-            token_time_indices[b, pos] = relative_days[b, t]
+            token_time_indices[b, pos] = t
             rs_grid_indices[b, pos] = grid
             rs_date_indices[b, pos] = rs_i
             if rs_i < 0:
@@ -137,7 +122,6 @@ def _build_interleaved_layout(
         "weather_time_indices": weather_time_indices,
         "rs_grid_indices": rs_grid_indices,
         "rs_date_indices": rs_date_indices,
-        "relative_days": relative_days,
     }
 
 
@@ -240,9 +224,9 @@ class GatedResidualNetwork(nn.Module):
             elif "fc" in n or "context" in n:
                 nn.init.xavier_uniform_(p, gain=1.0)
 
-    def forward(self, x, context=None):
+    def forward(self, x, context=None, skip=None):
         # 残差分支
-        skip = self.skip_proj(x)
+        skip = self.skip_proj(x if skip is None else skip)
         # 主路径
         x = self.fc1(x)
         if context is not None:
@@ -250,7 +234,7 @@ class GatedResidualNetwork(nn.Module):
         x = self.elu(x)
         x = self.fc2(x)
         x = self.glu(x)
-        x = self.norm(x + skip)
+        x = self.norm(x + skip if self.residual else x)
         return x
 
 
@@ -412,6 +396,8 @@ class CausalScaledDotProductAttention(nn.Module):
         attn_avg = attn_weights.mean(dim=1)
         ctx = torch.matmul(attn_avg, v)  # (B, T, head_dim)
         out = self.W_o(ctx)
+        if pad_mask is not None:
+            out = out * pad_mask.to(device=out.device, dtype=out.dtype).unsqueeze(-1)
         return out, attn_avg
 
 
@@ -430,7 +416,17 @@ class SoilStaticEncoder(nn.Module):
     ):
         super().__init__()
         self.hidden_size = hidden_size
-        self.linear = nn.Linear(soil_dim, hidden_size)
+        self.soil_dim = int(soil_dim)
+        self.variable_grns = nn.ModuleList([
+            nn.Linear(1, hidden_size) for _ in range(self.soil_dim)
+        ])
+        self.selection_grn = GatedResidualNetwork(
+            self.soil_dim * hidden_size,
+            hidden_size,
+            self.soil_dim,
+            dropout,
+        )
+        self.softmax = nn.Softmax(dim=-1)
         self.grn_cs = GatedResidualNetwork(
             hidden_size, hidden_size, hidden_size, dropout
         )
@@ -445,14 +441,28 @@ class SoilStaticEncoder(nn.Module):
         )
 
     def forward(
-        self, soil_feats: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        self, soil_feats: torch.Tensor, return_weights: bool = False
+    ) -> Tuple[torch.Tensor, ...]:
         # soil_feats: (B, soil_dim) 已 z-score 标准化
-        h = F.elu(self.linear(soil_feats))               # (B, H)
+        if soil_feats.shape[-1] != self.soil_dim:
+            raise ValueError(
+                f"soil_feats must have last dimension {self.soil_dim}"
+            )
+        variables = [
+            F.elu(layer(soil_feats[..., index:index + 1]))
+            for index, layer in enumerate(self.variable_grns)
+        ]
+        encoded = torch.stack(variables, dim=-2)  # (B, soil_dim, H)
+        weights = self.softmax(
+            self.selection_grn(encoded.reshape(soil_feats.shape[0], -1))
+        )
+        h = (encoded * weights.unsqueeze(-1)).sum(dim=-2)
         c_s = self.grn_cs(h)
         c_e = self.grn_ce(h)
         c_c = self.grn_cc(h)
         c_h = self.grn_ch(h)
+        if return_weights:
+            return c_s, c_e, c_c, c_h, weights
         return c_s, c_e, c_c, c_h
 
 
@@ -498,6 +508,7 @@ class LSTMEncoder(nn.Module):
         seq_lens: torch.Tensor,
         c_c: torch.Tensor = None,
         c_h: torch.Tensor = None,
+        valid_mask: Optional[torch.Tensor] = None,
     ):
         """
         Args:
@@ -512,6 +523,38 @@ class LSTMEncoder(nn.Module):
         B = x.shape[0]
         h0 = c_h.unsqueeze(0).repeat(self.num_layers * self.num_directions, 1, 1)
         c0 = c_c.unsqueeze(0).repeat(self.num_layers * self.num_directions, 1, 1)
+
+        if valid_mask is not None:
+            valid_mask = valid_mask.to(device=x.device, dtype=torch.bool)
+            if valid_mask.shape != x.shape[:2]:
+                raise ValueError(f"valid_mask shape {valid_mask.shape} != {x.shape[:2]}")
+            outputs = []
+            h_state, c_state = h0, c0
+            for time_index in range(x.shape[1]):
+                step_out, (next_h, next_c) = self.lstm(
+                    x[:, time_index:time_index + 1], (h_state, c_state)
+                )
+                step_valid = valid_mask[:, time_index].view(1, B, 1)
+                h_state = torch.where(step_valid, next_h, h_state)
+                c_state = torch.where(step_valid, next_c, c_state)
+                outputs.append(step_out[:, 0] * step_valid.squeeze(0).to(step_out.dtype))
+            lstm_out = torch.stack(outputs, dim=1)
+            batch_idx = torch.arange(B, device=x.device)
+            positions = torch.arange(x.shape[1], device=x.device).expand_as(valid_mask)
+            last_idx = positions.masked_fill(~valid_mask, -1).max(dim=1).values
+            sample_valid = last_idx >= 0
+            last_idx = last_idx.clamp_min(0)
+            enc_h_last = lstm_out[batch_idx, last_idx, :]
+            enc_c_last = c_state[-1]
+            x_orig = x
+            lstm_feat = self.gate_add_norm(lstm_out, x_orig)
+            lstm_feat = lstm_feat * valid_mask.unsqueeze(-1).to(lstm_feat.dtype)
+            last_hidden = lstm_feat[batch_idx, last_idx, :]
+            sample_valid_float = sample_valid.unsqueeze(-1).to(lstm_feat.dtype)
+            last_hidden = last_hidden * sample_valid_float
+            enc_h_last = enc_h_last * sample_valid_float
+            enc_c_last = enc_c_last * sample_valid_float
+            return lstm_feat, last_hidden, enc_h_last, enc_c_last
 
         seq_lens_cpu = seq_lens.cpu().tolist()
         seq_lens_sorted, idx = torch.sort(
@@ -667,106 +710,81 @@ class SpatialAttentionAggregator(nn.Module):
         k = self.W_k(x_with_pe)
         v = self.W_v(x_with_pe)
         scores = torch.matmul(q, k.transpose(-2, -1)).squeeze(2) / self.scale
-        scores = scores.masked_fill(~key_valid, float("-inf"))
+        scores = scores.masked_fill(~key_valid, torch.finfo(scores.dtype).min)
         w = torch.softmax(scores, dim=-1)                         # (B,T,G)
+        w = w * key_valid.to(w.dtype)
+        w = w / w.sum(dim=-1, keepdim=True).clamp_min(torch.finfo(w.dtype).eps)
         w = self.dropout(w)
         w = w * key_valid.to(w.dtype)
         cls_out = torch.matmul(w.unsqueeze(2), v).squeeze(2)
+        cls_out = cls_out * key_valid.any(dim=-1, keepdim=True).to(cls_out.dtype)
         return self.norm(cls_out), w
 
 
-class WeatherRemoteCrossAttention(nn.Module):
-    """Daily weather-grid queries over all remote-sensing grids of that month."""
+class RemoteGridWeatherCrossAttention(nn.Module):
+    """MMST-ViT监督拓扑：遥感月度Query查询同网格当月天气KV。"""
 
     def __init__(self, hidden_size: int, num_heads: int = 1, dropout: float = 0.1):
         super().__init__()
-        self.hidden_size = int(hidden_size)
-        self.num_heads = int(num_heads)
-        if self.hidden_size % self.num_heads != 0:
-            raise ValueError("hidden_size must be divisible by num_heads")
-        self.head_dim = self.hidden_size // self.num_heads
-        self.W_q = nn.Linear(hidden_size, hidden_size)
-        self.W_k = nn.Linear(hidden_size, hidden_size)
-        self.W_v = nn.Linear(hidden_size, hidden_size)
-        self.fusion_grn = GatedResidualNetwork(
-            input_size=hidden_size,
-            hidden_size=hidden_size,
-            output_size=hidden_size,
-            context_size=hidden_size,
-            dropout=dropout,
-        )
-        self.dropout = nn.Dropout(dropout)
-        self.distance_scale = nn.Parameter(torch.tensor(1.0))
+        if num_heads <= 0 or hidden_size % num_heads != 0:
+            raise ValueError("hidden_size must be divisible by positive num_heads")
+        self.hidden_size = hidden_size
+        self.num_heads = num_heads
+        self.head_dim = hidden_size // num_heads
+        self.q = nn.Linear(hidden_size, hidden_size, bias=False)
+        self.k = nn.Linear(hidden_size, hidden_size, bias=False)
+        self.v = nn.Linear(hidden_size, hidden_size, bias=False)
+        self.out = nn.Sequential(nn.Linear(hidden_size, hidden_size), nn.Dropout(dropout))
         self.scale = math.sqrt(float(self.head_dim))
-        for layer in (self.W_q, self.W_k, self.W_v):
-            nn.init.xavier_uniform_(layer.weight)
-            nn.init.zeros_(layer.bias)
 
     def forward(
         self,
-        weather: torch.Tensor,
         remote: torch.Tensor,
-        coords: torch.Tensor,
-        grid_mask: torch.Tensor,
-        month_ids: torch.Tensor,
-        ag_mask: torch.Tensor,
-        soil_context: Optional[torch.Tensor] = None,
+        weather: torch.Tensor,
+        weather_mask: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        B, G, T, H = weather.shape
-        if remote.shape[:3] != (B, G, len(AG_DATE_PAIRS)):
-            raise ValueError(
-                f"remote shape {remote.shape} must start with {(B, G, len(AG_DATE_PAIRS))}"
-            )
-        month_to_index = torch.full((13,), -1, device=weather.device, dtype=torch.long)
-        for index, (month, _) in enumerate(AG_DATE_PAIRS):
-            month_to_index[month] = index
-        rs_index = month_to_index[month_ids.to(weather.device).long().clamp(0, 12)]
-        valid_month = rs_index >= 0
-        safe_index = rs_index.clamp_min(0)
-        remote_by_time = torch.gather(
-            remote,
-            dim=2,
-            index=safe_index[:, None, :, None].expand(B, G, T, H),
-        ).transpose(1, 2)  # (B,T,G,H)
+        if remote.ndim != 4 or weather.ndim != 4:
+            raise ValueError("remote must be (B,G,M,D), weather must be (B,G,T,D)")
+        B, G, M, H = remote.shape
+        if weather.shape[:2] != (B, G) or weather.shape[-1] != H:
+            raise ValueError("remote and weather must share (B,G,D)")
+        T = weather.shape[2]
+        if M != len(AG_DATE_PAIRS) or T != len(AG_DATE_PAIRS) * 28:
+            raise ValueError("expected 6 months of 28 weather tokens")
+        days_per_month = 28
+        if weather_mask is None:
+            weather_mask = torch.ones(B, G, T, device=weather.device, dtype=torch.bool)
+        if weather_mask.shape != (B, G, T):
+            raise ValueError("weather_mask must have shape (B,G,T)")
 
-        weather_t = weather.transpose(1, 2)  # (B,T,G,H)
-        q = self.W_q(weather_t).view(B, T, G, self.num_heads, self.head_dim)
-        k = self.W_k(remote_by_time).view(B, T, G, self.num_heads, self.head_dim)
-        v = self.W_v(remote_by_time).view(B, T, G, self.num_heads, self.head_dim)
+        q = self.q(remote).view(B, G, M, self.num_heads, self.head_dim)
+        k = self.k(weather).view(B, G, T, self.num_heads, self.head_dim)
+        v = self.v(weather).view(B, G, T, self.num_heads, self.head_dim)
         q = q.permute(0, 1, 3, 2, 4)
         k = k.permute(0, 1, 3, 2, 4)
         v = v.permute(0, 1, 3, 2, 4)
-        scores = torch.matmul(q, k.transpose(-2, -1)) / self.scale
-
-        distance = torch.cdist(coords.float(), coords.float())
-        distance = distance / distance.mean(dim=(1, 2), keepdim=True).clamp_min(1e-6)
-        scores = scores - F.softplus(self.distance_scale) * distance[:, None, None]
-
-        query_valid = grid_mask[:, None, None, :, None]
-        remote_valid = grid_mask[:, None, None, None, :]
-        month_available = torch.gather(
-            ag_mask.to(weather.device, dtype=torch.bool), 1, safe_index
-        ) & valid_month
-        valid = query_valid & remote_valid & month_available[:, :, None, None, None]
-        scores = scores.masked_fill(~valid, -1e9)
+        month_mask = weather_mask.reshape(B, G, M, days_per_month)
+        k = k.reshape(B, G, self.num_heads, M, days_per_month, self.head_dim)
+        v = v.reshape(B, G, self.num_heads, M, days_per_month, self.head_dim)
+        scores = (q.unsqueeze(-2) * k).sum(dim=-1) / self.scale
+        valid = month_mask[:, :, None, :, :]
+        scores = scores.masked_fill(~valid, torch.finfo(scores.dtype).min)
         weights = torch.softmax(scores, dim=-1) * valid.to(scores.dtype)
-        weights = self.dropout(weights)
-        remote_context = torch.matmul(weights, v)
-        remote_context = remote_context.permute(0, 1, 3, 2, 4).reshape(B, T, G, H)
-
-        if soil_context is None:
-            soil_context = torch.zeros(B, H, device=weather.device, dtype=weather.dtype)
-        context = soil_context[:, None, None, :].expand(B, T, G, H)
-        fused = self.fusion_grn(weather_t + remote_context, context=context)
-        fused = fused * grid_mask[:, None, :, None].to(fused.dtype)
-        return fused.transpose(1, 2), weights.mean(dim=2)
+        weights = weights / weights.sum(dim=-1, keepdim=True).clamp_min(torch.finfo(weights.dtype).eps)
+        fused = torch.sum(weights.unsqueeze(-1) * v, dim=-2)
+        fused = fused.permute(0, 1, 3, 2, 4).reshape(B, G, M, H)
+        fused = self.out(fused)
+        fused = fused * month_mask.any(dim=-1).unsqueeze(-1).to(fused.dtype)
+        return fused, weights.mean(dim=2).reshape(B, G, M, days_per_month)
 
 
 class WeatherRemotePatchPretrain(nn.Module):
-    """MMST-style pretraining: weather tokens query remote image patches."""
+    """天气 token Query 对遥感 patch Key/Value 执行纯跨模态注意力。"""
 
     def __init__(self, hidden_size: int, num_heads: int = 4, dropout: float = 0.1):
         super().__init__()
+        if num_heads <= 0:
+            raise ValueError("num_heads must be positive")
         if hidden_size % num_heads != 0:
             raise ValueError("hidden_size must be divisible by num_heads")
         self.hidden_size = hidden_size
@@ -775,24 +793,36 @@ class WeatherRemotePatchPretrain(nn.Module):
         self.q = nn.Linear(hidden_size, hidden_size, bias=False)
         self.k = nn.Linear(hidden_size, hidden_size, bias=False)
         self.v = nn.Linear(hidden_size, hidden_size, bias=False)
-        self.out = nn.Sequential(nn.Linear(hidden_size, hidden_size), nn.Dropout(dropout))
-        self.projection = nn.Sequential(
-            nn.Linear(hidden_size, hidden_size), nn.GELU(), nn.Linear(hidden_size, hidden_size)
+        self.projection = GatedResidualNetwork(
+            input_size=hidden_size,
+            hidden_size=hidden_size,
+            output_size=hidden_size,
+            dropout=dropout,
         )
         self.scale = math.sqrt(float(self.head_dim))
 
-    def forward(self, weather_tokens: torch.Tensor, remote_patches: torch.Tensor):
+    def forward(
+        self,
+        weather_tokens: torch.Tensor,
+        remote_patches: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if weather_tokens.ndim != 3:
+            raise ValueError("weather_tokens must have shape (B,T,D)")
+        if remote_patches.ndim != 3:
+            raise ValueError("remote_patches must have shape (B,P,D)")
         B, Nw, H = weather_tokens.shape
-        _, Np, _ = remote_patches.shape
+        remote_batch, Np, remote_hidden = remote_patches.shape
+        if remote_batch != B or H != self.hidden_size or remote_hidden != H:
+            raise ValueError("weather_tokens and remote_patches must share (B,D)")
         q = self.q(weather_tokens).view(B, Nw, self.num_heads, self.head_dim).transpose(1, 2)
-        k = self.k(remote_patches).view(B, Np, self.num_heads, self.head_dim).transpose(1, 2)
-        v = self.v(remote_patches).view(B, Np, self.num_heads, self.head_dim).transpose(1, 2)
+        remote_kv = remote_patches
+        k = self.k(remote_kv).view(B, Np, self.num_heads, self.head_dim).transpose(1, 2)
+        v = self.v(remote_kv).view(B, Np, self.num_heads, self.head_dim).transpose(1, 2)
         scores = torch.matmul(q, k.transpose(-2, -1)) / self.scale
         weights = torch.softmax(scores, dim=-1)
-        fused = torch.matmul(weights, v).transpose(1, 2).reshape(B, Nw, H)
-        fused = self.out(fused)
-        embedding = self.projection(fused.mean(dim=1))
-        return embedding, weights.mean(dim=1)
+        remote_context = torch.matmul(weights, v).transpose(1, 2).reshape(B, Nw, H)
+        fused_tokens = self.projection(remote_context)
+        return fused_tokens, weights.mean(dim=1)
 
 
 # ============================================================
@@ -883,7 +913,7 @@ class TFTEncoderForYieldPrediction(nn.Module):
             context_size=hidden_size,
             dropout=dropout,
         )
-        self.weather_remote_attn = WeatherRemoteCrossAttention(
+        self.weather_remote_attn = RemoteGridWeatherCrossAttention(
             hidden_size, num_heads=num_heads, dropout=dropout
         )
 
@@ -944,6 +974,7 @@ class TFTEncoderForYieldPrediction(nn.Module):
         day_ids: Optional[torch.Tensor] = None,
         ag_images: Optional[torch.Tensor] = None,
         ag_mask: Optional[torch.Tensor] = None,
+        ag_grid_mask: Optional[torch.Tensor] = None,
         diagnose_mode: Optional[Dict[str, bool]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, Any]]:
         """
@@ -956,6 +987,8 @@ class TFTEncoderForYieldPrediction(nn.Module):
             soil_feats: (B, soil_dim) 县级连续土壤静态特征(已标准化,不进网格注意力)
             seq_lens: (batch_size,) 有效时序长度
             ag_images: (B, 6, G, 3, 224, 224) 遥感图像
+            ag_mask: (B, 6) 月份级遥感有效性
+            ag_grid_mask: (B, 6, G) 月份-网格级遥感有效性
 
         Returns:
             pred_all: (B, 1) 县级最终产量预测
@@ -1004,29 +1037,54 @@ class TFTEncoderForYieldPrediction(nn.Module):
         rs_encoded = self.remote_context_grn(rs_encoded, context=rs_context)
 
         # ========== 5. 同时相空间融合 -> 时间 TFT 注意力 ==========
-        Te = int(T)
-        pad_mask = torch.arange(Te, device=device).unsqueeze(0) < seq_lens.unsqueeze(1)
+        Te = len(AG_DATE_PAIRS)
         if month_ids is None or day_ids is None:
             raise ValueError("必须传入 month_ids 和 day_ids")
-        time_indices = _relative_day_index(month_ids[:, :Te], day_ids[:, :Te])
+        monthly_months = torch.arange(4, 10, device=device).view(1, Te, 1)
+        weather_months = month_ids.to(device=device).long()[:, None, :]
+        weather_valid = torch.arange(T, device=device).view(1, 1, T) < seq_lens[:, None, None]
+        month_valid = (weather_months == monthly_months) & weather_valid
+        month_valid = month_valid.any(dim=-1) & ag_mask.to(device=device, dtype=torch.bool)
+        if ag_grid_mask is None:
+            month_remote_valid = ag_mask.to(device=device, dtype=torch.bool)
+        else:
+            month_remote_valid = ag_grid_mask.to(device=device, dtype=torch.bool).any(dim=2)
+        month_valid = month_valid & month_remote_valid
+        month_seq_lens = month_valid.sum(dim=1).clamp_max(Te)
+        pad_mask = month_valid
+        weather_mask = weather_valid.expand(B, G, T)
+        month_indices = (month_ids.to(device=device).long() - 4).clamp(0, Te - 1)
+        month_mask_by_weather = month_valid[:, None, :].expand(B, G, Te).gather(
+            2, month_indices[:, None, :].expand(B, G, T)
+        )
+        weather_mask = weather_mask & month_mask_by_weather
+        if ag_grid_mask is not None:
+            grid_month_mask = ag_grid_mask.to(device=device, dtype=torch.bool).transpose(1, 2)
+            weather_mask = weather_mask & grid_month_mask.gather(
+                2, month_indices[:, None, :].expand(B, G, T)
+            )
         weather_fused, cross_modal_weights = self.weather_remote_attn(
-            weather_feat,
             rs_encoded,
-            grid_coords,
-            grid_mask,
-            month_ids[:, :Te],
-            ag_mask,
-            soil_context=c_s,
+            weather_feat,
+            weather_mask.expand(B, G, T),
+        )
+        time_indices = torch.arange(Te, device=device, dtype=torch.long).expand(B, -1)
+        spatial_token_mask = month_valid[:, :, None] & (
+            ag_grid_mask.to(device=device, dtype=torch.bool)
+            if ag_grid_mask is not None
+            else grid_mask[:, None, :].expand(B, Te, G)
         )
         temporal_feat, spatial_weights = self.spatial_agg.forward_weights(
             weather_fused.transpose(1, 2),
             grid_coords,
             grid_mask,
+            token_mask=spatial_token_mask,
             time_indices=time_indices,
         )
         # 空间融合后才进入时间编码，避免每个网格分别保存一套 LSTM 激活。
         lstm_feat_raw, _, _, _ = self.lstm_encoder(
-            temporal_feat, seq_lens=seq_lens, c_c=c_c, c_h=c_h
+            temporal_feat, seq_lens=month_seq_lens, c_c=c_c, c_h=c_h,
+            valid_mask=month_valid,
         )
         temporal_context = c_e[:, None, :].expand(B, Te, self.hidden_size)
         temporal_feat = self.cat_attn_prep_grn(
@@ -1034,23 +1092,23 @@ class TFTEncoderForYieldPrediction(nn.Module):
         )
         temporal_feat = temporal_feat * pad_mask.unsqueeze(-1).to(temporal_feat.dtype)
         attn_feat, attn_weights_out = self.attention(
-            x=temporal_feat + self._compute_st_pe(
-                grid_coords.new_zeros(B, Te, 1),
-                grid_coords.new_zeros(B, Te, 1),
-                time_indices,
-            ).to(temporal_feat.dtype),
+            x=temporal_feat,
             pad_mask=pad_mask,
         )
         pred_features = self.pred_grn(attn_feat)
         pred_dist_all = torch.cat(
             [self.mean_head(pred_features), self.variance_head(pred_features)], dim=-1
         )  # (B,T,2)
-        last_token_idx = pad_mask.sum(dim=1).clamp_min(1) - 1
+        pred_dist_all = pred_dist_all * month_valid.unsqueeze(-1).to(pred_dist_all.dtype)
+        valid_counts = month_valid.long().sum(dim=1)
+        last_token_idx = (month_valid.long().cumsum(dim=1).argmax(dim=1))
         batch_idx = torch.arange(B, device=device)
         last_token = attn_feat[batch_idx, last_token_idx]
 
         # 最终预测取最后有效时间步；所有时间步分布保留给一致性损失。
         pred_all = pred_dist_all[batch_idx, last_token_idx]  # (B, 2)
+        sample_valid = month_valid.any(dim=1)
+        pred_all = pred_all * sample_valid.unsqueeze(-1).to(pred_all.dtype)
 
         grad_tensors = {
             "static_feat": c_s,
@@ -1062,6 +1120,11 @@ class TFTEncoderForYieldPrediction(nn.Module):
             "last_token": last_token,
             "pred_features": pred_features,
             "pred_dist_all": pred_dist_all,
+            "temporal_seq_lens": month_seq_lens,
+            "month_valid": month_valid,
+            "monthly_month_ids": torch.arange(4, 10, device=device).expand(B, Te),
+            "month_remote_valid": month_remote_valid,
+            "sample_valid": sample_valid,
             "cross_modal_weights": cross_modal_weights,
             "weather_fused": weather_fused,
             "pred_all": pred_all,
@@ -1076,36 +1139,21 @@ class TFTEncoderForYieldPrediction(nn.Module):
         aux_dict: Dict[str, Any] = {
             "grad_tensors": grad_tensors,
             "pred_all": pred_all,
+            "pred_dist_all": pred_dist_all,
             "grid_vsn_weights": grid_vsn_weights,
             "county_vsn_weights": None,
             "spatial_weights": spatial_weights,
             "cross_modal_weights": cross_modal_weights,
+            "weather_fused": weather_fused,
+            "temporal_seq_lens": month_seq_lens,
+            "month_valid": month_valid,
+            "monthly_month_ids": torch.arange(4, 10, device=device).expand(B, Te),
+            "month_remote_valid": month_remote_valid,
+            "sample_valid": sample_valid,
+            "temporal_feat": temporal_feat,
         }
 
         return pred_all, attn_weights_out, aux_dict
-
-    def _compute_st_pe(
-        self, lat: torch.Tensor, lon: torch.Tensor, t_idx: torch.Tensor
-    ) -> torch.Tensor:
-        """WeatherFormer 四槽加性时空位置编码。
-        lat, lon: (B, T, 1) rad; t_idx: (B, T) int; 返回 (B, T, H)."""
-        d = self.hidden_size
-        nf = d // 4
-        device = lat.device
-        i = torch.arange(nf, device=device, dtype=lat.dtype)
-        freq = 10000.0 ** (-4.0 * i / d)
-        freq = freq.view(1, 1, nf)  # (1, 1, nf)
-
-        t = t_idx.unsqueeze(-1).float()  # (B, T, 1)
-        s_lat = lat  # (B, T, 1)
-        s_lon = lon
-
-        pe = torch.zeros(*lat.shape[:-1], d, device=device, dtype=lat.dtype)
-        pe[..., 0::4] = torch.sin(t * freq)
-        pe[..., 1::4] = torch.cos(t * freq)
-        pe[..., 2::4] = torch.sin(s_lat * freq)
-        pe[..., 3::4] = torch.cos(s_lon * freq)
-        return pe
 
     def _forward_remote_sensing(
         self,

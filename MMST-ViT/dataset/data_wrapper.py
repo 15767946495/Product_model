@@ -32,15 +32,12 @@ class DataWrapper(object):
                                               transforms.RandomApply([color_jitter], p=0.8),
                                               transforms.RandomGrayscale(p=0.2),
                                               transforms.GaussianBlur(kernel_size=self.kernel_size),
-                                              transforms.Normalize([0.466, 0.471, 0.380], [0.195, 0.194, 0.192]),
                                               ])
         return data_transforms
 
     def get_transform_val(self):
         # get a set of data augmentation transformations as described in the SimCLR paper.
-        data_transforms = transforms.Compose([transforms.CenterCrop(size=self.img_size),
-                                              transforms.Normalize([0.466, 0.471, 0.380], [0.195, 0.194, 0.192]),
-                                              ])
+        data_transforms = transforms.Compose([transforms.CenterCrop(size=self.img_size)])
         return data_transforms
 
 
@@ -60,7 +57,7 @@ class ScalarNorm(object):
 
 
 if __name__ == '__main__':
-    root_dir = "/mnt/data/Crop"
+    root_dir = "/data/raid0/hqx/Product_model_runtime/DataSrc"
     train = "./../data/soybean_train.json"
     dataset = Sentinel_Dataset(root_dir, train)
     train_loader = torch.utils.data.DataLoader(dataset, batch_size=1)

@@ -5,8 +5,7 @@ cropnet 推理脚本。
 绘制变化曲线，并输出最后一个时间步的指标。
 
 用法：
-  python infer.py                          # val_year=2022
-  python infer.py --val_year 2021
+  python infer.py                          # final evaluation year=2022
   python infer.py --val_year 2022 --ckpt custom_path.pth
 """
 
@@ -31,13 +30,14 @@ _THIS_DIR = Path(__file__).resolve().parent
 if str(_THIS_DIR) not in sys.path:
     sys.path.insert(0, str(_THIS_DIR))
 
-from models import MODEL_CONTRACT_VERSION, TFTEncoderForYieldPrediction
+from models import TFTEncoderForYieldPrediction
 from data import (
     load_jsonl,
     load_grid_cache,
     load_county_soil,
     build_grid_samples,
     GridTimeSeriesDataset,
+    AgricultureImageDataset,
     make_grid_collate_fn,
     SOIL_DIM,
     DEFAULT_DYNAMIC_FEATURE_NAMES,
@@ -54,6 +54,15 @@ from cropnet_protocol import (
     PROTOCOL_DAYS_PER_MONTH,
 )
 from error_report import metrics_by_group, prediction_records
+from train import load_checkpoint_state
+from cropnet_protocol import normalize_state_name
+
+DEFAULT_OUTPUT_DIR = "/data/raid0/hqx/TFT_train/fixed_2021"
+
+
+def sample_valid_indices(sample_valid: torch.Tensor) -> torch.Tensor:
+    """Return batch indices that contain at least one valid supervision month."""
+    return torch.nonzero(sample_valid.to(dtype=torch.bool), as_tuple=False).flatten()
 
 
 def last_valid_index(seq_lens: torch.Tensor) -> torch.Tensor:
@@ -61,13 +70,67 @@ def last_valid_index(seq_lens: torch.Tensor) -> torch.Tensor:
     return (seq_lens - 1).clamp_min(0)
 
 
-def cutoff_index(month: torch.Tensor, day: torch.Tensor, seq_len: int, cutoff: Tuple[int, int]) -> int:
-    """返回序列中不晚于 cutoff 的最后一个协议日位置。"""
-    mm, dd = cutoff
-    valid = torch.ones(seq_len, dtype=torch.bool, device=month.device)
-    valid &= (month[:seq_len] < mm) | ((month[:seq_len] == mm) & (day[:seq_len] <= dd))
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="cropnet 推理")
+    parser.add_argument("--val_year", type=str, default="2022",
+                        help="验证年份，默认 2022")
+    parser.add_argument("--ckpt", type=str, default="final_model.pth",
+                        help="checkpoint 文件名或路径，默认 final_model.pth")
+    parser.add_argument("--states", type=str,
+                        default=",".join(sorted(CROPNET_FIVE_STATES)),
+                        help="按州过滤(逗号分隔的小写全称)，范围限定为协议五州")
+    parser.add_argument("--grid_cache", type=str, default=None,
+                        help="网格级气象缓存路径,默认 train_dataset/grid_cache.pt")
+    parser.add_argument("--soil", type=str, default=None,
+                        help="县级土壤数据路径,默认 soil_dataset/county_soil.json")
+    parser.add_argument("--data_jsonl", type=str, default=None)
+    parser.add_argument("--output_dir", type=str, default=DEFAULT_OUTPUT_DIR,
+                        help="输出目录，默认与 checkpoint 同目录")
+    parser.add_argument("--device", type=str, default=None)
+    parser.add_argument("--batch_size", type=int, default=32)
+    parser.add_argument("--cutoffs", type=str,
+                        default="04-28,05-28,06-28,07-28,08-28,09-28",
+                        help="提前预报节点(MM-DD,逗号分隔)")
+    return parser
+
+
+def cutoff_index(
+    monthly_month_ids: torch.Tensor,
+    month_valid: torch.Tensor,
+    cutoff: Tuple[int, int],
+) -> int:
+    """在固定6个月槽位中返回不晚于 cutoff 的最后有效槽位。"""
+    mm, _ = cutoff
+    if monthly_month_ids.shape != month_valid.shape:
+        raise ValueError("monthly_month_ids and month_valid must share shape (6,)")
+    valid = month_valid.to(dtype=torch.bool) & (monthly_month_ids <= mm)
     indices = torch.nonzero(valid, as_tuple=False).flatten()
     return int(indices[-1].item()) if indices.numel() else -1
+
+
+def predictions_at_cutoffs(
+    pred_dist_all: torch.Tensor,
+    monthly_month_ids: torch.Tensor,
+    month_valid: torch.Tensor,
+    cutoffs: List[Tuple[int, int]],
+) -> torch.Tensor:
+    """在原始6个月槽位中选择每个 cutoff 的最后有效月。"""
+    results = []
+    valid_results = []
+    for cutoff in cutoffs:
+        raw_indices = torch.tensor(
+            [cutoff_index(monthly_month_ids[b], month_valid[b], cutoff)
+             for b in range(pred_dist_all.shape[0])],
+            device=pred_dist_all.device,
+            dtype=torch.long,
+        )
+        valid_results.append(raw_indices >= 0)
+        indices = raw_indices.clamp_min(0)
+        results.append(pred_dist_all[torch.arange(pred_dist_all.shape[0], device=pred_dist_all.device), indices])
+    if not results:
+        empty = pred_dist_all.new_empty((pred_dist_all.shape[0], 0, pred_dist_all.shape[-1]))
+        return empty, torch.empty(pred_dist_all.shape[0], 0, dtype=torch.bool, device=pred_dist_all.device)
+    return torch.stack(results, dim=1), torch.stack(valid_results, dim=1)
 
 
 def parse_cutoffs(value: str) -> List[Tuple[int, int]]:
@@ -88,54 +151,97 @@ def parse_cutoffs(value: str) -> List[Tuple[int, int]]:
             ) from error
         if not (
             PROTOCOL_START_MONTH <= mm <= PROTOCOL_END_MONTH
-            and 1 <= dd <= PROTOCOL_DAYS_PER_MONTH
+            and dd == PROTOCOL_DAYS_PER_MONTH
             and (mm, dd) <= (PROTOCOL_END_MONTH, PROTOCOL_DAYS_PER_MONTH)
         ):
             raise ValueError(
-                f"cutoff '{text}' is outside protocol window 04-01--09-28"
+                f"cutoff '{text}' is outside the month-end cutoff protocol; expected MM-28"
             )
         cutoffs.append((mm, dd))
     return cutoffs
 
 
+def validate_infer_args(val_year: str, states: str):
+    if val_year != "2022":
+        raise ValueError("fixed protocol inference only allows val_year=2022")
+    requested = {
+        normalize_state_name(item)
+        for item in (states or "").split(",")
+        if item.strip()
+    }
+    if requested != CROPNET_FIVE_STATES:
+        raise ValueError("inference states must equal the complete CropNet five-state set")
+    return requested
+
+
+def select_2022_evaluation_pairs(pairs):
+    """选择五州 2022 年最终评估对，兼容大小写字段名。"""
+    selected = []
+    for meta, entry in pairs:
+        if not isinstance(meta, dict):
+            raise ValueError("evaluation pair metadata must be a dict")
+        year = meta.get("Year", meta.get("year"))
+        state = meta.get("State", meta.get("state"))
+        if year is None or state is None:
+            raise ValueError("evaluation pair metadata requires Year/year and State/state")
+        if int(year) == 2022 and normalize_state_name(state) in CROPNET_FIVE_STATES:
+            selected.append((meta, entry))
+    states = {
+        normalize_state_name(meta.get("State", meta.get("state")))
+        for meta, _ in selected
+    }
+    missing = CROPNET_FIVE_STATES - states
+    if missing:
+        raise ValueError(f"2022 evaluation data missing protocol states: {sorted(missing)}")
+    return selected
+
+
+def build_inference_dataset(pairs, soil_dict, dynamic_feature_names):
+    samples = build_grid_samples(
+        pairs, soil_dict=soil_dict, dynamic_feature_names=dynamic_feature_names
+    )
+    metadata = {
+        (str(meta.get("FIPS", "")).zfill(5), int(meta.get("Year", meta.get("year")))): meta
+        for meta, _ in pairs
+    }
+    ag_samples = []
+    for sample in samples:
+        meta = dict(metadata[(sample["FIPS"], sample["year"])])
+        meta["State"] = normalize_state_name(meta.get("State", meta.get("state")))
+        meta["Year"] = int(meta.get("Year", meta.get("year")))
+        ag_samples.append(meta)
+    ag_dataset = AgricultureImageDataset(ag_samples, train=False, seed=0)
+    return GridTimeSeriesDataset(samples, ag_dataset=ag_dataset)
+
+
+def load_inference_checkpoint(path: str):
+    payload = torch.load(path, map_location="cpu", weights_only=False)
+    if isinstance(payload, dict) and isinstance(payload.get("model"), dict):
+        state = {key.removeprefix("module."): value for key, value in payload["model"].items()}
+        return state, payload.get("model_hparams") or {}, payload.get("feature_norm") or {}
+    return load_checkpoint_state(path), {}, {}
+
+
 def infer():
-    parser = argparse.ArgumentParser(description="cropnet 推理")
-    parser.add_argument("--val_year", type=str, default="2022",
-                        help="验证年份，默认 2022")
-    parser.add_argument("--ckpt", type=str, default=None,
-                        help="checkpoint 路径，默认 train_output/val_<val_year>/best_model.pth")
-    parser.add_argument("--states", type=str,
-                        default=",".join(sorted(CROPNET_FIVE_STATES)),
-                        help="按州过滤(逗号分隔的小写全称)，范围限定为协议五州")
-    parser.add_argument("--grid_cache", type=str, default=None,
-                        help="网格级气象缓存路径,默认 train_dataset/grid_cache.pt")
-    parser.add_argument("--soil", type=str, default=None,
-                        help="县级土壤数据路径,默认 soil_dataset/county_soil.json")
-    parser.add_argument("--data_jsonl", type=str, default=None)
-    parser.add_argument("--output_dir", type=str, default=None,
-                        help="输出目录，默认与 checkpoint 同目录")
-    parser.add_argument("--device", type=str, default=None)
-    parser.add_argument("--batch_size", type=int, default=32)
-    parser.add_argument("--cutoffs", type=str,
-                        default="04-28,05-28,06-28,07-28,08-28,09-28",
-                        help="提前预报节点(MM-DD,逗号分隔)，必须位于协议日期窗口内")
+    parser = build_parser()
     args = parser.parse_args()
 
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
-    val_tag = args.val_year.replace(",", "_")
-    output_dir = args.output_dir or os.path.join("/data/raid0/hqx", "TFT_train", f"val_{val_tag}")
+    validate_infer_args(args.val_year, args.states)
+    output_dir = args.output_dir
     os.makedirs(output_dir, exist_ok=True)
 
     # 提前预报节点(MM-DD) -> [(month, day), ...]
     cutoff_list = parse_cutoffs(args.cutoffs)
 
-    ckpt_path = args.ckpt or os.path.join(output_dir, "best_model.pth")
-    if not os.path.exists(ckpt_path):
-        # 尝试 MSE 版
-        ckpt_path = os.path.join(output_dir, "best_model.pth")
+    ckpt_path = args.ckpt
+    if not os.path.isabs(ckpt_path):
+        ckpt_path = os.path.join(output_dir, ckpt_path)
     if not os.path.exists(ckpt_path):
         print(f"[错误] checkpoint 不存在: {ckpt_path}")
         sys.exit(1)
+
+    checkpoint_state, checkpoint_hparams, checkpoint_norm = load_inference_checkpoint(ckpt_path)
 
     feature_norm_path = os.path.join(output_dir, "feature_norm.json")
 
@@ -150,18 +256,18 @@ def infer():
         print(f"[错误] grid_cache 行数 {len(cache_entries)} 与 jsonl 行数 {len(meta_lines)} 不一致")
         sys.exit(1)
 
-    # 按年份划分:验证集 = val_year
-    val_years = [int(y) for y in args.val_year.split(",")]
-    val_set = set(val_years)
+    # 固定协议：2022 仅用于最终评估，不参与训练或 checkpoint 选择。
     pairs = list(zip(meta_lines, cache_entries))
-    requested_states = {s.strip().lower() for s in args.states.split(",") if s.strip()}
-    state_set = requested_states & CROPNET_FIVE_STATES
-    pairs = [p for p in pairs if str(p[0].get("State", "")).lower() in state_set]
-    val_pairs = [(m, e) for m, e in pairs if int(m["Year"]) in val_set]
-    print(f"    验证样本: {len(val_pairs)}")
+    requested_states = validate_infer_args(args.val_year, args.states)
+    pairs = [
+        p for p in pairs
+        if normalize_state_name(p[0].get("State", p[0].get("state", ""))) in requested_states
+    ]
+    val_pairs = select_2022_evaluation_pairs(pairs)
+    print(f"    最终评估样本: {len(val_pairs)}")
 
     if not val_pairs:
-        print(f"[错误] 无验证样本 (val_year={args.val_year})")
+        print(f"[错误] 无最终评估样本 (evaluation_year={args.val_year})")
         sys.exit(1)
 
     # 县级连续土壤静态特征
@@ -171,8 +277,13 @@ def infer():
     # ========== 2. 加载特征标准化参数 ==========
     print(f"[2] 加载特征标准化参数")
     # 特征 norm
-    with open(feature_norm_path, "r", encoding="utf-8") as f:
-        fn_raw = json.load(f)
+    if checkpoint_norm:
+        fn_raw = checkpoint_norm
+    else:
+        if os.path.isabs(args.ckpt) and Path(ckpt_path).parent != Path(output_dir):
+            raise ValueError("external checkpoint must embed feature_norm and model_hparams")
+        with open(feature_norm_path, "r", encoding="utf-8") as f:
+            fn_raw = json.load(f)
     global_stats = {}
     for k, v in fn_raw.items():
         global_stats[k] = (
@@ -184,8 +295,8 @@ def infer():
     print(f"[3] 构建 DataLoader")
     # 特征名与训练一致：默认含 CumGDD，use_constructed 时使用全部构造特征。
     hparams_path0 = os.path.join(output_dir, "model_hparams.json")
-    use_constructed_hp = False
-    if os.path.exists(hparams_path0):
+    use_constructed_hp = bool(checkpoint_hparams.get("use_constructed", False))
+    if not checkpoint_hparams and os.path.exists(hparams_path0):
         with open(hparams_path0, "r", encoding="utf-8") as f:
             hp0 = json.load(f)
             use_constructed_hp = bool(hp0.get("use_constructed", False))
@@ -196,8 +307,7 @@ def infer():
         dynamic_feature_names.append(GDD_FEATURE_NAME)  # 旧口径 12 维
     collate_fn = make_grid_collate_fn(global_stats, dynamic_feature_names)
 
-    val_samples = build_grid_samples(val_pairs, soil_dict=soil_dict, dynamic_feature_names=dynamic_feature_names)
-    val_dataset = GridTimeSeriesDataset(val_samples)
+    val_dataset = build_inference_dataset(val_pairs, soil_dict, dynamic_feature_names)
     val_loader = DataLoader(
         val_dataset,
         batch_size=args.batch_size,
@@ -211,15 +321,13 @@ def infer():
     # 优先读训练时保存的超参,保证 hidden_size/num_heads 与 checkpoint 一致
     # (否则用 num_heads 不同的 checkpoint 会 state_dict 尺寸不匹配而崩)
     hparams_path = os.path.join(output_dir, "model_hparams.json")
-    if not os.path.exists(hparams_path):
-        raise ValueError("model_hparams.json is required; legacy checkpoints are unsupported")
-    with open(hparams_path, "r", encoding="utf-8") as f:
-        hp = json.load(f)
-    if hp.get("model_contract_version") != MODEL_CONTRACT_VERSION:
-        raise ValueError(
-            f"checkpoint contract mismatch: expected {MODEL_CONTRACT_VERSION}, "
-            f"got {hp.get('model_contract_version')}"
-        )
+    if checkpoint_hparams:
+        hp = checkpoint_hparams
+    else:
+        if not os.path.exists(hparams_path):
+            raise ValueError("model_hparams.json is required; legacy checkpoints are unsupported")
+        with open(hparams_path, "r", encoding="utf-8") as f:
+            hp = json.load(f)
     hidden_size = int(hp["hidden_size"])
     num_heads = int(hp["num_heads"])
     num_lstm_layers = int(hp["num_lstm_layers"])
@@ -235,7 +343,7 @@ def infer():
         output_size=1,
         num_heads=num_heads,
     )
-    model.load_state_dict(torch.load(ckpt_path, map_location=device))
+    model.load_state_dict(checkpoint_state)
     model = model.to(device)
     model.eval()
     print(f"    参数: {sum(p.numel() for p in model.parameters()):,}")
@@ -254,6 +362,7 @@ def infer():
     final_counties: List[str] = []
     final_preds: List[float] = []
     final_labels: List[float] = []
+    skipped_samples = 0
 
     with torch.no_grad():
         for batch in tqdm(val_loader, desc="Infer"):
@@ -266,6 +375,7 @@ def infer():
             if ag_images is not None:
                 ag_images = ag_images.to(device)
             ag_mask = _rest[5].to(device) if len(_rest) >= 6 and _rest[5] is not None else None
+            ag_grid_mask = _rest[7].to(device) if len(_rest) >= 8 and _rest[7] is not None else None
             grid_feats = grid_feats.to(device)
             grid_coords = grid_coords.to(device)
             grid_mask = grid_mask.to(device)
@@ -275,7 +385,7 @@ def infer():
             labels = labels.to(device)
             seq_lens = seq_lens.to(device)
 
-            pred, _, _ = model(
+            pred, _, aux = model(
                 grid_feats=grid_feats,
                 grid_coords=grid_coords,
                 grid_mask=grid_mask,
@@ -285,16 +395,31 @@ def infer():
                 day_ids=day_ids,
                 ag_images=ag_images,
                 ag_mask=ag_mask,
+                ag_grid_mask=ag_grid_mask,
             )  # (B, 1)
 
-            # 模型直接输出最终县级单产预测。
-            pred_raw = torch.exp(pred[..., 0])   # log-mean -> bu/ac
+            pred_dist_all = aux["pred_dist_all"]
+            sample_valid = aux["sample_valid"]
+            valid_indices = sample_valid_indices(sample_valid)
+            skipped_samples += int(sample_valid.numel() - valid_indices.numel())
+            month_valid = aux["month_valid"]
+            monthly_month_ids = aux["monthly_month_ids"]
+            last_token_idx = month_valid.long().cumsum(dim=1).argmax(dim=1)
+            final_dist = pred_dist_all[
+                torch.arange(pred_dist_all.shape[0], device=device),
+                last_token_idx,
+            ]
+            pred_raw = torch.exp(final_dist[..., 0])
+            cutoff_distributions, cutoff_valid = predictions_at_cutoffs(
+                pred_dist_all, monthly_month_ids, month_valid, cutoff_list
+            )
             label_raw = labels.squeeze(-1) # (B,)
             B = pred_raw.shape[0]
 
             # 提前预报节点:每节点取"截至该日期前最后一个有效时间步"的预测。
             for b in range(B):
-                sl = int(seq_lens[b].item())
+                if not bool(sample_valid[b]):
+                    continue
                 yr = int(years[b])
                 lab = float(label_raw[b].item())
                 final_states.append(str(states[b]))
@@ -303,19 +428,24 @@ def infer():
                 final_counties.append(str(counties[b]))
                 final_preds.append(float(pred_raw[b].item()))
                 final_labels.append(lab)
-                # 当前模型只输出季末最终预测，不生成逐 cutoff 预测。
-                if cutoff_list:
-                    node_preds[cutoff_list[-1]].append(float(pred_raw[b].item()))
-                    node_labels[cutoff_list[-1]].append(lab)
+                for cutoff_i, (cutoff, distributions) in enumerate(zip(
+                    cutoff_list, cutoff_distributions.unbind(dim=1)
+                )):
+                    if bool(cutoff_valid[b, cutoff_i]):
+                        node_preds[cutoff].append(float(torch.exp(distributions[b, 0]).item()))
+                        node_labels[cutoff].append(lab)
 
-            step_preds.setdefault(0, []).extend(pred_raw.detach().cpu().tolist())
-            step_labels.setdefault(0, []).extend(label_raw.detach().cpu().tolist())
+            pred_raw_all = torch.exp(pred_dist_all[..., 0])
+            for t in range(pred_raw_all.shape[1]):
+                valid = month_valid[:, t] & sample_valid
+                if valid.any():
+                    step_preds.setdefault(t, []).extend(pred_raw_all[valid, t].detach().cpu().tolist())
+                    step_labels.setdefault(t, []).extend(label_raw[valid].detach().cpu().tolist())
 
     # ========== 6. 计算逐时间步指标 ==========
     print(f"[6] 计算指标")
     if not step_preds:
-        print("[错误] 无有效协议时间步")
-        sys.exit(1)
+        print(f"[提示] 无有效协议时间步，跳过样本数: {skipped_samples}")
 
     # 按 t 排序
     sorted_ts = sorted(step_preds.keys())
@@ -362,11 +492,11 @@ def infer():
     last_r2 = r2_list[last_idx] if last_idx >= 0 else float("nan")
     last_corr = corr_list[last_idx] if last_idx >= 0 else float("nan")
 
-    print(f"\n最后时间步指标 (step {t_axis[last_idx]}，共 {steps} 步):")
+    print(f"\n最后时间步指标 (共 {steps} 步):")
     print(f"  RMSE: {last_rmse:.4f}")
     print(f"  R²:   {last_r2:.4f}")
     print(f"  Corr: {last_corr:.4f}")
-    print(f"  有效样本数: {n_list[last_idx] if last_idx < len(n_list) else 0}")
+    print(f"  有效样本数: {n_list[last_idx] if last_idx >= 0 else 0}")
 
     # ========== 6.5 提前预报节点指标（每节点统计全部县） ==========
     cutoff_metrics: Dict[str, Dict] = {}
@@ -447,6 +577,7 @@ def infer():
     print(f"  曲线已保存: {plot_path}")
 
     # ========== 8. 输出 JSON ==========
+    print(f"  跳过全无效样本: {skipped_samples}")
     result = {
         "val_year": args.val_year,
         "num_steps": steps,
@@ -457,6 +588,7 @@ def infer():
             "n_samples": n_list[-1] if n_list else 0,
         },
         "cutoff_metrics": cutoff_metrics,
+        "skipped_samples": skipped_samples,
     }
     result_path = os.path.join(output_dir, "infer_results.json")
     with open(result_path, "w", encoding="utf-8") as f:

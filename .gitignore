@@ -12,6 +12,7 @@ train_dataset/dataset.jsonl
 train_dataset/grid_cache.pt
 train_dataset/grid_cache_meta.json
 BaseLine_Model/output/
+MMST-ViT/output_dir/
 
 # 本地工具配置
 .claude/settings.local.json

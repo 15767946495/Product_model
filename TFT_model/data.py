@@ -46,6 +46,7 @@ from cropnet_protocol import (  # noqa: E402
     TIME_WINDOW,
     validate_grid_entry,
     validate_protocol_metadata,
+    normalize_state_name,
 )
 
 DEFAULT_DATA_JSONL = os.path.join("/data/raid0/hqx/Product_model_runtime/DataSrc/label", "dataset.jsonl")
@@ -106,7 +107,7 @@ def build_ag_paths(sample: Dict, ag_root: str | Path) -> list[Path]:
         raise ValueError(f"invalid FIPS in sample: {sample.get('FIPS')!r}")
     try:
         raw_year = sample["Year"]
-        state = str(sample["State"]).strip().lower()
+        state = normalize_state_name(sample["State"])
     except (KeyError, TypeError, ValueError) as error:
         raise ValueError(f"invalid AG sample metadata: {sample!r}") from error
     year = _validate_ag_year(raw_year)
@@ -241,7 +242,7 @@ class AgricultureImageDataset(Dataset):
         context = _ag_sample_context(index_i, sample)
         _validate_ag_year(sample["Year"])
         fips = str(sample["FIPS"]).strip().zfill(5)
-        state_full = str(sample["State"]).strip().lower()
+        state_full = normalize_state_name(sample["State"])
         state_abbr = AG_STATE_ABBR.get(state_full)
         if state_abbr is None:
             raise ValueError(f"{context}: 不支持的 AG 州: {state_full}")
@@ -261,7 +262,7 @@ class AgricultureImageDataset(Dataset):
 
     @staticmethod
     def _sample_key(sample):
-        state_full = str(sample["State"]).strip().lower()
+        state_full = normalize_state_name(sample["State"])
         state_abbr = AG_STATE_ABBR[state_full]
         return (state_abbr, int(sample["Year"]), str(sample["FIPS"]).zfill(5))
 
@@ -325,7 +326,7 @@ class AgricultureImageDataset(Dataset):
             "ag_dates": list(AG_DATES),
             "FIPS": fips,
             "Year": year,
-            "State": str(sample["State"]).strip().lower(),
+            "State": normalize_state_name(sample["State"]),
             "County": str(sample.get("County", "")),
             "grid_count": grid_count,
             "ag_coords": ag_coords,
@@ -337,7 +338,7 @@ def validate_sample(sample) -> None:
     if not isinstance(sample, dict):
         raise ValueError("sample must be a dict")
 
-    state = str(sample.get("State", "")).strip().lower()
+    state = normalize_state_name(sample.get("State", ""))
     if state not in AG_STATE_ABBR:
         raise ValueError(f"unsupported state: {sample.get('State')!r}")
 
@@ -1339,7 +1340,8 @@ def make_grid_collate_fn(
     返回元组:
       grid_feats (B,Gmax,Tmax,F), grid_coords (B,Gmax,2), grid_mask (B,Gmax) bool,
        month/day (B,Tmax) long, soil_feats (B,7), labels (B,1), seq_lens (B,),
-      states, years, fips_list, county_list
+      states, years, fips_list, county_list，以及可选的 ag_images、ag_mask、
+      ag_coords、ag_grid_mask (B,N_rs,Gmax)
     """
     mean_d, std_d = global_stats["dynamic"]
     mean_s, std_s = global_stats["soil"]
@@ -1392,6 +1394,7 @@ def make_grid_collate_fn(
             N_rs = len(AG_DATES)
             ag_images = torch.zeros(B, N_rs, Gmax, 3, 224, 224, dtype=torch.float32)
             ag_mask = torch.zeros(B, N_rs, dtype=torch.bool)
+            ag_grid_mask = torch.zeros(B, N_rs, Gmax, dtype=torch.bool)
             ag_coords = torch.zeros(B, Gmax, 2, dtype=torch.float32)
             for i in range(B):
                 weather_coords = grid_coords_list[i].float()
@@ -1410,11 +1413,13 @@ def make_grid_collate_fn(
                     for weather_g in torch.nonzero(valid, as_tuple=False).flatten().tolist():
                         rs_g = int(nearest[weather_g].item())
                         ag_images[i, rs_i, weather_g] = ag_list[i][rs_i, rs_g]
+                        ag_grid_mask[i, rs_i, weather_g] = True
                     ag_mask[i, rs_i] = bool(valid.any())
         else:
             ag_images = None
             ag_mask = None
             ag_coords = None
+            ag_grid_mask = None
 
         return (
             grid_feats,      # (B, Gmax, Tmax, F)
@@ -1429,6 +1434,7 @@ def make_grid_collate_fn(
             ag_images,       # (B, 6, Gmax, 3, 224, 224) or None
             ag_mask,         # (B, 6) bool or None
             ag_coords,       # (B, Gmax, 2) 对齐后的遥感网格坐标或 None
+            ag_grid_mask,    # (B, 6, Gmax) bool or None
         )
 
     return collate_fn

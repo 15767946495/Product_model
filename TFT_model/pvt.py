@@ -78,33 +78,48 @@ class PatchEmbed(nn.Module):
 
 
 class PVTTinyEncoder(nn.Module):
-    """MMST-ViT 官方 models_pvt.py 中 pvt_tiny 的等价实现。
+    """PVT-Tiny 编码器，与 MMST-ViT 官方 pvt_tiny 配置完全一致。
 
-    官方 pvt_tiny(pretrained=True) 只构造模型，不提供权重下载；因此这里
-    使用官方结构随机初始化，供下游产量任务端到端训练。
+    embed_dims=[64, 128, 320, 512], num_heads=[1, 2, 5, 8],
+    mlp_ratios=[8, 8, 4, 4], sr_ratios=[8, 4, 2, 1], depths=[2, 2, 2, 2].
     """
 
-    def __init__(self, out_dim=384, image_size=224, in_chans=3, drop=0.0):
+    def __init__(self, out_dim=512, image_size=224, in_chans=3, drop=0.0):
         super().__init__()
-        self.embed_dims = [16, 32, 64, out_dim]
-        self.stages = nn.ModuleList([
-            PatchEmbed(in_chans, 16, 4),
-            PatchEmbed(16, 32, 2),
-            PatchEmbed(32, 64, 2),
-            PatchEmbed(64, out_dim, 2),
-        ])
+        embed_dims = [64, 128, 320, out_dim]
+        num_heads = [1, 2, 5, 8]
+        mlp_ratios = [8, 8, 4, 4]
+        sr_ratios = [8, 4, 2, 1]
+        depths = [2, 2, 2, 2]
+        patch_sizes = [4, 2, 2, 2]
+
+        self.embed_dims = embed_dims
+
+        self.stages = nn.ModuleList()
+        for i in range(4):
+            in_c = in_chans if i == 0 else embed_dims[i - 1]
+            self.stages.append(PatchEmbed(in_c, embed_dims[i], patch_sizes[i]))
+
+        num_patches = []
+        h, w = image_size // patch_sizes[0], image_size // patch_sizes[0]
+        num_patches.append(h * w)
+        for i in range(1, 4):
+            h, w = h // patch_sizes[i], w // patch_sizes[i]
+            n = h * w
+            if i == 3:
+                n += 1  # cls_token slot
+            num_patches.append(n)
+
         self.pos_embeds = nn.ParameterList([
-            nn.Parameter(torch.zeros(1, 56 * 56, 16)),
-            nn.Parameter(torch.zeros(1, 28 * 28, 32)),
-            nn.Parameter(torch.zeros(1, 14 * 14, 64)),
-            nn.Parameter(torch.zeros(1, 1 + 7 * 7, out_dim)),
+            nn.Parameter(torch.zeros(1, num_patches[i], embed_dims[i])) for i in range(4)
         ])
+
         self.cls_token = nn.Parameter(torch.zeros(1, 1, out_dim))
         self.blocks = nn.ModuleList([
-            nn.ModuleList([Block(16, 1, 8, 2, drop)]),
-            nn.ModuleList([Block(32, 2, 4, 2, drop)]),
-            nn.ModuleList([Block(64, 4, 2, 2, drop)]),
-            nn.ModuleList([Block(out_dim, 4, 1, 2, drop)]),
+            nn.ModuleList([
+                Block(embed_dims[i], num_heads[i], sr_ratios[i], mlp_ratios[i], drop)
+                for _ in range(depths[i])
+            ]) for i in range(4)
         ])
         self.norm = nn.LayerNorm(out_dim, eps=1e-6)
         self.apply(self._init_weights)
@@ -134,15 +149,9 @@ class PVTTinyEncoder(nn.Module):
             if stage_idx == 3:
                 cls = self.cls_token.expand(tokens.size(0), -1, -1)
                 tokens = torch.cat([cls, tokens], dim=1)
-                tokens = tokens + pos
-            else:
-                tokens = tokens + pos
+            tokens = tokens + pos
             for block in blocks:
-                if stage_idx == 3:
-                    # CLS 必须和 patch 一起参与 self-attention，才能读取图像内容。
-                    tokens = block(tokens, height, width)
-                else:
-                    tokens = block(tokens, height, width)
+                tokens = block(tokens, height, width)
             if stage_idx < 3:
                 x = tokens.transpose(1, 2).reshape(
                     tokens.size(0), self.embed_dims[stage_idx], height, width

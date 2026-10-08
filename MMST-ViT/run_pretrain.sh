@@ -3,26 +3,17 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PYTHON="${PYTHON:-/root/miniconda3/envs/product/bin/python}"
-NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
-MMST_BATCH_SIZE="${MMST_BATCH_SIZE:-512}"
-export TORCH_NCCL_ASYNC_ERROR_HANDLING="${TORCH_NCCL_ASYNC_ERROR_HANDLING:-1}"
-export TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC="${TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC:-1800}"
+NPROC_PER_NODE="${NPROC_PER_NODE:-1}"
 
 cd "$ROOT"
 
-"$PYTHON" -c "import torch, torchvision, timm, einops, h5py, pandas, sklearn" || {
-  echo "缺少 MMST-ViT 运行依赖，请执行: $PYTHON -m pip install -r requirements.txt"
-  exit 1
-}
-
-"$PYTHON" current_data.py \
-  --manifest data/pretrain_2017_2020.json \
-  --years 2017 2018 2019 2020 \
-  --no-long-term \
-  --all-states
-
-"$PYTHON" -m torch.distributed.run --nproc_per_node="$NPROC_PER_NODE" pretrain_current.py \
-  --manifest data/pretrain_2017_2020.json \
-  --output-dir output_current/pretrain \
-  --batch-size "$MMST_BATCH_SIZE" \
+exec "$PYTHON" -m torch.distributed.run \
+  --standalone \
+  --nproc_per_node="$NPROC_PER_NODE" \
+  main_pretrain_mmst_vit.py \
+  --root_dir /data/raid0/hqx/Product_model_runtime/DataSrc \
+  --data_file ./data/corn_pretrain_2017_2021.json \
+  --device cuda \
+  --output_dir ./output_dir/pvt_simclr \
+  --log_dir ./output_dir/pvt_simclr \
   "$@"

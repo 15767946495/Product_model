@@ -8,11 +8,9 @@ def RMSE(y_true, y_pred):
 
 
 def R2_Score(y_true, y_pred):
-    corr_matrix = np.corrcoef(y_true, y_pred)
-    corr = corr_matrix[0, 1]
-    R2 = corr ** 2
-
-    return R2
+    residual_sum = np.sum((y_true - y_pred) ** 2)
+    total_sum = np.sum((y_true - np.mean(y_true)) ** 2)
+    return 1.0 - residual_sum / total_sum if total_sum else 0.0
 
 
 def PCC(y_true, y_pred):

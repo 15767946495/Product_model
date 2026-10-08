@@ -8,7 +8,7 @@ from models_pvt_simclr import PVTSimCLR
 
 
 class MMST_ViT(nn.Module):
-    def __init__(self, out_dim=2, num_grid=64, num_short_term_seq=6, num_long_term_seq=12, num_year=5,
+    def __init__(self, out_dim=1, num_grid=64, num_short_term_seq=6, num_long_term_seq=12, num_year=4,
                  pvt_backbone=None, context_dim=9, dim=192, batch_size=64, depth=4, heads=3, pool='cls', dim_head=64,
                  dropout=0., emb_dropout=0., scale_dim=4, ):
         super().__init__()
@@ -96,7 +96,7 @@ if __name__ == "__main__":
     # ys.shape = B, T, G, N1, d
     ys = torch.randn((1, 6, 10, 28, 9))
     # yl.shape = B, T, N2, d
-    yl = torch.randn((1, 5, 12, 9))
+    yl = torch.randn((1, 4, 12, 9))
 
     pvt = PVTSimCLR("pvt_tiny", out_dim=512, context_dim=9)
     model = MMST_ViT(out_dim=4, pvt_backbone=pvt, dim=512)

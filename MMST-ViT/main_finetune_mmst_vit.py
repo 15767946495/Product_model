@@ -28,8 +28,6 @@ import util.lr_sched as lr_sched
 from models_mmst_vit import MMST_ViT
 from util import metrics
 
-from datetime import datetime
-
 torch.manual_seed(0)
 np.random.seed(0)
 
@@ -93,7 +91,7 @@ def get_args_parser():
                         help='url used to set up distributed training')
 
     # dataset
-    parser.add_argument('-dr', '--root_dir', type=str, default='/mnt/data/Tiny CropNet')
+    parser.add_argument('-dr', '--root_dir', type=str, default='/data/raid0/hqx/Product_model_runtime/DataSrc')
     parser.add_argument('-sf', '--save_freq', type=int, default=2)
 
     # train and val
@@ -157,13 +155,13 @@ def main(args):
 
         # val
         sampler_sentinel_val = torch.utils.data.DistributedSampler(
-            dataset_sentinel_val, num_replicas=num_tasks, rank=global_rank, shuffle=True
+            dataset_sentinel_val, num_replicas=num_tasks, rank=global_rank, shuffle=False
         )
         sampler_hrrr_val = torch.utils.data.DistributedSampler(
-            dataset_hrrr_val, num_replicas=num_tasks, rank=global_rank, shuffle=True
+            dataset_hrrr_val, num_replicas=num_tasks, rank=global_rank, shuffle=False
         )
         sampler_usda_val = torch.utils.data.DistributedSampler(
-            dataset_usda_val, num_replicas=num_tasks, rank=global_rank, shuffle=True
+            dataset_usda_val, num_replicas=num_tasks, rank=global_rank, shuffle=False
         )
 
         print("Sampler_sentinel_val = %s" % str(sampler_sentinel_val))
@@ -203,7 +201,7 @@ def main(args):
 
     # val
     data_loader_sentinel_val = torch.utils.data.DataLoader(
-        dataset_sentinel_val, sampler=sampler_sentinel_train,
+        dataset_sentinel_val, sampler=sampler_sentinel_val,
         batch_size=1,
         num_workers=args.num_workers,
         pin_memory=args.pin_mem,
@@ -211,7 +209,7 @@ def main(args):
     )
 
     data_loader_hrrr_val = torch.utils.data.DataLoader(
-        dataset_hrrr_val, sampler=sampler_hrrr_train,
+        dataset_hrrr_val, sampler=sampler_hrrr_val,
         batch_size=1,
         num_workers=args.num_workers,
         pin_memory=args.pin_mem,
@@ -219,7 +217,7 @@ def main(args):
     )
 
     data_loader_usda_val = torch.utils.data.DataLoader(
-        dataset_usda_val, sampler=sampler_usda_train,
+        dataset_usda_val, sampler=sampler_usda_val,
         batch_size=1,
         num_workers=args.num_workers,
         pin_memory=args.pin_mem,
@@ -231,9 +229,8 @@ def main(args):
         checkpoint = torch.load(args.pvt_simclr, map_location='cpu')
         pvt.load_state_dict(checkpoint['model'])
         pvt.to(device)
-        pvt.eval()
 
-    model = MMST_ViT(out_dim=2, pvt_backbone=pvt, context_dim=9, dim=args.embed_dim, batch_size=args.batch_size)
+    model = MMST_ViT(out_dim=1, pvt_backbone=pvt, context_dim=9, dim=args.embed_dim, batch_size=args.batch_size)
     model.to(device)
 
     model_without_ddp = model
@@ -256,14 +253,14 @@ def main(args):
 
     # following timm: set wd as 0 for bias and norm layers
     param_groups = optim_factory.add_weight_decay(model_without_ddp, args.weight_decay)
-    optimizer = torch.optim.AdamW(param_groups, lr=args.lr, betas=(0.9, 0.95))
+    optimizer = torch.optim.AdamW(param_groups, lr=args.lr, betas=(0.9, 0.999))
     print(optimizer)
     loss_scaler = NativeScaler()
 
     misc.load_model(args=args, model_without_ddp=model_without_ddp, optimizer=optimizer, loss_scaler=loss_scaler)
 
     if args.eval:
-        evaluate(model, data_loader_sentinel_train, data_loader_hrrr_train, data_loader_usda_train, device)
+        evaluate(model, data_loader_sentinel_val, data_loader_hrrr_val, data_loader_usda_val, device)
         exit(0)
 
     print(f"Start training for {args.epochs} epochs")
@@ -285,10 +282,18 @@ def main(args):
             optimizer, device, epoch, loss_scaler, log_writer=log_writer, args=args
         )
 
-        if args.output_dir and (epoch % args.save_freq == 0 or epoch + 1 == args.epochs):
-            # evaluate
-            evaluate(model, data_loader_sentinel_val, data_loader_hrrr_val, data_loader_usda_val, device)
+        metrics_result = None
+        if args.output_dir:
+            metrics_result = evaluate(
+                model, data_loader_sentinel_val, data_loader_hrrr_val,
+                data_loader_usda_val, device,
+            )
+            if misc.is_main_process():
+                metrics_path = os.path.join(args.output_dir, "metrics.jsonl")
+                with open(metrics_path, mode="a", encoding="utf-8") as metrics_file:
+                    metrics_file.write(json.dumps({"epoch": epoch, **metrics_result}) + "\n")
 
+        if args.output_dir and (epoch % args.save_freq == 0 or epoch + 1 == args.epochs):
             misc.save_model(
                 args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
                 loss_scaler=loss_scaler, epoch=epoch)
@@ -302,7 +307,7 @@ def main(args):
                 f.write(json.dumps(log_stats) + "\n")
 
     total_time = time.time() - start_time
-    total_time_str = str(datetime.timedelta(seconds=int(total_time)))
+    total_time_str = str(__import__("datetime").timedelta(seconds=int(total_time)))
     print('Training time {}'.format(total_time_str))
 
 
@@ -343,10 +348,11 @@ def train_one_epoch(model: torch.nn.Module,
         ys = y[0].to(device, non_blocking=True)
         yl = y[1].to(device, non_blocking=True)
         # USDA
-        z = z[0].to(device, non_blocking=True)
+        z = z[0][..., -1:].to(device, non_blocking=True)
 
         b, t, g, _, _, _ = x.shape
         x = rearrange(x, 'b t g h w c -> (b t g) c h w')
+        x = x.to(torch.float32) / 255.0
         x, _ = data_wrapper(x)
 
         x = rearrange(x, '(b t g) c h w -> b t g c h w', b=b, t=t, g=g)
@@ -394,6 +400,7 @@ def train_one_epoch(model: torch.nn.Module,
 @torch.no_grad()
 def evaluate(model: torch.nn.Module, data_loader_sentinel: Iterable, data_loader_hrrr: Iterable,
              data_loader_usda: Iterable, device: torch.device):
+    model.eval()
     # data augmentation by following SimCLR
     data_wrapper = DataWrapper(train=False)
 
@@ -416,10 +423,11 @@ def evaluate(model: torch.nn.Module, data_loader_sentinel: Iterable, data_loader
         yl = y[1].to(device, non_blocking=True)
 
         # USDA
-        z = z[0].to(device, non_blocking=True)
+        z = z[0][..., -1:].to(device, non_blocking=True)
 
         b, t, g, _, _, _ = x.shape
         x = rearrange(x, 'b t g h w c -> (b t g) c h w')
+        x = x.to(torch.float32) / 255.0
         x, _ = data_wrapper(x)
         x = rearrange(x, '(b t g) c h w -> b t g c h w', b=b, t=t, g=g)
 
@@ -433,10 +441,18 @@ def evaluate(model: torch.nn.Module, data_loader_sentinel: Iterable, data_loader
     pred_labels = torch.exp(torch.flatten(pred_labels[:, -1:], start_dim=0)).detach().cpu().numpy()
 
     rmse, r2, corr = metrics.evaluate(true_labels, pred_labels)
+    mae = float(np.mean(np.abs(true_labels - pred_labels)))
 
     global best_metrics
     best_metrics = [min(best_metrics[0], rmse), max(best_metrics[1], r2), max(best_metrics[2], corr)]
     print("Metrics: RMSE: {}  R_Squared: {}  Corr: {}".format(f"{best_metrics[0]:.2f}", f"{ best_metrics[1]:.2f}", f"{best_metrics[2]:.2f}"))
+    return {
+        "rmse": float(rmse),
+        "mae": mae,
+        "r2": float(r2),
+        "corr": float(corr),
+        "count": int(true_labels.size),
+    }
 
 
 if __name__ == '__main__':
