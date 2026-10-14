@@ -1,10 +1,30 @@
 import torch
 from sklearn import preprocessing
-from torch.utils.data import Dataset
-from einops import rearrange
 import torchvision.transforms as transforms
 
-from dataset.sentinel_loader import Sentinel_Dataset
+
+def simclr_pipeline_transform(img_size=224, s=1, kernel_size=9):
+    # get a set of data augmentation transformations as described in the SimCLR paper.
+    color_jitter = transforms.ColorJitter(0.8 * s, 0.8 * s, 0.8 * s, 0.2 * s)
+    return transforms.Compose([transforms.RandomResizedCrop(size=img_size, antialias=True),
+                               transforms.RandomHorizontalFlip(),
+                               transforms.RandomApply([color_jitter], p=0.8),
+                               transforms.RandomGrayscale(p=0.2),
+                               transforms.GaussianBlur(kernel_size=kernel_size),
+                               ])
+
+
+class SimCLRViews(object):
+    """float [0,1] 图像 (N,3,H,W) -> 两组独立增强视图；逐张采样增强参数（与原 PIL 逐图管线一致）。"""
+
+    def __init__(self, img_size=224, s=1, kernel_size=9):
+        self.transform = simclr_pipeline_transform(img_size, s, kernel_size)
+
+    def __call__(self, x):
+        x = x.to(torch.float32)
+        xi = torch.stack([self.transform(img) for img in x])
+        xj = torch.stack([self.transform(img) for img in x])
+        return xi, xj
 
 
 class DataWrapper(object):
@@ -25,18 +45,9 @@ class DataWrapper(object):
         return xi, xj
 
     def get_simclr_pipeline_transform(self):
-        # get a set of data augmentation transformations as described in the SimCLR paper.
-        color_jitter = transforms.ColorJitter(0.8 * self.s, 0.8 * self.s, 0.8 * self.s, 0.2 * self.s)
-        data_transforms = transforms.Compose([transforms.RandomResizedCrop(size=self.img_size),
-                                              transforms.RandomHorizontalFlip(),
-                                              transforms.RandomApply([color_jitter], p=0.8),
-                                              transforms.RandomGrayscale(p=0.2),
-                                              transforms.GaussianBlur(kernel_size=self.kernel_size),
-                                              ])
-        return data_transforms
+        return simclr_pipeline_transform(self.img_size, self.s, self.kernel_size)
 
     def get_transform_val(self):
-        # get a set of data augmentation transformations as described in the SimCLR paper.
         data_transforms = transforms.Compose([transforms.CenterCrop(size=self.img_size)])
         return data_transforms
 
@@ -54,23 +65,3 @@ class ScalarNorm(object):
         x = torch.from_numpy(x)
         x = x.to(torch.float32)
         return x
-
-
-if __name__ == '__main__':
-    root_dir = "/data/raid0/hqx/Product_model_runtime/DataSrc"
-    train = "./../data/soybean_train.json"
-    dataset = Sentinel_Dataset(root_dir, train)
-    train_loader = torch.utils.data.DataLoader(dataset, batch_size=1)
-
-    it = iter(train_loader)
-    x, f, y = next(it)
-
-    x = x[:, :, :22, :, :, :]
-
-    x = rearrange(x, 'b t g h w c -> (b t g) c h w')
-
-    wrapper = DataWrapper()
-
-    xi, xj = wrapper(x)
-    print(xi.shape)
-    print(xj.shape)

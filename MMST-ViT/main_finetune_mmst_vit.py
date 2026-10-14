@@ -1,14 +1,20 @@
+"""MMST-ViT 监督微调（统一 CropNet，只用 2021）与最终测试（只用 2022 + checkpoint-final.pth）。
+
+没有验证集，不按任何指标选择 checkpoint；训练结束无条件写 checkpoint-final.pth，再对其做一次 2022 测试。
+2022 标签只进入 test_metrics.json 与 county_predictions.jsonl。
+输出：output_root/mmst_vit/<run_id>/{config.json, checkpoint-latest.pth, checkpoint-final.pth,
+train_metrics.jsonl, test_metrics.json, county_predictions.jsonl, run_metadata.json}。
+"""
+
 import argparse
 import datetime
-import json
 import math
 import sys
-
-import numpy as np
-import os
 import time
 from pathlib import Path
+from typing import Iterable
 
+import numpy as np
 import torch
 import torch.backends.cudnn as cudnn
 from einops import rearrange
@@ -16,236 +22,114 @@ from torch.utils.tensorboard import SummaryWriter
 
 import timm.optim.optim_factory as optim_factory
 
+import util.lr_sched as lr_sched
 import util.misc as misc
 from dataset.data_wrapper import DataWrapper
-from dataset.hrrr_loader import HRRR_Dataset
-from dataset.sentinel_loader import Sentinel_Dataset
-from dataset.usda_loader import USDA_Dataset
-from util.misc import NativeScalerWithGradNormCount as NativeScaler
-from models_pvt_simclr import PVTSimCLR
-from typing import Iterable
-import util.lr_sched as lr_sched
+from dataset_adapter import MMST_YEARS_FINETUNE, MMST_YEARS_TEST, build_mmst_dataloader, build_mmst_dataset
 from models_mmst_vit import MMST_ViT
-from util import metrics
+from models_pvt_simclr import PVTSimCLR
+from train_dataset.metrics import regression_metrics
+from util import run_io
+from util.misc import NativeScalerWithGradNormCount as NativeScaler
 
-torch.manual_seed(0)
-np.random.seed(0)
-
-# RMSE, R_Squared, Corr
-best_metrics = [float("inf"), 0, 0]
+FINETUNE_YEARS = MMST_YEARS_FINETUNE
+TEST_YEARS = MMST_YEARS_TEST
+MODEL_NAME = "mmst_vit"
 
 
-def get_args_parser():
-    parser = argparse.ArgumentParser('MMST-ViT fine-tuning', add_help=False)
-
+def build_parser():
+    parser = argparse.ArgumentParser('MMST-ViT fine-tuning (unified CropNet, train 2021 / test 2022)')
+    run_io.add_common_args(parser, model_name=MODEL_NAME)
     parser.add_argument('--batch_size', default=64, type=int,
-                        help='Batch size per GPU (effective batch size is batch_size * accum_iter * # gpus')
-    parser.add_argument('--embed_dim', default=512, type=int, help='embed dimensions')
+                        help='grid-month crops per PVT forward chunk (memory bound, not the county batch)')
+    parser.add_argument('--county_batch_size', default=1, type=int, help='county-years per optimizer step')
     parser.add_argument('--epochs', default=200, type=int)
-    parser.add_argument('--model_pvt', default='pvt_tiny', type=str, metavar='MODEL',
-                        help='Name of backbone model to train')
-    parser.add_argument('--accum_iter', default=1, type=int,
-                        help='Accumulate gradient iterations (for increasing the effective batch size under memory constraints)')
-    parser.add_argument('--input_size', default=224, type=int, help='images input size')
-
-    parser.add_argument('--norm_pix_loss', action='store_true',
-                        help='Use (per-patch) normalized pixels as targets for computing loss')
-    parser.set_defaults(norm_pix_loss=False)
-
-    # Optimizer parameters
-    parser.add_argument('--weight_decay', type=float, default=0.05,
-                        help='weight decay (default: 0.05)')
-
-    parser.add_argument('--lr', type=float, default=None, metavar='LR',
-                        help='learning rate (absolute lr)')
-    parser.add_argument('--blr', type=float, default=1e-3, metavar='LR',
-                        help='base learning rate: absolute_lr = base_lr * total_batch_size / 256')
-    parser.add_argument('--min_lr', type=float, default=0., metavar='LR',
-                        help='lower lr bound for cyclic schedulers that hit 0')
-
-    parser.add_argument('--warmup_epochs', type=int, default=40, metavar='N',
-                        help='epochs to warmup LR')
-
-    parser.add_argument('--output_dir', default='./output_dir/mmst_vit',
-                        help='path where to save, empty for no saving')
-    parser.add_argument('--log_dir', default='./output_dir/mmst_vit',
-                        help='path where to tensorboard log')
-    parser.add_argument('--device', default='cuda',
-                        help='device to use for training / testing')
-    parser.add_argument('--seed', default=0, type=int)
-
-    parser.add_argument('--start_epoch', default=0, type=int, metavar='N',
-                        help='start epoch')
-    parser.add_argument('--num_workers', default=10, type=int)
-    parser.add_argument('--pin_mem', action='store_true',
-                        help='Pin CPU memory in DataLoader for more efficient (sometimes) transfer to GPU.')
-    parser.add_argument('--no_pin_mem', action='store_false', dest='pin_mem')
-    parser.set_defaults(pin_mem=True)
-
-    # distributed training parameters
-    parser.add_argument('--world_size', default=1, type=int,
-                        help='number of distributed processes')
-    parser.add_argument('--local_rank', default=-1, type=int)
-    parser.add_argument('--dist_on_itp', action='store_true')
-    parser.add_argument('--dist_url', default='env://',
-                        help='url used to set up distributed training')
-
-    # dataset
-    parser.add_argument('-dr', '--root_dir', type=str, default='/data/raid0/hqx/Product_model_runtime/DataSrc')
-    parser.add_argument('-sf', '--save_freq', type=int, default=2)
-
-    # train and val
-    parser.add_argument('-dft', '--data_file_train', type=str, default='./data/soybean_train.json')
-    parser.add_argument('-dfv', '--data_file_val', type=str, default='./data/soybean_val.json')
-
-    # pvt_simclr
-    parser.add_argument('--pvt_simclr', default='', help='load from checkpoint')
-
-    # evaluate
-    parser.add_argument('--eval', action='store_true', help='Perform evaluation only')
-    parser.add_argument('--eval_year', type=int, default=2022, help='specify the year for prediction')
-
-    # resume
-    parser.add_argument('--resume', default='', help='resume from checkpoint')
-
+    parser.add_argument('--warmup_epochs', type=int, default=40, metavar='N', help='epochs to warmup LR')
+    parser.add_argument('--depth', default=4, type=int, help='MMST spatial / temporal transformer depth')
+    parser.add_argument('--heads', default=3, type=int, help='MMST spatial / temporal transformer heads')
+    parser.add_argument('--dim_head', default=64, type=int)
+    parser.add_argument('--pvt_simclr', default='', help='pretrained PVT-SimCLR checkpoint-final.pth')
+    parser.add_argument('--eval_checkpoint', default='',
+                        help='only run the final 2022 test on this checkpoint-final.pth')
     return parser
 
 
-def main(args):
-    misc.init_distributed_mode(args)
+def model_config(args):
+    keys = ("model_pvt", "embed_dim", "num_heads", "mm_depth", "depth", "heads", "dim_head", "batch_size")
+    return {k: getattr(args, k) for k in keys}
 
-    print('job dir: {}'.format(os.path.dirname(os.path.realpath(__file__))))
+
+def build_model(config, pretrained_pvt=False):
+    pvt = PVTSimCLR(config["model_pvt"], out_dim=config["embed_dim"], context_dim=9,
+                    num_head=config["num_heads"], mm_depth=config["mm_depth"], pretrained=pretrained_pvt)
+    return MMST_ViT(out_dim=1, pvt_backbone=pvt, context_dim=9, dim=config["embed_dim"],
+                    batch_size=config["batch_size"], depth=config["depth"], heads=config["heads"],
+                    dim_head=config["dim_head"])
+
+
+def capture_evaluation_years(checkpoint_path):
+    """最终测试协议：只接受 checkpoint-final.pth，只评估 2022。"""
+    if Path(checkpoint_path).name != run_io.FINAL_CHECKPOINT:
+        raise ValueError(f"final test only evaluates {run_io.FINAL_CHECKPOINT}, got {checkpoint_path}")
+    return TEST_YEARS
+
+
+def model_inputs(batch, device, augment=None):
+    """MMST batch -> 模型输入；padding 网格图像保持 0，增强只作用于真实 (月, 网格)。"""
+    x = batch["images"]
+    if augment is not None:
+        b, t, g = x.shape[:3]
+        valid = rearrange(batch["image_mask"] & batch["grid_mask"][:, None], 'b t g -> (b t g)')
+        flat = rearrange(x, 'b t g c h w -> (b t g) c h w').clone()
+        flat[valid] = augment(flat[valid])[0]
+        x = rearrange(flat, '(b t g) c h w -> b t g c h w', b=b, t=t, g=g)
+    return (x.to(device, non_blocking=True),
+            batch["weather_context"].to(device, non_blocking=True),
+            batch["long_term"].to(device, non_blocking=True),
+            batch["grid_mask"].to(device, non_blocking=True))
+
+
+def main(args):
+    if args.eval_checkpoint:
+        run_dir = Path(args.eval_checkpoint).resolve().parent
+        return evaluate_final_checkpoint(args.eval_checkpoint, args.dataset_jsonl, args.data_root, run_dir,
+                                         device=args.device, num_workers=args.num_workers)
+
+    misc.init_distributed_mode(args)
+    run_dir = run_io.prepare_run(args)
     print("{}".format(args).replace(', ', ',\n'))
 
     device = torch.device(args.device)
-
-    # fix the seed for reproducibility
     seed = args.seed + misc.get_rank()
     torch.manual_seed(seed)
     np.random.seed(seed)
-
     cudnn.benchmark = True
 
-    dataset_sentinel_train = Sentinel_Dataset(args.root_dir, args.data_file_train)
-    dataset_hrrr_train = HRRR_Dataset(args.root_dir, args.data_file_train)
-    dataset_usda_train = USDA_Dataset(args.root_dir, args.data_file_train)
+    dataset = build_mmst_dataset(args.dataset_jsonl, args.data_root, FINETUNE_YEARS, load_images=True)
+    sampler = None
+    if args.distributed:
+        sampler = torch.utils.data.DistributedSampler(dataset, num_replicas=misc.get_world_size(),
+                                                      rank=misc.get_rank(), shuffle=True)
+    data_loader = build_mmst_dataloader(None, None, FINETUNE_YEARS, batch_size=args.county_batch_size,
+                                        shuffle=sampler is None, sampler=sampler, num_workers=args.num_workers,
+                                        pin_memory=args.pin_mem, dataset=dataset)
 
-    dataset_sentinel_val = Sentinel_Dataset(args.root_dir, args.data_file_val)
-    dataset_hrrr_val = HRRR_Dataset(args.root_dir, args.data_file_val)
-    dataset_usda_val = USDA_Dataset(args.root_dir, args.data_file_val)
+    log_writer = SummaryWriter(log_dir=str(run_dir / "tensorboard")) if misc.is_main_process() else None
 
-    if True:  # args.distributed:
-        num_tasks = misc.get_world_size()
-        global_rank = misc.get_rank()
-
-        # train
-        sampler_sentinel_train = torch.utils.data.DistributedSampler(
-            dataset_sentinel_train, num_replicas=num_tasks, rank=global_rank, shuffle=True
-        )
-        sampler_hrrr_train = torch.utils.data.DistributedSampler(
-            dataset_hrrr_train, num_replicas=num_tasks, rank=global_rank, shuffle=True
-        )
-        sampler_usda_train = torch.utils.data.DistributedSampler(
-            dataset_usda_train, num_replicas=num_tasks, rank=global_rank, shuffle=True
-        )
-
-        print("Sampler_sentinel_train = %s" % str(sampler_sentinel_train))
-        print("Sampler_hrrr_train = %s" % str(sampler_hrrr_train))
-        print("Sampler_usda_train = %s" % str(sampler_usda_train))
-
-        # val
-        sampler_sentinel_val = torch.utils.data.DistributedSampler(
-            dataset_sentinel_val, num_replicas=num_tasks, rank=global_rank, shuffle=False
-        )
-        sampler_hrrr_val = torch.utils.data.DistributedSampler(
-            dataset_hrrr_val, num_replicas=num_tasks, rank=global_rank, shuffle=False
-        )
-        sampler_usda_val = torch.utils.data.DistributedSampler(
-            dataset_usda_val, num_replicas=num_tasks, rank=global_rank, shuffle=False
-        )
-
-        print("Sampler_sentinel_val = %s" % str(sampler_sentinel_val))
-        print("Sampler_hrrr_val = %s" % str(sampler_hrrr_val))
-        print("Sampler_usda_val = %s" % str(sampler_usda_val))
-
-    if global_rank == 0 and args.log_dir is not None:
-        os.makedirs(args.log_dir, exist_ok=True)
-        log_writer = SummaryWriter(log_dir=args.log_dir)
-    else:
-        log_writer = None
-
-    # train
-    data_loader_sentinel_train = torch.utils.data.DataLoader(
-        dataset_sentinel_train, sampler=sampler_sentinel_train,
-        batch_size=1,
-        num_workers=args.num_workers,
-        pin_memory=args.pin_mem,
-        drop_last=True,
-    )
-
-    data_loader_hrrr_train = torch.utils.data.DataLoader(
-        dataset_hrrr_train, sampler=sampler_hrrr_train,
-        batch_size=1,
-        num_workers=args.num_workers,
-        pin_memory=args.pin_mem,
-        drop_last=True,
-    )
-
-    data_loader_usda_train = torch.utils.data.DataLoader(
-        dataset_usda_train, sampler=sampler_usda_train,
-        batch_size=1,
-        num_workers=args.num_workers,
-        pin_memory=args.pin_mem,
-        drop_last=True,
-    )
-
-    # val
-    data_loader_sentinel_val = torch.utils.data.DataLoader(
-        dataset_sentinel_val, sampler=sampler_sentinel_val,
-        batch_size=1,
-        num_workers=args.num_workers,
-        pin_memory=args.pin_mem,
-        drop_last=True,
-    )
-
-    data_loader_hrrr_val = torch.utils.data.DataLoader(
-        dataset_hrrr_val, sampler=sampler_hrrr_val,
-        batch_size=1,
-        num_workers=args.num_workers,
-        pin_memory=args.pin_mem,
-        drop_last=True,
-    )
-
-    data_loader_usda_val = torch.utils.data.DataLoader(
-        dataset_usda_val, sampler=sampler_usda_val,
-        batch_size=1,
-        num_workers=args.num_workers,
-        pin_memory=args.pin_mem,
-        drop_last=True,
-    )
-
-    pvt = PVTSimCLR(args.model_pvt, out_dim=args.embed_dim, context_dim=9)
+    config = model_config(args)
+    model = build_model(config, pretrained_pvt=not args.no_pvt_pretrained and not args.pvt_simclr)
     if args.pvt_simclr:
-        checkpoint = torch.load(args.pvt_simclr, map_location='cpu')
-        pvt.load_state_dict(checkpoint['model'])
-        pvt.to(device)
-
-    model = MMST_ViT(out_dim=1, pvt_backbone=pvt, context_dim=9, dim=args.embed_dim, batch_size=args.batch_size)
+        # 只加载 PVT-SimCLR 主干；MMST 的 80 网格位置编码等参数保持新初始化
+        checkpoint = torch.load(args.pvt_simclr, map_location='cpu', weights_only=False)
+        model.pvt_backbone.load_state_dict(checkpoint['model'])
+        print("Loaded PVT-SimCLR from %s" % args.pvt_simclr)
     model.to(device)
-
     model_without_ddp = model
-    print("Model = %s" % str(model_without_ddp))
 
-    eff_batch_size = args.batch_size * args.accum_iter * misc.get_world_size()
-
+    eff_batch_size = args.county_batch_size * args.accum_iter * misc.get_world_size()
     if args.lr is None:  # only base_lr is specified
         args.lr = args.blr * eff_batch_size / 256
-
-    print("base lr: %.2e" % (args.lr * 256 / eff_batch_size))
-    print("actual lr: %.2e" % args.lr)
-
-    print("accumulate grad iterations: %d" % args.accum_iter)
-    print("effective batch size: %d" % eff_batch_size)
+    print("actual lr: %.2e, effective county batch size: %d" % (args.lr, eff_batch_size))
 
     if args.distributed:
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=True)
@@ -254,116 +138,79 @@ def main(args):
     # following timm: set wd as 0 for bias and norm layers
     param_groups = optim_factory.add_weight_decay(model_without_ddp, args.weight_decay)
     optimizer = torch.optim.AdamW(param_groups, lr=args.lr, betas=(0.9, 0.999))
-    print(optimizer)
     loss_scaler = NativeScaler()
-
     misc.load_model(args=args, model_without_ddp=model_without_ddp, optimizer=optimizer, loss_scaler=loss_scaler)
 
-    if args.eval:
-        evaluate(model, data_loader_sentinel_val, data_loader_hrrr_val, data_loader_usda_val, device)
-        exit(0)
+    if misc.is_main_process():
+        run_io.write_json(run_dir / "run_metadata.json", {
+            "model": MODEL_NAME, "run_id": args.run_id, "dataset_jsonl": args.dataset_jsonl,
+            "data_root": args.data_root, "train_years": list(FINETUNE_YEARS), "train_samples": len(dataset),
+            "test_years": list(TEST_YEARS), "pvt_simclr": args.pvt_simclr,
+            "target": "log(yield_bu_ac)", "checkpoint_policy": "final epoch only, no validation selection",
+            "world_size": misc.get_world_size(),
+            "started": datetime.datetime.now().isoformat(timespec="seconds"), "status": "running",
+        })
 
     print(f"Start training for {args.epochs} epochs")
     start_time = time.time()
+    epoch = args.start_epoch - 1
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
-            # train
-            data_loader_sentinel_train.sampler.set_epoch(epoch)
-            data_loader_hrrr_train.sampler.set_epoch(epoch)
-            data_loader_usda_train.sampler.set_epoch(epoch)
+            data_loader.sampler.set_epoch(epoch)
 
-            # val
-            data_loader_sentinel_val.sampler.set_epoch(epoch)
-            data_loader_hrrr_val.sampler.set_epoch(epoch)
-            data_loader_usda_val.sampler.set_epoch(epoch)
+        train_stats = train_one_epoch(model, data_loader, optimizer, device, epoch, loss_scaler,
+                                      log_writer=log_writer, args=args)
 
-        train_stats = train_one_epoch(
-            model, data_loader_sentinel_train, data_loader_hrrr_train, data_loader_usda_train,
-            optimizer, device, epoch, loss_scaler, log_writer=log_writer, args=args
-        )
-
-        metrics_result = None
-        if args.output_dir:
-            metrics_result = evaluate(
-                model, data_loader_sentinel_val, data_loader_hrrr_val,
-                data_loader_usda_val, device,
-            )
-            if misc.is_main_process():
-                metrics_path = os.path.join(args.output_dir, "metrics.jsonl")
-                with open(metrics_path, mode="a", encoding="utf-8") as metrics_file:
-                    metrics_file.write(json.dumps({"epoch": epoch, **metrics_result}) + "\n")
-
-        if args.output_dir and (epoch % args.save_freq == 0 or epoch + 1 == args.epochs):
-            misc.save_model(
-                args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
-                loss_scaler=loss_scaler, epoch=epoch)
-
-        log_stats = {**{f'train_{k}': v for k, v in train_stats.items()}, 'epoch': epoch, }
-
-        if args.output_dir and misc.is_main_process():
+        if epoch % args.save_freq == 0 or epoch + 1 == args.epochs:
+            misc.save_model(args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
+                            loss_scaler=loss_scaler, epoch=epoch)
+        if misc.is_main_process():
             if log_writer is not None:
                 log_writer.flush()
-            with open(os.path.join(args.output_dir, "log.txt"), mode="a", encoding="utf-8") as f:
-                f.write(json.dumps(log_stats) + "\n")
+            run_io.append_jsonl(run_dir / "train_metrics.jsonl",
+                                {"epoch": epoch, **{f"train_{k}": v for k, v in train_stats.items()}})
+    print('Training time {}'.format(datetime.timedelta(seconds=int(time.time() - start_time))))
 
-    total_time = time.time() - start_time
-    total_time_str = str(__import__("datetime").timedelta(seconds=int(total_time)))
-    print('Training time {}'.format(total_time_str))
+    if not misc.is_main_process():
+        return run_dir
+    final = run_io.save_final_checkpoint(run_dir, model_without_ddp, epoch=epoch, model_config=config,
+                                         train_years=FINETUNE_YEARS)
+    run_io.update_json(run_dir / "run_metadata.json", final_checkpoint=str(final),
+                       trained=datetime.datetime.now().isoformat(timespec="seconds"))
+    if log_writer is not None:
+        log_writer.close()
+    return evaluate_final_checkpoint(final, args.dataset_jsonl, args.data_root, run_dir,
+                                     device=args.device, num_workers=args.num_workers)
 
 
-def train_one_epoch(model: torch.nn.Module,
-                    data_loader_sentinel: Iterable, data_loader_hrrr: Iterable, data_loader_usda: Iterable,
-                    optimizer: torch.optim.Optimizer, device: torch.device, epoch: int, loss_scaler,
-                    log_writer=None, args=None):
+def train_one_epoch(model: torch.nn.Module, data_loader: Iterable, optimizer: torch.optim.Optimizer,
+                    device: torch.device, epoch: int, loss_scaler, log_writer=None, args=None):
     model.train(True)
     metric_logger = misc.MetricLogger(delimiter="  ")
     metric_logger.add_meter('lr', misc.SmoothedValue(window_size=1, fmt='{value:.6f}'))
 
     accum_iter = args.accum_iter
     # data augmentation by following SimCLR
-    data_wrapper = DataWrapper()
-
+    data_wrapper = DataWrapper(img_size=args.input_size)
     criterion = torch.nn.MSELoss().to(device)
     optimizer.zero_grad()
 
-    if log_writer is not None:
-        print('log_dir: {}'.format(log_writer.log_dir))
-
-    total_step = len(data_loader_sentinel) - 1
-    for data_iter_step, (x, y, z) in enumerate(zip(data_loader_sentinel, data_loader_hrrr, data_loader_usda)):
-
-        fips, max_mem = x[1][0], torch.cuda.max_memory_allocated() / (1024.0 * 1024.0)
-        num_grids = tuple(x[0].shape)[2]
-        print("Epoch: [{}]  [ {} / {}]  FIPS Code: {}  Number of Grids: {}  Max Mem: {}"
-              .format(epoch, data_iter_step, total_step, fips, num_grids, f"{max_mem:.0f}"))
+    total_step = len(data_loader)
+    for data_iter_step, batch in enumerate(data_loader):
+        print("Epoch: [{}]  [ {} / {}]  Samples: {}  Grids: {}".format(
+            epoch, data_iter_step, total_step - 1, batch["sample_id"], batch["grid_mask"].sum(dim=1).tolist()))
 
         # we use a per iteration (instead of per epoch) lr scheduler
         if data_iter_step % accum_iter == 0:
-            lr_sched.adjust_learning_rate(optimizer, data_iter_step / len(data_loader_sentinel) + epoch, args)
+            lr_sched.adjust_learning_rate(optimizer, data_iter_step / total_step + epoch, args)
 
+        x, ys, yl, grid_mask = model_inputs(batch, device, augment=data_wrapper)
+        # log_scale target，与原 MMST-ViT 一致
+        z = torch.log(batch["labels"]).unsqueeze(-1).to(device, non_blocking=True)
 
-        # satellited imagery
-        x = x[0].to(device, non_blocking=True)
-        # short- and long-term weather variables
-        ys = y[0].to(device, non_blocking=True)
-        yl = y[1].to(device, non_blocking=True)
-        # USDA
-        z = z[0][..., -1:].to(device, non_blocking=True)
-
-        b, t, g, _, _, _ = x.shape
-        x = rearrange(x, 'b t g h w c -> (b t g) c h w')
-        x = x.to(torch.float32) / 255.0
-        x, _ = data_wrapper(x)
-
-        x = rearrange(x, '(b t g) c h w -> b t g c h w', b=b, t=t, g=g)
-
-
-        z_hat = model(x, ys=ys, yl=yl)
-
-        # log_scale
-        loss = criterion(z, z_hat)
+        z_hat = model(x, ys=ys, yl=yl, grid_mask=grid_mask)
+        loss = criterion(z_hat, z)
         loss_value = loss.item()
-
         if not math.isfinite(loss_value):
             print("Loss is {}, stopping training".format(loss_value))
             sys.exit(1)
@@ -373,91 +220,73 @@ def train_one_epoch(model: torch.nn.Module,
                     update_grad=(data_iter_step + 1) % accum_iter == 0)
         if (data_iter_step + 1) % accum_iter == 0:
             optimizer.zero_grad()
-
-        torch.cuda.synchronize()
+        if device.type == "cuda":
+            torch.cuda.synchronize()
 
         metric_logger.update(loss=loss_value)
-
         lr = optimizer.param_groups[0]["lr"]
         metric_logger.update(lr=lr)
-
         loss_value_reduce = misc.all_reduce_mean(loss_value)
         if log_writer is not None and (data_iter_step + 1) % accum_iter == 0:
-            """ We use epoch_1000x as the x-axis in tensorboard.
-            This calibrates different curves when batch size changes.
-            """
-            epoch_1000x = int((data_iter_step / len(data_loader_sentinel) + epoch) * 1000)
+            epoch_1000x = int((data_iter_step / total_step + epoch) * 1000)
             log_writer.add_scalar('train_loss', loss_value_reduce, epoch_1000x)
             log_writer.add_scalar('lr', lr, epoch_1000x)
 
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
     print("Averaged stats:", metric_logger)
-
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
 
 
 @torch.no_grad()
-def evaluate(model: torch.nn.Module, data_loader_sentinel: Iterable, data_loader_hrrr: Iterable,
-             data_loader_usda: Iterable, device: torch.device):
+def predict(model: torch.nn.Module, data_loader: Iterable, device: torch.device):
+    """返回按 DataLoader 顺序的逐县预测（bu/ac）。"""
     model.eval()
-    # data augmentation by following SimCLR
-    data_wrapper = DataWrapper(train=False)
-
-    true_labels = torch.empty(0)
-    pred_labels = torch.empty(0)
-
-    total_step = len(data_loader_sentinel) - 1
-    for data_iter_step, (x, y, z) in enumerate(zip(data_loader_sentinel, data_loader_hrrr, data_loader_usda)):
-
-        fips, max_mem = x[1][0], torch.cuda.max_memory_allocated() / (1024.0 * 1024.0)
-        num_grids = tuple(x[0].shape)[2]
-        print(" Eval [ {} / {}]  FIPS Code: {}  Number of Grids: {}  Max Mem: {}"
-              .format(data_iter_step, total_step, fips, num_grids, f"{max_mem:.0f}"))
-
-        # satellite imagery
-        x = x[0].to(device, non_blocking=True)
-
-        # short- and long-term weather variables
-        ys = y[0].to(device, non_blocking=True)
-        yl = y[1].to(device, non_blocking=True)
-
-        # USDA
-        z = z[0][..., -1:].to(device, non_blocking=True)
-
-        b, t, g, _, _, _ = x.shape
-        x = rearrange(x, 'b t g h w c -> (b t g) c h w')
-        x = x.to(torch.float32) / 255.0
-        x, _ = data_wrapper(x)
-        x = rearrange(x, '(b t g) c h w -> b t g c h w', b=b, t=t, g=g)
-
-        z_hat = model(x, ys=ys, yl=yl)
-
-        true_labels = torch.cat([true_labels, z.detach().cpu()], dim=0)
-        pred_labels = torch.cat([pred_labels, z_hat.detach().cpu()], dim=0)
+    rows = []
+    for batch in data_loader:
+        x, ys, yl, grid_mask = model_inputs(batch, device)
+        z_hat = model(x, ys=ys, yl=yl, grid_mask=grid_mask)
+        pred = torch.exp(z_hat[:, -1].float()).cpu().tolist()
+        for sid, fips, year, y_true, y_pred in zip(batch["sample_id"], batch["fips"], batch["year"].tolist(),
+                                                   batch["labels"].tolist(), pred):
+            rows.append({"sample_id": sid, "fips": fips, "year": year, "y_true": y_true, "y_pred": y_pred})
+        print(" Test {}".format(batch["sample_id"]))
+    return rows
 
 
-    true_labels = torch.exp(torch.flatten(true_labels[:, -1:], start_dim=0)).detach().cpu().numpy()
-    pred_labels = torch.exp(torch.flatten(pred_labels[:, -1:], start_dim=0)).detach().cpu().numpy()
+def evaluate_final_checkpoint(checkpoint_path, dataset_jsonl, data_root, output_dir, *, device="cuda",
+                              num_workers=0):
+    """唯一的测试入口：加载 checkpoint-final.pth，只读 2022，写 test_metrics.json 与 county_predictions.jsonl。"""
+    years = capture_evaluation_years(checkpoint_path)
+    output_dir = Path(output_dir)
+    device = torch.device(device)
+    checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
+    model = build_model(checkpoint["model_config"])
+    model.load_state_dict(checkpoint["model"])
+    model.to(device)
 
-    rmse, r2, corr = metrics.evaluate(true_labels, pred_labels)
-    mae = float(np.mean(np.abs(true_labels - pred_labels)))
+    loader = build_mmst_dataloader(dataset_jsonl, data_root, years, batch_size=1, shuffle=False,
+                                   load_images=True, num_workers=num_workers)
+    rows = predict(model, loader, device)
+    expected = loader.dataset.sample_ids
+    if [r["sample_id"] for r in rows] != expected:
+        raise RuntimeError("county predictions do not follow unified Dataset sample order")
 
-    global best_metrics
-    best_metrics = [min(best_metrics[0], rmse), max(best_metrics[1], r2), max(best_metrics[2], corr)]
-    print("Metrics: RMSE: {}  R_Squared: {}  Corr: {}".format(f"{best_metrics[0]:.2f}", f"{ best_metrics[1]:.2f}", f"{best_metrics[2]:.2f}"))
-    return {
-        "rmse": float(rmse),
-        "mae": mae,
-        "r2": float(r2),
-        "corr": float(corr),
-        "count": int(true_labels.size),
-    }
+    metrics = regression_metrics([r["y_true"] for r in rows], [r["y_pred"] for r in rows])
+    print("Final test {}: RMSE {:.2f}  MAE {:.2f}  R2 {:.3f}  Corr {:.3f}".format(
+        list(years), metrics["rmse"], metrics["mae"], metrics["r2"], metrics["corr"]))
+    run_io.write_json(output_dir / "test_metrics.json",
+                      {**metrics, "years": list(years), "checkpoint": str(checkpoint_path)})
+    tmp = output_dir / "county_predictions.jsonl.tmp"
+    tmp.unlink(missing_ok=True)
+    for row in rows:
+        run_io.append_jsonl(tmp, row)
+    tmp.replace(output_dir / "county_predictions.jsonl")
+    run_io.update_json(output_dir / "run_metadata.json", status="finished", test_years=list(years),
+                       test_checkpoint=str(checkpoint_path), test_samples=len(rows),
+                       finished=datetime.datetime.now().isoformat(timespec="seconds"))
+    return output_dir
 
 
 if __name__ == '__main__':
-    args = get_args_parser()
-    args = args.parse_args()
-    if args.output_dir:
-        Path(args.output_dir).mkdir(parents=True, exist_ok=True)
-    main(args)
+    main(build_parser().parse_args())

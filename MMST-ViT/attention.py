@@ -132,12 +132,15 @@ class SpatialAttention(nn.Module):
             nn.Dropout(dropout)
         ) if project_out else nn.Identity()
 
-    def forward(self, x):
+    def forward(self, x, mask=None):
         b, n, _, h = *x.shape, self.heads
         qkv = self.to_qkv(x).chunk(3, dim=-1)
         q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h=h), qkv)
 
         dots = einsum('b h i d, b h j d -> b h i j', q, k) * self.scale
+        if exists(mask):
+            # mask (b, n): False 的 key（padding 网格）不参与注意力
+            dots = dots.masked_fill(~mask[:, None, None, :], max_neg_value(dots))
         attn = dots.softmax(dim=-1)
 
         out = einsum('b h i j, b h j d -> b h i d', attn, v)
@@ -214,9 +217,9 @@ class SpatialTransformer(nn.Module):
                 PreNorm(dim, FeedForward(dim, dim_out=dim, mult=mult, dropout=dropout))
             ]))
 
-    def forward(self, x):
+    def forward(self, x, mask=None):
         for attn, ff in self.layers:
-            x = attn(x) + x
+            x = attn(x, mask=mask) + x
             x = ff(x) + x
         return self.norm(x)
 

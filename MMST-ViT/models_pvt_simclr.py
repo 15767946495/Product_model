@@ -22,8 +22,7 @@ class PVTSimCLR(nn.Module):
         self.norm1 = nn.LayerNorm(context_dim)
 
     def forward(self, x, context=None):
-        h = self.backbone.forward_features(x)  # shape = B, N, D
-        h = h.squeeze()
+        h = self.backbone.forward_features(x)  # shape = B, N, D（不 squeeze，避免 B=1 时丢掉 batch 维）
 
         # project to targeted dim
         x = self.proj(h)

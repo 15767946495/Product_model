@@ -260,6 +260,12 @@ def pvt_tiny(pretrained=False, **kwargs):
         norm_layer=partial(nn.LayerNorm, eps=1e-6), depths=[2, 2, 2, 2], sr_ratios=[8, 4, 2, 1],
         **kwargs)
     model.default_cfg = _cfg()
+    model.default_cfg['url'] = 'https://github.com/whai362/PVT/releases/download/v2/pvt_tiny.pth'
+
+    if pretrained:
+        state_dict = torch.hub.load_state_dict_from_url(
+            model.default_cfg['url'], map_location='cpu', progress=True)
+        model.load_state_dict(state_dict)
 
     return model
 
