@@ -7,7 +7,8 @@ __pycache__/
 *.egg
 
 # 数据（外置，不进入 git，详见 README）
-DataSrc/
+DataSrc/*
+!DataSrc/download_cropnet.py
 train_dataset/dataset.jsonl
 train_dataset/grid_cache.pt
 train_dataset/grid_cache_meta.json
