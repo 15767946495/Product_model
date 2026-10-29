@@ -1,22 +1,24 @@
 # CropNet Model — 县级玉米单产预测
 
-基于**MMST 多模态空间前端 + 时间融合变换器（TFT）**的县级玉米单产预测研究。
+基于**面板感知时间融合变换器（PA-TFT）**的县级玉米单产预测研究。
 
-- **研究对象**：美国玉米带（Corn Belt）县级玉米单产
-- **数据**：官方 MMST Sentinel-2、WRF-HRRR 与 USDA Corn 数据，外加 7 维县级土壤属性
-- **方法**：完整 PVTSimCLR 多模态前端、官方 SpatialTransformer、TFT temporal backend 与概率预测
+- **研究对象**：美国 29 个州 741 个玉米主产县，2017—2022 年平衡面板（4446 个县年）
+- **数据**：CropNet 的 Sentinel-2、WRF-HRRR 与 USDA Corn 数据，外加 7 维县级土壤属性
+- **方法**：县均值偏移 + 县内去均值植被指数 + 按样本规模设定的训练协议，TFT 作为时序后端
 - **配套论文**：`paper.md`
 
 ## 目录结构
 
 ```
 cropnet_model/
-├── TFT_model/            # 主模型代码（TFT + 空间注意力，训练/推理/注意力分析）
-├── BaseLine_Model/       # 基线模型（CNN-RNN / ConvLSTM / GNNRNN / DeepCropNet）
-├── ablation/             # 消融实验
-├── grid_search/          # 超参数网格搜索
-├── _txt/                 # 论文与实验说明文本
+├── TFT_model/            # 主模型 PA-TFT 与对照配置 PVT-TFT（训练、推理、消融、干预与论文数值脚本）
+├── UNet-ConvLSTM/        # 比较模型
+├── GNN-RNN/              # 比较模型
+├── PhenoYieldNet/        # 比较模型
 ├── train_dataset/        # 数据集构建脚本（JSONL / 网格缓存 / 土壤映射）
+├── DataSrc/              # 数据下载与网格对齐
+├── paper_figures/        # 论文数值结果（JSON）与图
+├── docs/                 # 论文章节片段与表格生成脚本（本地，不进入 git）
 ├── Reference/            # 参考文献 PDF
 ├── paper.md              # 论文草稿
 └── requirements.txt      # Python 依赖（conda env `product` 导出）
@@ -30,82 +32,113 @@ pip install -r requirements.txt
 # 主要依赖：torch>=2.0, numpy, pandas, scipy, scikit-learn, matplotlib
 ```
 
+`requirements.txt` 中的 Torch 声明与本次已验证的 `product` 环境可能不一致，二者需要后续独立同步。本轮不自动升级/降级 Torch/CUDA；短训练和 CLI 验证使用当前 `product` 环境。
+
 ## 数据说明（重要）
 
-原始数据（约 31GB）**未提交到本仓库**，包括：
+所有模型只读取一个加工数据入口：`train_dataset/dataset.jsonl`。
 
-| 路径 | 内容 | 大小 |
-|------|------|------|
-| `DataSrc/cropnet_dataset/data/` | USDA 县级数据 + WRF-HRRR 网格气象（2017–2022） | ~28GB |
-| `DataSrc/soil_dataset/` | 土壤属性数据 | — |
-| `train_dataset/dataset.jsonl` | 县级粒度训练集（JSONL） | ~330MB |
-| `train_dataset/grid_cache.pt` | 网格级气象二进制缓存 | ~1.5GB |
-| `BaseLine_Model/output/` | 基线模型输出数据 | ~930MB |
+| 路径 | 内容 |
+|------|------|
+| `/data/raid0/hqx/DataSrc/` | 唯一源数据根目录（USDA、WRF-HRRR、Sentinel-2 AG、gSSURGO 土壤、县界邻接、`download_audit.jsonl`） |
+| `/data/raid0/hqx/train_dataset/dataset.jsonl` | 唯一加工数据实体文件，每行一个县年样本 |
+| `train_dataset/dataset.jsonl` | 项目入口，必须是指向上述实体文件的符号链接 |
 
-这些文件因超出 Git 与 GitHub 的存储限制（单文件 >100MB 会被 GitHub 拒绝），改为**外置存放**。
-
-> **下载地址：[ModelScope 数据集 wbsyz1/CropDataSet](https://www.modelscope.cn/datasets/wbsyz1/CropDataSet)**
-
-数据以两个压缩包（tar.gz，内部保留原始目录结构）提供：
-
-| 包 | 内容 | 大小 |
-|----|------|------|
-| `cropnet_weather_data.tar.gz` | WRF-HRRR 网格气象（2017–2022） | 约 5.8GB（原始 28GB） |
-| `cropnet_aux_data.tar.gz` | USDA 数据、土壤、train_dataset、基线输出 | 约 1.8GB |
-
-**解压方式**（在项目根目录执行，解压后即还原 `DataSrc/` 等原始结构）：
+两个入口脚本：
 
 ```bash
-tar -xzf cropnet_weather_data.tar.gz
-tar -xzf cropnet_aux_data.tar.gz
+P=/root/miniconda3/envs/product/bin/python
+# 1) 下载与源数据审计（固定写入 /data/raid0/hqx/DataSrc）
+$P DataSrc/download_cropnet.py --audit-only     # 只列远端清单，不下载
+$P DataSrc/download_cropnet.py --download       # 增量下载，可中断重跑
+$P DataSrc/download_cropnet.py --verify-local   # 只读审计，写 download_audit.jsonl
+# 2) 源数据 -> 唯一 JSONL（原子写入并维护项目软链接）
+$P train_dataset/build_dataset.py --validate-only
+$P train_dataset/build_dataset.py
 ```
 
-SHA256 校验值见数据集仓库的 `SHA256SUMS` 文件。
+共享读取接口：`train_dataset/dataset.py`（schema、`CropNetDataset`、年份协议）、`collate.py`、`metrics.py`。
 
-### 数据再生成
-
-如需本地重新生成 `train_dataset` 中的数据，可按顺序运行：
+验证：
 
 ```bash
-# 1) 生成州级土壤静态特征映射
-python train_dataset/gen_state_soil_map.py
-
-# 2) 把 WRF-HRRR 气象数据按网格级处理成二进制缓存 grid_cache.pt
-python train_dataset/prepare_grid.py
-
-# 3) 把原始数据整理成县级粒度 JSONL 训练集 dataset.jsonl
-python train_dataset/prepare_jsonl.py
+$P train_dataset/build_dataset.py --validate-only
+readlink -f train_dataset/dataset.jsonl
 ```
 
-> 注意：上述脚本依赖 `DataSrc/` 下的原始数据，需先从外部下载并放置到对应目录。
+`train_dataset/dataset.jsonl` 软链接被 `.gitignore` 忽略，所以 `git status` 中看不到，IDE 中显示为灰色；用上面的 `readlink -f` 确认它指向 RAID 实体文件。
 
-## 使用
+旧运行时目录删除闸门：`$P train_dataset/migration_check.py` 只报告不删除；仅当输出
+`READY_TO_DELETE_OLD_RUNTIME=true` 且用户再次明确批准后，才人工处理旧运行时目录。
+
+正式入口只依赖 `train_dataset/dataset.jsonl` 和共享数据适配器，不依赖历史 manifest、旧缓存或旧运行时路径。本文档不把历史文件是否已物理删除作为入口契约。
+
+## 推荐入口
+
+所有正式入口均使用统一 JSONL，推荐直接运行各模型的 `run_train.sh`。除 TFT 使用 20 epoch 外，其余脚本默认 50 epoch；脚本固定使用 GPU 0--4，并把输出写入各自的模型目录，不使用公共输出根：
+
+| 模型 | 推荐脚本 | GPU | 默认输出目录 |
+|------|----------|-----|--------------|
+| PhenoYieldNet | `./PhenoYieldNet/run_train.sh` | GPU 0 | `PhenoYieldNet/output_dir` |
+| GNN-RNN | `./GNN-RNN/run_train.sh` | GPU 2 | `GNN-RNN/output_dir` |
+| UNet-ConvLSTM | `./UNet-ConvLSTM/run_train.sh` | GPU 3 | `UNet-ConvLSTM/output_dir` |
+| TFT | `./TFT_model/run_train.sh` | GPU 4 | `TFT_model/output_dir` |
+
+所有脚本都接受环境变量覆盖，常用变量如下：
+
+| 变量 | 默认值或作用 |
+|------|--------------|
+| `PYTHON` | `/root/miniconda3/envs/product/bin/python` |
+| `DATASET_JSONL` | `$PROJECT_ROOT/train_dataset/dataset.jsonl` |
+| `DATA_ROOT` | `/data/raid0/hqx/DataSrc` |
+| `OUTPUT_ROOT` | 当前模型的 `output_dir` |
+| `EPOCHS` | `50`（TFT 为 `20`） |
+| `RUN_ID` | UTC 时间戳；用于输出 run 子目录 |
+| `NUM_WORKERS` | `4` |
+| `DRY_RUN` | `1` 只打印命令，不创建训练输出 |
+
+模型专属变量包括 PhenoYieldNet 的 `STAGE1_EPOCHS`、`STAGE2_EPOCHS`、`GRAD_CHECKPOINTING`、`FROZEN_FM`，以及 GNN-RNN 的 `AGGREGATOR`、UNet-ConvLSTM 的 `COUNTY_BATCH_SIZE`/`IMAGE_SIZE`/`GRID_CHUNK`、TFT 的 `BATCH_SIZE`/`HIDDEN_SIZE`/`NUM_HEADS`/`NUM_LSTM_LAYERS`/`WARMUP_EPOCHS`/`CUTOFFS`。各模型 README 记录完整变量集合。
+
+最小 smoke 只验证命令编排和输出契约：
 
 ```bash
-# 1) 如尚无完整 PVTSimCLR checkpoint，先运行官方 MMST 预训练入口
-bash MMST-ViT/run_pretrain.sh
-
-# 2) 使用固定协议监督训练 TFT
-bash TFT_model/run_finetune.sh
-
-# 正式推理：239 个官方 Corn 验证县
-python TFT_model/infer_mmst_frontend.py
-
-# 基线模型训练（以 CNNRNN 为例）
-bash BaseLine_Model/CNNRNN/train.sh
-
-# 消融 / 网格搜索
-python ablation/ablation.py
-python grid_search/grid_search.py
+DRY_RUN=1 EPOCHS=1 RUN_ID=smoke ./GNN-RNN/run_train.sh
+DRY_RUN=1 EPOCHS=1 RUN_ID=smoke ./PhenoYieldNet/run_train.sh
 ```
 
-### 正式 MMST-TFT 入口与迁移边界
+PhenoYieldNet 脚本依次执行 Stage 1、Stage 2 和最终测试，两个阶段的 `checkpoint-final.pth` 自动通过模型目录中的 `OUTPUT_ROOT` 传递。
 
-正式训练入口是 `TFT_model/train_mmst_frontend.py`，正式推理入口是 `TFT_model/infer_mmst_frontend.py`。推理默认严格读取 `/data/raid0/hqx/TFT_train/mmst_frontend_2021/checkpoint-final.pth`，从 embedded `config` 和 `soil_stats` 重建 `MMSTTFTYieldModel` 并执行 strict state-dict load。评估固定使用官方 `MMST-ViT/data/corn_val.json` 的 239 个县、官方 `DataWrapper(train=False)` 变换和训练县土壤 z-score；正式数据适配器只读取 6 个月、每月 28 天的短期 HRRR。模型返回的最后有效月份 `final_dist[:, 0]` 是 log-yield mean，预测与 adapter 的 `yield_log` 均以 `exp` 还原后计算 RMSE、MAE、R² 和 Corr。
+TFT 默认只从本地 `/data/raid0/hqx/pretrained/pvt_tiny.pth` 读取 PVT-Tiny，期望 SHA-256 为 `360ec6b56fe98f36bf9af6822f3e2a46a3acf2eee5bfe0c68f8580cf3c07ba0f`，正式路径不联网。文件缺失或 SHA 不匹配会直接失败；需要无预训练权重的离线 smoke 时使用 `VIT_PRETRAINED=0`，不会触发联网回退。
 
-正式微调默认读取 `MMST-ViT/output_dir/pvt_simclr/checkpoint-latest.pth`，并对完整 `PVTSimCLR` state dict 执行严格加载。迁移内容包括 PVT backbone、视觉投影 `proj`、9 维天气投影 `proj_context`、天气归一化和 2 层多模态多头注意力 `mm_transformer`，不是仅迁移视觉骨干。县级空间模块直接采用官方 `SpatialTransformer` 类，在监督阶段初始化和训练；MMST 自监督预训练不训练该空间模块，也不训练 TFT temporal backend。
+监督训练/最终测试 run 输出七个统一文件：`config.json`、`checkpoint-latest.pth`、`checkpoint-final.pth`、`train_metrics.jsonl`、`test_metrics.json`、`county_predictions.jsonl`、`run_metadata.json`。PhenoYieldNet Stage 1 只输出五个训练文件，不执行 2022 最终评估。上述短训练只用于验证入口、数据适配、优化步骤、checkpoint 和统一输出契约，不是性能结果，不得用于模型排名或论文结论。
 
-每个县的 Sentinel-2 网格影像与同网格短期 HRRR 先经完整 PVTSimCLR 融合，再由官方 SpatialTransformer 按月份聚合，输出 6 个形状为 512 维的县级多模态空间 token。后端以 7 维土壤静态特征条件化 TFT temporal 路径，包含 LSTM、因果时间注意力、独立 mean/variance heads，并以 Beta-NLL 加 temporal KL 训练。当前正式流程不依赖独立 TFT 预训练 checkpoint 或中间转换文件；仓库中的其他历史训练、推理和数据入口均不属于正式协议。
+## 论文数值复现
+
+`paper.md` 只报告一折：2017—2021 年训练、2022 年测试，每个配置只跑一次、种子固定为 0（第5.1节）。唯一的例外是对照配置 PVT-TFT，它以三个种子重复训练以确认退化不是偶然。完整流程如下。
+
+```bash
+P=/root/miniconda3/envs/product/bin/python
+export OUTPUT_ROOT=/data/raid0/hqx/TFT_out      # 训练输出务必外置，不要写进仓库
+
+# 1) 训练：PA-TFT 与三个组件消融（2022 折、种子 0），以及 PVT-TFT 的三个种子
+bash TFT_model/run_loyo.sh                                  # improved / noffset / nodemean / nors
+CONFIGS=original SEEDS="42 1 2" bash TFT_model/run_loyo.sh  # PVT-TFT
+
+# 2) 面板基线：仅县固定效应与线性面板估计器（第5.2、5.7节，写出 panel.json）
+$P -I TFT_model/panel_report.py
+
+# 3) 汇总：依次写 paper_figures/{loyo_summary,single_fold_2022,tft_main}.json
+LOYO_SEEDS=0 $P -I TFT_model/loyo_summary.py
+LOYO_SEEDS=0 $P -I TFT_model/paper_report_tft.py
+LOYO_SEEDS=0 $P -I TFT_model/single_fold_report.py
+
+# 4) 测试时遥感干预（第5.6节）
+$P -I TFT_model/rs_intervention_improved.py
+```
+
+自助法（5000 次重抽样）从 `np.random.default_rng(0)` 取数，随机数流随比较行数移动：表5-1、表5-2 与消融区间的数值只在上面 1—3 步按原样跑完后才与论文一致，在 `paper_report_tft.py` 里增删任何对照行都会改变全部区间。
+
+全样本置换检验（第5.8节）另用两步：`TFT_model/rs_signal_extract.py --output <npz>` 提取植被指数特征，`TFT_model/rs_signal_test.py --features <npz> --output <json>` 给出置换结果，`TFT_model/rs_info_test.py` 把结果整理成 `paper_figures/rs_info_test.json`。
 
 ## 引用
 

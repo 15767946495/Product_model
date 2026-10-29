@@ -280,7 +280,7 @@ def read_image_index(paths: Sequence[Path], fips: str, year: int, *,
 # ---------------------------------------------------------------------------
 
 def read_usda_yields(path: Path, year: int) -> dict[str, dict]:
-    """九州县级玉米单产：完全相同的重复归并，标签冲突抛 ValueError。"""
+    """县级玉米单产：完全相同的重复归并，标签冲突抛 ValueError。"""
     out: dict[str, dict] = {}
     with open(path, newline="", encoding="utf-8") as handle:
         for lineno, row in enumerate(csv.DictReader(handle), 2):
@@ -368,7 +368,7 @@ def build_county_year_sample(source_root: Path, fips: str, year: int, soil: dict
     """构建并校验一个县年样本；像素不进入 JSONL，只写结构化 HDF5 引用。"""
     root = Path(source_root)
     if fips[:2] not in STATES:
-        raise ValueError(f"{fips}: outside the nine study states")
+        raise ValueError(f"{fips}: outside the study states")
     state, abbr = STATES[fips[:2]]
     sid = f"{fips}_{year}"
     labels = _usda(root, year)
@@ -522,7 +522,7 @@ def _audit_county(root: Path, fips: str, soil: dict, labels: dict) -> list[dict]
 
 
 def audit_sources(source_root: Path, only_fips: set[str] | None = None) -> list[dict]:
-    """九州候选县逐年审计；候选县 = 任一年 USDA 玉米记录中出现的县。"""
+    """候选县逐年审计；候选县 = 任一年 USDA 玉米记录中出现的县。"""
     root = Path(source_root)
     labels = {}
     for year in YEARS:
@@ -539,7 +539,7 @@ def audit_sources(source_root: Path, only_fips: set[str] | None = None) -> list[
     rows = []
     for i, fips in enumerate(candidates, 1):
         if fips[:2] not in STATES:
-            raise ValueError(f"{fips}: outside the nine study states")
+            raise ValueError(f"{fips}: outside the study states")
         rows.extend(_audit_county(root, fips, soil, labels))
         if i % 50 == 0 or i == len(candidates):
             print(f"[audit] {i}/{len(candidates)} counties", file=sys.stderr, flush=True)

@@ -34,11 +34,21 @@ WEATHER_DAYS = DAYS_PER_MONTH * len(REMOTE_MONTHS)
 LONG_TERM_YEARS = 4
 GRID_TOLERANCE = 1e-3
 
-# 州 ANSI 代码 -> (小写州名, USPS 缩写)；候选州固定为九个玉米带州。
+# 州 ANSI 代码 -> (小写州名, USPS 缩写)；候选州为 CropNet USDA 玉米表覆盖的 32 州，
+# 其中阿拉巴马（01）除外：HF 上 2017/AL 的 HRRR 目录只有阿肯色文件的副本，缺 2017 气象，
+# 无法构成六年平衡面板，故不进入候选。
 STATES = {
-    "27": ("minnesota", "MN"), "55": ("wisconsin", "WI"), "26": ("michigan", "MI"),
-    "19": ("iowa", "IA"), "17": ("illinois", "IL"), "18": ("indiana", "IN"),
-    "39": ("ohio", "OH"), "29": ("missouri", "MO"), "21": ("kentucky", "KY"),
+    "05": ("arkansas", "AR"), "06": ("california", "CA"),
+    "08": ("colorado", "CO"), "10": ("delaware", "DE"), "13": ("georgia", "GA"),
+    "16": ("idaho", "ID"), "17": ("illinois", "IL"), "18": ("indiana", "IN"),
+    "19": ("iowa", "IA"), "20": ("kansas", "KS"), "21": ("kentucky", "KY"),
+    "22": ("louisiana", "LA"), "24": ("maryland", "MD"), "26": ("michigan", "MI"),
+    "27": ("minnesota", "MN"), "28": ("mississippi", "MS"), "29": ("missouri", "MO"),
+    "31": ("nebraska", "NE"), "36": ("new york", "NY"), "37": ("north carolina", "NC"),
+    "38": ("north dakota", "ND"), "39": ("ohio", "OH"), "40": ("oklahoma", "OK"),
+    "42": ("pennsylvania", "PA"), "45": ("south carolina", "SC"), "46": ("south dakota", "SD"),
+    "47": ("tennessee", "TN"), "48": ("texas", "TX"), "51": ("virginia", "VA"),
+    "53": ("washington", "WA"), "55": ("wisconsin", "WI"),
 }
 
 ABBR_TO_ANSI = {abbr: ansi for ansi, (_, abbr) in STATES.items()}
@@ -226,7 +236,7 @@ def validate_sample(sample: dict, *, check_files: bool = False, data_root: Path 
     if sample["sample_id"] != f"{fips}_{year}":
         _fail(sid, "sample_id", f"expected {fips}_{year}")
     if fips[:2] not in STATES:
-        _fail(sid, "fips", "state is outside the nine study states")
+        _fail(sid, "fips", "state is outside the study states")
     state, state_abbr = STATES[fips[:2]]
     if sample["state"] != state:
         _fail(sid, "state", f"expected {state!r}")
@@ -493,8 +503,8 @@ def load_jsonl(path: Path, *, validate: bool = True) -> list[dict]:
 # 年份协议与共享 Dataset
 # ---------------------------------------------------------------------------
 
-PRETRAIN_YEARS = (2017, 2018, 2019, 2020)    # PhenoYieldNet / MMST-ViT 无监督预训练
-FINETUNE_YEARS = (2021,)                     # PhenoYieldNet / MMST-ViT 监督微调
+PRETRAIN_YEARS = (2017, 2018, 2019, 2020)    # PhenoYieldNet 无监督预训练
+FINETUNE_YEARS = (2021,)                     # PhenoYieldNet 监督微调
 SUPERVISED_YEARS = (2017, 2018, 2019, 2020, 2021)  # TFT / UNet-ConvLSTM 监督训练
 TEST_YEARS = (2022,)                         # 所有模型共同测试集
 GNN_WINDOWS = {"train": (2017, 2018, 2019, 2020, 2021), "test": (2018, 2019, 2020, 2021, 2022)}

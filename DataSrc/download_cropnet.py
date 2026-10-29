@@ -78,7 +78,7 @@ class SourceInventory:
 
 
 def parse_hf_inventory(paths: Iterable[str]) -> SourceInventory:
-    """只接受 Corn、2017--2022、九州、Sentinel AG Q2/Q3 和 HRRR 十二个月。"""
+    """只接受 Corn、2017--2022、研究区域、Sentinel AG Q2/Q3 和 HRRR 十二个月。"""
     inventory = SourceInventory()
     for path in paths:
         if m := _USDA_RE.fullmatch(path):
@@ -331,8 +331,9 @@ _SOIL_SELECT = ("SELECT mu.muacres, co.comppct_r, ch.hzdept_r, ch.hzdepb_r, ch.c
 _SOIL_DEPTH = " AND ch.hzdept_r < 30 AND ch.hzdepb_r > 0"
 
 
-def sda_rows(sql: str) -> list[dict]:
-    payload = json.loads(http_bytes(SDA_URL, {"query": sql, "format": "JSON+COLUMNNAME"}).decode() or "{}")
+def sda_rows(sql: str, *, timeout: int = 180, retries: int = 4) -> list[dict]:
+    payload = json.loads(http_bytes(SDA_URL, {"query": sql, "format": "JSON+COLUMNNAME"},
+                                    timeout=timeout, retries=retries).decode() or "{}")
     table = payload.get("Table", []) if isinstance(payload, dict) else []
     if not table:
         return []
@@ -349,8 +350,11 @@ def soil_rows_by_areasymbol(fips: str) -> list[dict]:
     return sda_rows(sql)
 
 
-def soil_rows_by_geometry(fips: str) -> list[dict]:
-    """调查区不与县一一对应时的回退：用 TIGERweb 县界 WKT 与 SSURGO 图斑求交。"""
+_SOIL_TILE_DEG = 0.2
+
+
+def _tiger_polygons(fips: str) -> list:
+    """TIGERweb 县界（经纬度）；每个多边形是若干环，每个环是 (lon, lat) 点列。"""
     payload = json.loads(http_bytes(TIGERWEB_URL + "?" + urllib.parse.urlencode({
         "where": f"GEOID='{fips}'", "outFields": "GEOID", "returnGeometry": "true",
         "outSR": "4326", "maxAllowableOffset": "0.001", "f": "geojson",
@@ -358,12 +362,53 @@ def soil_rows_by_geometry(fips: str) -> list[dict]:
     if not payload.get("features"):
         raise ValueError(f"no TIGERweb geometry for {fips}")
     geometry = payload["features"][0]["geometry"]
+    return [geometry["coordinates"]] if geometry["type"] == "Polygon" else geometry["coordinates"]
+
+
+def _wkt(polygons) -> str:
     ring = lambda pts: "(" + ",".join(f"{x} {y}" for x, y in pts) + ")"  # noqa: E731
-    polygons = [geometry["coordinates"]] if geometry["type"] == "Polygon" else geometry["coordinates"]
-    wkt = "MULTIPOLYGON(" + ",".join("(" + ",".join(ring(r) for r in p) + ")" for p in polygons) + ")"
-    sql = (_SOIL_SELECT + "WHERE mu.mukey IN (SELECT mukey FROM "
-           f"SDA_Get_Mukey_from_intersection_with_WktWgs84('{wkt}'))" + _SOIL_DEPTH)
-    return sda_rows(sql)
+    return "MULTIPOLYGON(" + ",".join("(" + ",".join(ring(r) for r in p) + ")" for p in polygons) + ")"
+
+
+def _mukeys_in(wkt: str, **kwargs) -> list[str]:
+    rows = sda_rows("SELECT DISTINCT mukey FROM "
+                    f"SDA_Get_Mukey_from_intersection_with_WktWgs84('{wkt}')", **kwargs)
+    return sorted({str(r["mukey"]) for r in rows}, key=int)
+
+
+def _soil_rows_for_mukeys(mukeys: list[str]) -> list[dict]:
+    rows = []
+    for i in range(0, len(mukeys), 200):
+        chunk = ",".join(mukeys[i:i + 200])
+        rows.extend(sda_rows(_SOIL_SELECT + f"WHERE mu.mukey IN ({chunk})" + _SOIL_DEPTH))
+    return rows
+
+
+def soil_rows_by_geometry(fips: str) -> tuple[str, list[dict]]:
+    """调查区不与县一一对应时的回退：用 TIGERweb 县界 WKT 与 SSURGO 图斑求交。
+
+    部分县的整县边界求交会被 SDA 拒绝（约 90 秒后返回 HTTP 500，Server
+    configuration error），此时按 _SOIL_TILE_DEG 度网格分块求交、合并 mukey 后
+    重查。分块与整县求交采用同一语义（取与边界相交的图斑，不做面积裁剪），
+    两者结果一致。整县这一步只试一次：失败重试同样要等 90 秒，没有收益。
+    """
+    polygons = _tiger_polygons(fips)
+    try:
+        whole = _mukeys_in(_wkt(polygons), retries=1)
+        if whole:
+            return "wkt_intersection", _soil_rows_for_mukeys(whole)
+    except OSError:
+        pass
+    points = [pt for poly in polygons for r in poly for pt in r]
+    west, south = min(x for x, _ in points), min(y for _, y in points)
+    east, north = max(x for x, _ in points), max(y for _, y in points)
+    mukeys: set[str] = set()
+    for i in range(int((east - west) / _SOIL_TILE_DEG) + 1):
+        for j in range(int((north - south) / _SOIL_TILE_DEG) + 1):
+            w, e = west + i * _SOIL_TILE_DEG, min(west + (i + 1) * _SOIL_TILE_DEG, east)
+            s, n = south + j * _SOIL_TILE_DEG, min(south + (j + 1) * _SOIL_TILE_DEG, north)
+            mukeys.update(_mukeys_in(_wkt([[[(w, s), (e, s), (e, n), (w, n), (w, s)]]])))
+    return "wkt_tiled", _soil_rows_for_mukeys(sorted(mukeys, key=int))
 
 
 def aggregate_soil(rows: list[dict]) -> dict[str, float]:
@@ -395,7 +440,7 @@ def aggregate_soil(rows: list[dict]) -> dict[str, float]:
 
 
 def candidate_fips(root: Path) -> list[str]:
-    """九州 2017--2022 任一年出现在 USDA 玉米县级记录中的县。"""
+    """STATES 内 2017--2022 任一年出现在 USDA 玉米县级记录中的县。"""
     out = set()
     for year in YEARS:
         with open(root / usda_relpath(year), newline="", encoding="utf-8") as handle:
@@ -416,7 +461,7 @@ def fetch_soil(root: Path, fips_list: Iterable[str], *, workers: int = 4) -> dic
             return "cached"
         method, rows = "areasymbol", soil_rows_by_areasymbol(fips)
         if not rows:
-            method, rows = "wkt_intersection", soil_rows_by_geometry(fips)
+            method, rows = soil_rows_by_geometry(fips)
         write_atomic(target, json.dumps({
             "fips": fips, "method": method, "source": SDA_URL,
             "fetched_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), "rows": rows,

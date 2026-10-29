@@ -1,0 +1,22 @@
+{
+ "2022": {
+  "rmse_baseline": 18.229055462820366,
+  "rmse_shuffle": [
+   20.82797137901449,
+   20.928988322124912,
+   21.16396801779088
+  ],
+  "rmse_shuffle_mean": 20.97364257297676,
+  "rmse_zero": 21.25290677608785,
+  "delta_shuffle": 2.7445871101563952,
+  "delta_zero": 3.0238513132674854,
+  "mean_abs_change_shuffle": 6.498623808922126,
+  "mean_abs_change_zero": 6.790056704831349
+ },
+ "summary": {
+  "delta_shuffle_mean": 2.7445871101563952,
+  "delta_zero_mean": 3.0238513132674854,
+  "years_worse_shuffle": 1,
+  "years_worse_zero": 1
+ }
+}

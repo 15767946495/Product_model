@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Tuple, Optional
 AG_DATE_PAIRS = [
     (4, 1), (5, 1), (6, 1), (7, 1), (8, 1), (9, 1),
 ]
-
+RS_VARIABLE_NAME = "remote_sensing"
 
 def _broadcast_rs_forward(
     rs_encoded: torch.Tensor,
@@ -721,63 +721,6 @@ class SpatialAttentionAggregator(nn.Module):
         return self.norm(cls_out), w
 
 
-class RemoteGridWeatherCrossAttention(nn.Module):
-    """MMST-ViT监督拓扑：遥感月度Query查询同网格当月天气KV。"""
-
-    def __init__(self, hidden_size: int, num_heads: int = 1, dropout: float = 0.1):
-        super().__init__()
-        if num_heads <= 0 or hidden_size % num_heads != 0:
-            raise ValueError("hidden_size must be divisible by positive num_heads")
-        self.hidden_size = hidden_size
-        self.num_heads = num_heads
-        self.head_dim = hidden_size // num_heads
-        self.q = nn.Linear(hidden_size, hidden_size, bias=False)
-        self.k = nn.Linear(hidden_size, hidden_size, bias=False)
-        self.v = nn.Linear(hidden_size, hidden_size, bias=False)
-        self.out = nn.Sequential(nn.Linear(hidden_size, hidden_size), nn.Dropout(dropout))
-        self.scale = math.sqrt(float(self.head_dim))
-
-    def forward(
-        self,
-        remote: torch.Tensor,
-        weather: torch.Tensor,
-        weather_mask: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        if remote.ndim != 4 or weather.ndim != 4:
-            raise ValueError("remote must be (B,G,M,D), weather must be (B,G,T,D)")
-        B, G, M, H = remote.shape
-        if weather.shape[:2] != (B, G) or weather.shape[-1] != H:
-            raise ValueError("remote and weather must share (B,G,D)")
-        T = weather.shape[2]
-        if M != len(AG_DATE_PAIRS) or T != len(AG_DATE_PAIRS) * 28:
-            raise ValueError("expected 6 months of 28 weather tokens")
-        days_per_month = 28
-        if weather_mask is None:
-            weather_mask = torch.ones(B, G, T, device=weather.device, dtype=torch.bool)
-        if weather_mask.shape != (B, G, T):
-            raise ValueError("weather_mask must have shape (B,G,T)")
-
-        q = self.q(remote).view(B, G, M, self.num_heads, self.head_dim)
-        k = self.k(weather).view(B, G, T, self.num_heads, self.head_dim)
-        v = self.v(weather).view(B, G, T, self.num_heads, self.head_dim)
-        q = q.permute(0, 1, 3, 2, 4)
-        k = k.permute(0, 1, 3, 2, 4)
-        v = v.permute(0, 1, 3, 2, 4)
-        month_mask = weather_mask.reshape(B, G, M, days_per_month)
-        k = k.reshape(B, G, self.num_heads, M, days_per_month, self.head_dim)
-        v = v.reshape(B, G, self.num_heads, M, days_per_month, self.head_dim)
-        scores = (q.unsqueeze(-2) * k).sum(dim=-1) / self.scale
-        valid = month_mask[:, :, None, :, :]
-        scores = scores.masked_fill(~valid, torch.finfo(scores.dtype).min)
-        weights = torch.softmax(scores, dim=-1) * valid.to(scores.dtype)
-        weights = weights / weights.sum(dim=-1, keepdim=True).clamp_min(torch.finfo(weights.dtype).eps)
-        fused = torch.sum(weights.unsqueeze(-1) * v, dim=-2)
-        fused = fused.permute(0, 1, 3, 2, 4).reshape(B, G, M, H)
-        fused = self.out(fused)
-        fused = fused * month_mask.any(dim=-1).unsqueeze(-1).to(fused.dtype)
-        return fused, weights.mean(dim=2).reshape(B, G, M, days_per_month)
-
-
 class WeatherRemotePatchPretrain(nn.Module):
     """天气 token Query 对遥感 patch Key/Value 执行纯跨模态注意力。"""
 
@@ -835,12 +778,23 @@ AG_DAY_INDICES = [0, 30, 61, 91, 122, 153]
 
 
 class PretrainedViTEncoder(nn.Module):
-    """PVT-Tiny 风格编码器，直接输出与天气 token 同维的网格级 token。"""
+    """PVT-Tiny 风格编码器，支持 ImageNet 预训练权重加载。"""
 
-    def __init__(self, out_dim: int = 32, freeze_backbone: bool = False, dropout: float = 0.1):
+    def __init__(
+        self,
+        out_dim: int = 32,
+        freeze_backbone: bool = False,
+        dropout: float = 0.1,
+        pretrained: bool = False,
+        pretrained_path=None,
+    ):
         super().__init__()
-        from pvt import PVTTinyEncoder
-        self.backbone = PVTTinyEncoder(out_dim=out_dim, drop=dropout)
+        if __package__:
+            from .pvt import PVTTinyEncoder
+        else:
+            from pvt import PVTTinyEncoder
+        self.backbone = PVTTinyEncoder(out_dim=out_dim, drop=dropout, pretrained=pretrained,
+                                       pretrained_path=pretrained_path)
         self.embed_dim = out_dim
         if freeze_backbone:
             for p in self.backbone.parameters():
@@ -862,11 +816,25 @@ class TFTEncoderForYieldPrediction(nn.Module):
         output_size = 1,
         num_heads: int = 3,
         vit_freeze_backbone: bool = False,
+        vit_pretrained: bool = True,
+        pvt_pretrained_path=None,
+        remote_constant: bool = False,
+        rs_as_variable: bool = False,
+        rs_aux: bool = False,
+        rs_feature_dim: int = 0,
     ):
         super().__init__()
         self.hidden_size = hidden_size
         self.num_heads = num_heads
         self.dynamic_feature_names = list(dynamic_feature_names)
+        if rs_as_variable and RS_VARIABLE_NAME in self.dynamic_feature_names:
+            raise ValueError(f"dynamic feature name {RS_VARIABLE_NAME!r} is reserved")
+        if rs_aux and remote_constant:
+            raise ValueError("rs_aux requires the PVT branch; it cannot be combined with remote_constant")
+        if rs_feature_dim and remote_constant:
+            raise ValueError("rs_feature_dim and remote_constant are mutually exclusive")
+        self.rs_feature_dim = int(rs_feature_dim)
+        self.rs_as_variable = rs_as_variable
 
         # 1. 静态：县级连续土壤(Linear 映射,不分桶)+ 上下文 GRN
         self.soil_static_encoder = SoilStaticEncoder(
@@ -881,6 +849,9 @@ class TFTEncoderForYieldPrediction(nn.Module):
         )
 
         vsn_inputs = {name: hidden_size for name in self.dynamic_feature_names}
+        if rs_as_variable:
+            # 遥感 token 作为第 P+1 个 VSN 变量，提供内容通路而非只调制天气权重
+            vsn_inputs[RS_VARIABLE_NAME] = hidden_size
         self.grid_vsn = VariableSelectionNetwork(
             input_sizes=vsn_inputs,
             hidden_size=hidden_size,
@@ -888,7 +859,14 @@ class TFTEncoderForYieldPrediction(nn.Module):
             context_size=hidden_size,
         )
 
-        # 4. LSTM 编码器
+        self.static_context_grn = GatedResidualNetwork(
+            input_size=hidden_size,
+            hidden_size=hidden_size,
+            output_size=hidden_size,
+            context_size=hidden_size,
+            dropout=dropout,
+        )
+
         self.lstm_encoder = LSTMEncoder(
             input_size=hidden_size,
             hidden_size=hidden_size,
@@ -896,25 +874,6 @@ class TFTEncoderForYieldPrediction(nn.Module):
             dropout=dropout,
             bidirectional=False,
             have_context=True,
-        )
-
-        # 土壤条件化的天气/遥感投影与跨模态注意力
-        self.weather_context_grn = GatedResidualNetwork(
-            input_size=hidden_size,
-            hidden_size=hidden_size,
-            output_size=hidden_size,
-            context_size=hidden_size,
-            dropout=dropout,
-        )
-        self.remote_context_grn = GatedResidualNetwork(
-            input_size=hidden_size,
-            hidden_size=hidden_size,
-            output_size=hidden_size,
-            context_size=hidden_size,
-            dropout=dropout,
-        )
-        self.weather_remote_attn = RemoteGridWeatherCrossAttention(
-            hidden_size, num_heads=num_heads, dropout=dropout
         )
 
         # LSTM 输出经 GRN 准备 → 因果注意力
@@ -945,23 +904,29 @@ class TFTEncoderForYieldPrediction(nn.Module):
         )
         self.mean_head = nn.Sequential(
             nn.Linear(hidden_size, hidden_size),
-            nn.Dropout(dropout),
             nn.ELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_size, output_size),
-        )
-        self.variance_head = nn.Sequential(
-            nn.Linear(hidden_size, hidden_size),
-            nn.Dropout(dropout),
-            nn.ELU(),
-            nn.Dropout(dropout),
             nn.Linear(hidden_size, output_size),
         )
 
-        # 遥感模块是当前模型的必需输入分支。
-        self.vit_encoder = PretrainedViTEncoder(
-            out_dim=hidden_size, freeze_backbone=vit_freeze_backbone, dropout=dropout,
-        )
+        # 遥感模块是当前模型的必需输入分支。数值特征模式下用逐特征线性映射代替 PVT 图像编码
+        # （与天气变量的 per_feature_linear 同构，无预训练骨干，也就没有骨干坍缩问题）。
+        if self.rs_feature_dim:
+            self.vit_encoder = None
+            self.rs_feature_linear = nn.Linear(self.rs_feature_dim, hidden_size)
+        else:
+            self.vit_encoder = PretrainedViTEncoder(
+                out_dim=hidden_size, freeze_backbone=vit_freeze_backbone, dropout=dropout,
+                pretrained=vit_pretrained, pretrained_path=pvt_pretrained_path,
+            )
+        self.use_remote_constant = remote_constant
+        if self.use_remote_constant:
+            self.remote_constant = nn.Parameter(torch.zeros(hidden_size))
+        # 辅助头：仅由县内有效遥感 token 的均值预测 log 单产，给 PVT 独立监督
+        self.rs_aux_head = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size),
+            nn.ELU(),
+            nn.Linear(hidden_size, 1),
+        ) if rs_aux else None
 
     def forward(
         self,
@@ -976,6 +941,7 @@ class TFTEncoderForYieldPrediction(nn.Module):
         ag_mask: Optional[torch.Tensor] = None,
         ag_grid_mask: Optional[torch.Tensor] = None,
         diagnose_mode: Optional[Dict[str, bool]] = None,
+        rs_features: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, Any]]:
         """
         Args:
@@ -989,6 +955,7 @@ class TFTEncoderForYieldPrediction(nn.Module):
             ag_images: (B, 6, G, 3, 224, 224) 遥感图像
             ag_mask: (B, 6) 月份级遥感有效性
             ag_grid_mask: (B, 6, G) 月份-网格级遥感有效性
+            rs_features: (B, 6, G, K) 已标准化的数值遥感特征；仅 rs_feature_dim>0 时使用，此时不读取 ag_images
 
         Returns:
             pred_all: (B, 1) 县级最终产量预测
@@ -1011,77 +978,97 @@ class TFTEncoderForYieldPrediction(nn.Module):
             name: tensor.reshape(B * G, T, self.hidden_size)
             for name, tensor in projected.items()
         }
+
+        if ag_mask is None or (ag_images is None and not self.rs_feature_dim):
+            raise ValueError("当前模型必须传入 ag_images 和 ag_mask")
+        if self.rs_feature_dim:
+            rs_encoded = self._encode_rs_features(rs_features, grid_mask, ag_grid_mask, device)
+            rs_by_time, _ = _broadcast_rs_forward(
+                rs_encoded, month_ids, day_ids, ag_mask,
+            )  # (B, G, T, H)
+        elif self.use_remote_constant:
+            rs_encoded = self.remote_constant.view(1, 1, 1, -1).expand(
+                B, G, len(AG_DATE_PAIRS), -1,
+            )
+            rs_valid = grid_mask.to(device=device, dtype=torch.bool)[:, :, None]
+            if ag_grid_mask is not None:
+                if ag_grid_mask.shape != (B, len(AG_DATE_PAIRS), G):
+                    raise ValueError(
+                        f"ag_grid_mask shape {ag_grid_mask.shape} != "
+                        f"{(B, len(AG_DATE_PAIRS), G)}"
+                    )
+                rs_valid = rs_valid & ag_grid_mask.to(
+                    device=device, dtype=torch.bool
+                ).transpose(1, 2)
+            rs_encoded = rs_encoded * rs_valid[:, :, :, None].to(rs_encoded.dtype)
+            rs_by_time, _ = _broadcast_rs_forward(
+                rs_encoded, month_ids, day_ids, ag_mask,
+            )  # (B, G, T, H)
+        else:
+            rs_encoded = self._forward_remote_sensing(
+                ag_images, grid_coords, grid_mask, device, ag_grid_mask,
+            )  # (B, G, N_rs, H)
+            rs_by_time, _ = _broadcast_rs_forward(
+                rs_encoded, month_ids, day_ids, ag_mask,
+            )  # (B, G, T, H)
+
+        c_s_expanded = c_s[:, None, None, :].expand(B, G, T, self.hidden_size)
+        static_context = self.static_context_grn(
+            rs_by_time, context=c_s_expanded,
+        )
+        static_context = static_context * grid_mask[:, :, None, None].to(static_context.dtype)
+
+        if self.rs_as_variable:
+            grid_inputs[RS_VARIABLE_NAME] = rs_by_time.reshape(B * G, T, self.hidden_size)
+
         grid_seq_lens = seq_lens.repeat_interleave(G)
-        grid_context = c_s.unsqueeze(1).expand(B, G, self.hidden_size)
-        grid_context = grid_context.reshape(B * G, self.hidden_size)
-        grid_context = grid_context.unsqueeze(1).expand(B * G, T, self.hidden_size)
+        grid_context = static_context.reshape(B * G, T, self.hidden_size)
         grid_token, grid_vsn_weights = self.grid_vsn(
             grid_inputs, grid_seq_lens, context=grid_context
         )
         grid_token = grid_token.reshape(B, G, T, self.hidden_size)
         grid_token = grid_token * grid_mask[:, :, None, None].to(grid_token.dtype)
 
-        weather_feat = self.weather_context_grn(
-            grid_token,
-            context=c_s[:, None, None, :].expand_as(grid_token),
-        )
-        weather_feat = weather_feat * grid_mask[:, :, None, None].to(weather_feat.dtype)
-
-        if ag_images is None or ag_mask is None:
-            raise ValueError("当前模型必须传入 ag_images 和 ag_mask")
-        rs_encoded = self._forward_remote_sensing(
-            ag_images, grid_coords, grid_mask, device,
-        )  # (B, G, N_rs, H)
-        rs_encoded_pre_grn = rs_encoded
-        rs_context = c_s[:, None, None, :].expand_as(rs_encoded)
-        rs_encoded = self.remote_context_grn(rs_encoded, context=rs_context)
-
-        # ========== 5. 同时相空间融合 -> 时间 TFT 注意力 ==========
         Te = len(AG_DATE_PAIRS)
         if month_ids is None or day_ids is None:
             raise ValueError("必须传入 month_ids 和 day_ids")
-        monthly_months = torch.arange(4, 10, device=device).view(1, Te, 1)
-        weather_months = month_ids.to(device=device).long()[:, None, :]
-        weather_valid = torch.arange(T, device=device).view(1, 1, T) < seq_lens[:, None, None]
-        month_valid = (weather_months == monthly_months) & weather_valid
-        month_valid = month_valid.any(dim=-1) & ag_mask.to(device=device, dtype=torch.bool)
-        if ag_grid_mask is None:
-            month_remote_valid = ag_mask.to(device=device, dtype=torch.bool)
-        else:
+        month_valid = torch.zeros(B, Te, device=device, dtype=torch.bool)
+        monthly_feat = torch.zeros(B, G, Te, self.hidden_size, device=device)
+        weather_valid = torch.arange(T, device=device).unsqueeze(0) < seq_lens[:, None]
+        month_ids_dev = month_ids.to(device=device).long()
+        for m_idx in range(Te):
+            target_month = AG_DATE_PAIRS[m_idx][0]
+            is_month = (month_ids_dev == target_month) & weather_valid
+            month_mask = is_month.float()
+            month_count = month_mask.sum(dim=1, keepdim=True).clamp_min(1.0)
+            month_sum = (grid_token * month_mask[:, None, :, None]).sum(dim=2)
+            monthly_feat[:, :, m_idx] = month_sum / month_count[:, :, None]
+            month_valid[:, m_idx] = is_month.any(dim=1)
+
+        month_valid = month_valid & ag_mask.to(device=device, dtype=torch.bool)
+        if ag_grid_mask is not None:
             month_remote_valid = ag_grid_mask.to(device=device, dtype=torch.bool).any(dim=2)
+        else:
+            month_remote_valid = ag_mask.to(device=device, dtype=torch.bool)
         month_valid = month_valid & month_remote_valid
         month_seq_lens = month_valid.sum(dim=1).clamp_max(Te)
         pad_mask = month_valid
-        weather_mask = weather_valid.expand(B, G, T)
-        month_indices = (month_ids.to(device=device).long() - 4).clamp(0, Te - 1)
-        month_mask_by_weather = month_valid[:, None, :].expand(B, G, Te).gather(
-            2, month_indices[:, None, :].expand(B, G, T)
-        )
-        weather_mask = weather_mask & month_mask_by_weather
-        if ag_grid_mask is not None:
-            grid_month_mask = ag_grid_mask.to(device=device, dtype=torch.bool).transpose(1, 2)
-            weather_mask = weather_mask & grid_month_mask.gather(
-                2, month_indices[:, None, :].expand(B, G, T)
-            )
-        weather_fused, cross_modal_weights = self.weather_remote_attn(
-            rs_encoded,
-            weather_feat,
-            weather_mask.expand(B, G, T),
-        )
+
         time_indices = torch.arange(Te, device=device, dtype=torch.long).expand(B, -1)
-        spatial_token_mask = month_valid[:, :, None] & (
+        spatial_grid_mask = (
             ag_grid_mask.to(device=device, dtype=torch.bool)
             if ag_grid_mask is not None
             else grid_mask[:, None, :].expand(B, Te, G)
         )
+        spatial_token_mask = month_valid[:, :, None] & spatial_grid_mask
         temporal_feat, spatial_weights = self.spatial_agg.forward_weights(
-            weather_fused.transpose(1, 2),
+            monthly_feat.transpose(1, 2),
             grid_coords,
             grid_mask,
             token_mask=spatial_token_mask,
             time_indices=time_indices,
         )
-        # 空间融合后才进入时间编码，避免每个网格分别保存一套 LSTM 激活。
+
         lstm_feat_raw, _, _, _ = self.lstm_encoder(
             temporal_feat, seq_lens=month_seq_lens, c_c=c_c, c_h=c_h,
             valid_mask=month_valid,
@@ -1096,17 +1083,13 @@ class TFTEncoderForYieldPrediction(nn.Module):
             pad_mask=pad_mask,
         )
         pred_features = self.pred_grn(attn_feat)
-        pred_dist_all = torch.cat(
-            [self.mean_head(pred_features), self.variance_head(pred_features)], dim=-1
-        )  # (B,T,2)
+        pred_dist_all = self.mean_head(pred_features)
         pred_dist_all = pred_dist_all * month_valid.unsqueeze(-1).to(pred_dist_all.dtype)
-        valid_counts = month_valid.long().sum(dim=1)
         last_token_idx = (month_valid.long().cumsum(dim=1).argmax(dim=1))
         batch_idx = torch.arange(B, device=device)
         last_token = attn_feat[batch_idx, last_token_idx]
 
-        # 最终预测取最后有效时间步；所有时间步分布保留给一致性损失。
-        pred_all = pred_dist_all[batch_idx, last_token_idx]  # (B, 2)
+        pred_all = pred_dist_all[batch_idx, last_token_idx]
         sample_valid = month_valid.any(dim=1)
         pred_all = pred_all * sample_valid.unsqueeze(-1).to(pred_all.dtype)
 
@@ -1125,13 +1108,19 @@ class TFTEncoderForYieldPrediction(nn.Module):
             "monthly_month_ids": torch.arange(4, 10, device=device).expand(B, Te),
             "month_remote_valid": month_remote_valid,
             "sample_valid": sample_valid,
-            "cross_modal_weights": cross_modal_weights,
-            "weather_fused": weather_fused,
             "pred_all": pred_all,
         }
-        if rs_encoded_pre_grn is not None:
-            grad_tensors["rs_encoded_pre_grn"] = rs_encoded_pre_grn
-            grad_tensors["rs_encoded"] = rs_encoded
+        grad_tensors["rs_encoded"] = rs_encoded
+        rs_aux_pred = None
+        if self.rs_aux_head is not None:
+            token_valid = grid_mask.to(device=device, dtype=torch.bool)[:, :, None]
+            if ag_grid_mask is not None:
+                token_valid = token_valid & ag_grid_mask.to(
+                    device=device, dtype=torch.bool
+                ).transpose(1, 2)
+            weights = token_valid.to(rs_encoded.dtype)[..., None]
+            pooled = (rs_encoded * weights).sum(dim=(1, 2)) / weights.sum(dim=(1, 2)).clamp_min(1.0)
+            rs_aux_pred = self.rs_aux_head(pooled)
         for tensor in grad_tensors.values():
             if isinstance(tensor, torch.Tensor) and tensor.requires_grad:
                 tensor.retain_grad()
@@ -1143,17 +1132,29 @@ class TFTEncoderForYieldPrediction(nn.Module):
             "grid_vsn_weights": grid_vsn_weights,
             "county_vsn_weights": None,
             "spatial_weights": spatial_weights,
-            "cross_modal_weights": cross_modal_weights,
-            "weather_fused": weather_fused,
             "temporal_seq_lens": month_seq_lens,
             "month_valid": month_valid,
             "monthly_month_ids": torch.arange(4, 10, device=device).expand(B, Te),
             "month_remote_valid": month_remote_valid,
             "sample_valid": sample_valid,
             "temporal_feat": temporal_feat,
+            "rs_aux_pred": rs_aux_pred,
         }
 
         return pred_all, attn_weights_out, aux_dict
+
+    def _encode_rs_features(self, rs_features, grid_mask, ag_grid_mask, device) -> torch.Tensor:
+        """(B,6,G,K) 数值特征 → (B,G,6,H)；无效网格-月份严格为零，与 PVT 路径的掩码语义一致。"""
+        if rs_features is None:
+            raise ValueError("rs_feature_dim>0 时必须传入 rs_features")
+        B, N_rs, G, K = rs_features.shape
+        if K != self.rs_feature_dim or N_rs != len(AG_DATE_PAIRS):
+            raise ValueError(f"rs_features shape {tuple(rs_features.shape)} incompatible with K={self.rs_feature_dim}")
+        valid = grid_mask.to(device=device, dtype=torch.bool)[:, :, None].expand(B, G, N_rs)
+        if ag_grid_mask is not None:
+            valid = valid & ag_grid_mask.to(device=device, dtype=torch.bool).permute(0, 2, 1)
+        encoded = self.rs_feature_linear(rs_features.to(device).permute(0, 2, 1, 3))  # (B,G,6,H)
+        return encoded * valid[..., None].to(encoded.dtype)
 
     def _forward_remote_sensing(
         self,
@@ -1161,22 +1162,43 @@ class TFTEncoderForYieldPrediction(nn.Module):
         grid_coords: torch.Tensor,
         grid_mask: torch.Tensor,
         device: torch.device,
+        ag_grid_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """遥感编码: ViT → 网格级 RS token（不聚合）。
+        """遥感编码: ViT CLS token → 网格级 RS token。
 
-        返回 rs_encoded (B, G, 12, H)，每网格每时相一个 token。"""
+        返回 rs_encoded (B, G, N_rs, H)，每网格每时相一个 CLS token。"""
         B, N_rs, G, C, H_img, W_img = ag_images.shape
         H = self.hidden_size
 
         images = ag_images.permute(0, 2, 1, 3, 4, 5).reshape(B * G, N_rs, C, H_img, W_img)
         images = images.reshape(B * G * N_rs, C, H_img, W_img)
+        if ag_grid_mask is None:
+            valid_images = grid_mask.to(device=device, dtype=torch.bool)[:, :, None].expand(B, G, N_rs)
+        else:
+            if ag_grid_mask.shape != (B, N_rs, G):
+                raise ValueError(
+                    f"ag_grid_mask shape {ag_grid_mask.shape} != {(B, N_rs, G)}"
+                )
+            valid_images = ag_grid_mask.to(device=device, dtype=torch.bool).permute(0, 2, 1)
+            valid_images = valid_images & grid_mask.to(device=device, dtype=torch.bool)[:, :, None]
+        valid_images = valid_images.reshape(-1)
+        images = images[valid_images]
+        output = ag_images.new_zeros((B * G * N_rs, H))
+        if images.shape[0] == 0:
+            return output.reshape(B, G, N_rs, H)
         # PVT is fully trainable; process image tokens in chunks to avoid
-        # holding all B*G*N_rs backbone activations at once.
-        chunk_size = 16
+        # holding all B*G*N_rs backbone activations at once.  逐块做梯度检查点：
+        # 一个县最多 321 个网格 × 6 个月 = 1926 张图像，全量保存反向激活在
+        # 单县大网格时会超过 128 GiB，因此前向只在需要时重算，不做全量缓存。
+        chunk_size = int(os.environ.get("TFT_PVT_CHUNK", "64"))
+        use_ckpt = torch.is_grad_enabled() and any(p.requires_grad for p in self.vit_encoder.parameters())
         encoded_chunks = []
         for start in range(0, images.shape[0], chunk_size):
-            encoded_chunks.append(self.vit_encoder(images[start:start + chunk_size]))
-        rs_encoded = torch.cat(encoded_chunks, dim=0)
-        rs_encoded = rs_encoded.reshape(B, G, N_rs, H)
-        rs_encoded = rs_encoded * grid_mask[:, :, None, None].to(rs_encoded.dtype)
-        return rs_encoded
+            chunk = images[start:start + chunk_size]
+            if use_ckpt:
+                encoded_chunks.append(torch.utils.checkpoint.checkpoint(
+                    self.vit_encoder, chunk, use_reentrant=False))
+            else:
+                encoded_chunks.append(self.vit_encoder(chunk))
+        output[valid_images] = torch.cat(encoded_chunks, dim=0)
+        return output.reshape(B, G, N_rs, H)

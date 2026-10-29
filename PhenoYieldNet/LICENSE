@@ -1,0 +1,81 @@
+Creative Commons Attribution-NonCommercial 4.0 International (CC BY-NC 4.0)
+
+Copyright (c) 2026 The PhenoYieldNet Authors
+
+This work — including the source code in this repository and any model weights
+released alongside it — is licensed under the Creative Commons
+Attribution-NonCommercial 4.0 International License.
+
+You are free to:
+
+  * Share  — copy and redistribute the material in any medium or format
+  * Adapt  — remix, transform, and build upon the material
+
+Under the following terms:
+
+  * Attribution   — You must give appropriate credit, provide a link to the
+                    license, and indicate if changes were made. You may do so in
+                    any reasonable manner, but not in any way that suggests the
+                    licensor endorses you or your use.
+  * NonCommercial — You may not use the material for commercial purposes.
+
+No additional restrictions — You may not apply legal terms or technological
+measures that legally restrict others from doing anything the license permits.
+
+The full legal code is available at:
+
+    https://creativecommons.org/licenses/by-nc/4.0/legalcode
+
+A human-readable summary is available at:
+
+    https://creativecommons.org/licenses/by-nc/4.0/
+
+
+-------------------------------------------------------------------------------
+Why NonCommercial
+-------------------------------------------------------------------------------
+
+Parts of this repository are derived from Meta's Masked Autoencoders (MAE) and
+MAE-ST, which are released under CC BY-NC 4.0. That license is inherited by the
+files listed below, and it is the reason this repository as a whole is
+NonCommercial rather than permissive.
+
+
+-------------------------------------------------------------------------------
+Third-party components
+-------------------------------------------------------------------------------
+
+This repository incorporates code from the following projects. Their original
+licenses continue to apply to the corresponding files.
+
+  MAE / MAE-ST (Meta Platforms, Inc.)          CC BY-NC 4.0
+      https://github.com/facebookresearch/mae
+      https://github.com/facebookresearch/mae_st
+      util/misc.py, util/pos_embed.py, util/lr_sched.py, util/video_vit.py,
+      model/models_vit_tensor.py
+
+  SpectralGPT (Hong et al., IEEE TPAMI)
+      https://github.com/danfenghong/IEEE_TPAMI_SpectralGPT
+      The ViT backbone and its pretrained initialisation.
+
+  MMST-ViT (Fudong Lin et al.)                 MIT
+      https://github.com/fudong03/MMST-ViT
+      attention.py (spatial / temporal / multi-modal transformers),
+      model/models_PhenoYieldNet.py, dataset/*_loader.py, dataset/*_wrapper.py,
+      util/cnn_modules.py, configs/build_config_multicrop.py
+
+  Latent Diffusion (CompVis)                   MIT
+      https://github.com/CompVis/latent-diffusion
+      attention.py: GEGLU, FeedForward, PreNorm and the helper functions.
+
+  Autoformer / FEDformer                       MIT
+      https://github.com/thuml/Autoformer
+      attention.py: moving_avg, series_decomp_multi.
+
+  SimCLR (Thalles Silva)                       MIT
+      https://github.com/sthalles/SimCLR
+      loss/contrastive_loss.py.
+
+  timm (Ross Wightman)                         Apache-2.0
+      https://github.com/huggingface/pytorch-image-models
+      Used as a dependency.

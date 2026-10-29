@@ -1,6 +1,81 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import hashlib
+from pathlib import Path
+from collections.abc import Mapping
+
+DEFAULT_PVT_PRETRAINED_PATH = Path('/data/raid0/hqx/pretrained/pvt_tiny.pth')
+PVT_PRETRAINED_SHA256 = '360ec6b56fe98f36bf9af6822f3e2a46a3acf2eee5bfe0c68f8580cf3c07ba0f'
+
+
+def load_pvt_tiny_checkpoint(path: Path) -> Mapping[str, torch.Tensor]:
+    path = Path(path)
+    if path.is_dir():
+        raise IsADirectoryError(path)
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    if digest != PVT_PRETRAINED_SHA256:
+        raise ValueError(f'PVT checkpoint SHA-256 mismatch: expected {PVT_PRETRAINED_SHA256}, got {digest}')
+    try:
+        state_dict = torch.load(path, map_location='cpu', weights_only=False)
+    except Exception as error:
+        raise RuntimeError(f'could not read PVT checkpoint {path}') from error
+    if isinstance(state_dict, Mapping) and isinstance(state_dict.get('state_dict'), Mapping):
+        state_dict = state_dict['state_dict']
+    if not isinstance(state_dict, Mapping):
+        raise RuntimeError(f'PVT checkpoint {path} must contain a state mapping')
+    return state_dict
+
+
+def map_pvt_tiny_state_dict(
+    state_dict: Mapping[str, torch.Tensor],
+    own_state: Mapping[str, torch.Tensor],
+    out_dim: int,
+) -> dict[str, torch.Tensor]:
+    _ = out_dim
+    mapped = {}
+
+    for source_key, value in state_dict.items():
+        if source_key.startswith("head."):
+            continue
+
+        target_key = source_key
+        if source_key in own_state:
+            pass
+        elif source_key.startswith("patch_embed"):
+            prefix, separator, suffix = source_key.partition(".")
+            stage = prefix.removeprefix("patch_embed")
+            if not separator or not stage.isdigit():
+                continue
+            target_key = f"stages.{int(stage) - 1}.{suffix}"
+        elif source_key.startswith("block"):
+            prefix, separator, suffix = source_key.partition(".")
+            stage = prefix.removeprefix("block")
+            if not separator or not stage.isdigit():
+                continue
+            target_key = f"blocks.{int(stage) - 1}.{suffix}"
+        elif source_key.startswith("pos_embed"):
+            stage = source_key.removeprefix("pos_embed")
+            if not stage.isdigit():
+                continue
+            target_key = f"pos_embeds.{int(stage) - 1}"
+        else:
+            continue
+
+        if target_key not in own_state:
+            continue
+        if own_state[target_key].shape != value.shape:
+            raise ValueError(
+                f"PVT parameter {source_key} maps to {target_key} with shape "
+                f"{tuple(value.shape)}, expected {tuple(own_state[target_key].shape)}"
+            )
+        mapped[target_key] = value
+
+    if not mapped:
+        raise ValueError("PVT checkpoint contains no mappable parameters")
+    return mapped
 
 
 class Mlp(nn.Module):
@@ -78,13 +153,13 @@ class PatchEmbed(nn.Module):
 
 
 class PVTTinyEncoder(nn.Module):
-    """PVT-Tiny 编码器，与 MMST-ViT 官方 pvt_tiny 配置完全一致。
+    """PVT-Tiny 编码器，与官方 pvt_tiny 配置一致。
 
     embed_dims=[64, 128, 320, 512], num_heads=[1, 2, 5, 8],
     mlp_ratios=[8, 8, 4, 4], sr_ratios=[8, 4, 2, 1], depths=[2, 2, 2, 2].
     """
 
-    def __init__(self, out_dim=512, image_size=224, in_chans=3, drop=0.0):
+    def __init__(self, out_dim=512, image_size=224, in_chans=3, drop=0.0, pretrained=False, pretrained_path=None):
         super().__init__()
         embed_dims = [64, 128, 320, out_dim]
         num_heads = [1, 2, 5, 8]
@@ -127,6 +202,9 @@ class PVTTinyEncoder(nn.Module):
         for pos in self.pos_embeds:
             nn.init.trunc_normal_(pos, std=0.02)
 
+        if pretrained:
+            self._load_pretrained(out_dim, pretrained_path or DEFAULT_PVT_PRETRAINED_PATH)
+
     @staticmethod
     def _init_weights(module):
         if isinstance(module, nn.Linear):
@@ -140,6 +218,13 @@ class PVTTinyEncoder(nn.Module):
         elif isinstance(module, nn.LayerNorm):
             nn.init.ones_(module.weight)
             nn.init.zeros_(module.bias)
+
+    def _load_pretrained(self, out_dim: int, path: Path):
+        state_dict = load_pvt_tiny_checkpoint(path)
+        own_state = self.state_dict()
+        mapped = map_pvt_tiny_state_dict(state_dict, own_state, out_dim)
+        self.load_state_dict(mapped, strict=False)
+        print(f"PVT ImageNet pretrained: loaded {len(mapped)} params, skipped {len(state_dict) - len(mapped)}")
 
     def forward_tokens(self, x, include_cls=True):
         for stage_idx, (patch, blocks, pos) in enumerate(

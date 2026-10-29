@@ -1,0 +1,46 @@
+{
+ "n_county_years": 4446,
+ "n_counties": 741,
+ "n_permutations": 500,
+ "design": "lambda re-selected by year-grouped CV in every permutation",
+ "fits": {
+  "county_fe_only": {
+   "rmse": 15.944537036487537,
+   "alpha": null
+  },
+  "weather": {
+   "rmse": 13.403106939609751,
+   "alpha": 1778.2794100389226
+  },
+  "veg_indices": {
+   "rmse": 14.131481288007553,
+   "alpha": 5.62341325190349
+  },
+  "weather+veg": {
+   "rmse": 12.873375053189568,
+   "alpha": 3162.277660168379
+  }
+ },
+ "tests": {
+  "weather+veg": {
+   "observed": 12.873375053189568,
+   "null_mean": 13.376307134453265,
+   "null_sd": 0.009567543710778217,
+   "null_q05": 13.359363496094598,
+   "p": 0.001996007984031936,
+   "alpha_median": 1778.2794100389226,
+   "alpha_min": 1778.2794100389226,
+   "alpha_max": 1778.2794100389226
+  },
+  "veg_indices": {
+   "observed": 14.131481288007553,
+   "null_mean": 15.89825670724902,
+   "null_sd": 0.025507787992458317,
+   "null_q05": 15.847329388144798,
+   "p": 0.001996007984031936,
+   "alpha_median": 100000.0,
+   "alpha_min": 10.0,
+   "alpha_max": 100000.0
+  }
+ }
+}
