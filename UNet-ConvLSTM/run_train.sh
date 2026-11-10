@@ -18,6 +18,9 @@ WARMUP_EPOCHS="${WARMUP_EPOCHS:-2}"
 RUN_ID="${RUN_ID:-$(date -u +%Y%m%d-%H%M%S)}"
 DRY_RUN="${DRY_RUN:-0}"
 GPU_ID="${GPU_ID:-3}"
+VALID_YEAR="${VALID_YEAR:-}"                 # 非空时：只用 < VALID_YEAR 的年份训练，VALID_YEAR 早停选模
+EARLY_STOP_PATIENCE="${EARLY_STOP_PATIENCE:-10}"
+CHECKPOINT_POLICY="${CHECKPOINT_POLICY:-best}"   # best: 2021 早停选模；final: 固定轮数取最后一轮
 export CUDA_VISIBLE_DEVICES="$GPU_ID"
 
 for name in EPOCHS NUM_WORKERS COUNTY_BATCH_SIZE IMAGE_SIZE GRID_CHUNK; do
@@ -32,6 +35,14 @@ if [[ ! "$WARMUP_EPOCHS" =~ ^[0-9]+$ ]]; then
   exit 2
 fi
 case "$DRY_RUN" in 0|1) ;; *) printf 'error: DRY_RUN must be 0 or 1\n' >&2; exit 2 ;; esac
+if [[ -n "$VALID_YEAR" && ! "$VALID_YEAR" =~ ^[0-9]{4}$ ]]; then
+  printf 'error: VALID_YEAR must be empty or a four-digit year\n' >&2
+  exit 2
+fi
+if [[ ! "$EARLY_STOP_PATIENCE" =~ ^-?[0-9]+$ ]]; then
+  printf 'error: EARLY_STOP_PATIENCE must be an integer\n' >&2
+  exit 2
+fi
 
 LOG_DIR="$OUTPUT_ROOT/logs/$RUN_ID"
 LOG_FILE="$LOG_DIR/run.log"
@@ -49,6 +60,9 @@ train=("$PYTHON" "$MODEL_DIR/train.py" --dataset-jsonl "$DATASET_JSONL" --data-r
   --output_root "$OUTPUT_ROOT" --run_id "$RUN_ID" --device cuda:0 --epochs "$EPOCHS"
   --num_workers "$NUM_WORKERS" --county_batch_size "$COUNTY_BATCH_SIZE" --image_size "$IMAGE_SIZE"
   --grid_chunk "$GRID_CHUNK" --warmup_epochs "$WARMUP_EPOCHS")
+if [[ -n "$VALID_YEAR" ]]; then
+  train+=(--valid-year "$VALID_YEAR" --early-stop-patience "$EARLY_STOP_PATIENCE" --checkpoint-policy "$CHECKPOINT_POLICY")
+fi
 checkpoint="$OUTPUT_ROOT/unet_convlstm/$RUN_ID/checkpoint-final.pth"
 infer=("$PYTHON" "$MODEL_DIR/infer.py" --checkpoint "$checkpoint" --dataset-jsonl "$DATASET_JSONL"
   --data-root "$DATA_ROOT" --device cuda:0 --num_workers "$NUM_WORKERS")

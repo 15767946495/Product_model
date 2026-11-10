@@ -1,8 +1,9 @@
-"""GNN-RNN 唯一数据适配边界：统一 CropNetDataset -> 两个五年县图窗口。
+"""GNN-RNN 唯一数据适配边界：统一 CropNetDataset -> 每县一个连续年窗口。
 
-训练窗口 2017--2021 预测 2021；测试窗口 2018--2022 预测 2022（train_dataset.dataset.GNN_WINDOWS）。
-标准化统计量只来自训练窗口：天气按 (县, 年, 天) 求每变量均值/方差，土壤按县求，
-标签只用 2021 训练目标。2022 标签只作为最终指标的 y_true，不进入任何输入或统计量。
+默认协议（GNN_WINDOWS）：训练窗口 2017--2021 预测 2021；测试窗口 2018--2022 预测 2022。
+统一训练协议（``--valid-year 2021``）下改为等长 4 年窗口：训练 2017--2020 预测 2020、
+验证 2018--2021 预测 2021、测试 2019--2022 预测 2022；三窗口长度一致，2021 标签只用于早停，
+2022 标签只作最终指标的 y_true。标准化统计量只来自训练窗口。
 """
 
 from __future__ import annotations
@@ -27,30 +28,46 @@ TARGET_TEST_YEAR = TEST_YEARS[-1]
 EPS = 1e-6
 
 
-def load_windows(jsonl_path, data_root=DATA_ROOT) -> dict:
-    """返回 {"train": batch, "test": batch}；两窗口县集合、节点顺序、边已校验一致且只来自 Census 接壤。"""
-    dataset = CropNetDataset(Path(jsonl_path), YEARS, load_images=False, data_root=Path(data_root))
+def protocol_windows(valid_year: int, test_year: int, length: int = 4) -> dict:
+    """2017--2020 训练 / 2021 验证 / 2022 测试的等长窗口。"""
+    return {
+        "train": tuple(range(int(valid_year) - length, int(valid_year))),
+        "valid": tuple(range(int(valid_year) - length + 1, int(valid_year) + 1)),
+        "test": tuple(range(int(test_year) - length + 1, int(test_year) + 1)),
+    }
+
+
+def load_windows(jsonl_path, data_root=DATA_ROOT, windows=None) -> dict:
+    """返回 {split: batch}；各窗口县集合、节点顺序、边已校验一致且只来自 Census 接壤。"""
+    windows = GNN_WINDOWS if windows is None else windows
+    years = sorted({y for ys in windows.values() for y in ys})
+    dataset = CropNetDataset(Path(jsonl_path), tuple(years), load_images=False, data_root=Path(data_root))
     items = [dataset[i] for i in range(len(dataset))]
-    windows = build_gnn_windows(items)
-    batches = {split: collate_gnn_window(windows[split]) for split in ("train", "test")}
-    check_same_graph(batches["train"], batches["test"])
-    neighbors = {w[0]["fips"]: w[0]["neighbor_fips"] for w in windows["train"]}
+    built = build_gnn_windows(items, windows)
+    batches = {split: collate_gnn_window(built[split]) for split in windows}
+    reference = next(iter(batches.values()))
+    for split, batch in batches.items():
+        if split != next(iter(batches)):
+            check_same_graph(reference, batch)
+    neighbors = {w[0]["fips"]: w[0]["neighbor_fips"] for w in built["train"]}
     for batch in batches.values():
         validate_graph(batch["fips"], batch["edge_index"], neighbors)
-    for split, years in GNN_WINDOWS.items():
-        if batches[split]["years"].tolist() != list(years):
-            raise ValueError(f"{split} window years {batches[split]['years'].tolist()} != {list(years)}")
+    for split, split_years in windows.items():
+        if batches[split]["years"].tolist() != list(split_years):
+            raise ValueError(f"{split} window years {batches[split]['years'].tolist()} != {list(split_years)}")
     # 输出顺序与统一 Dataset 中目标年份样本顺序一致（按 fips 排序）
-    batches["test"]["target_sample_ids"] = [ids[-1] for ids in batches["test"]["sample_id"]]
-    batches["train"]["target_sample_ids"] = [ids[-1] for ids in batches["train"]["sample_id"]]
+    for split, batch in batches.items():
+        batch["target_sample_ids"] = [ids[-1] for ids in batch["sample_id"]]
     return batches
 
 
-def fit_stats(train: dict) -> dict:
-    """只在训练窗口上计算标准化统计量。"""
+def fit_stats(train: dict, mask=None) -> dict:
+    """只在训练窗口上计算标准化统计量；``mask`` 进一步限定到训练县（空间交叉验证）。"""
     weather = train["weather"]  # (N,5,168,11)
     soil = train["soil"]        # (N,7)
     targets = train["targets"]  # (N,) 2021
+    if mask is not None:
+        weather, soil, targets = weather[mask], soil[mask], targets[mask]
     return {
         "weather_mean": weather.mean(dim=(0, 1, 2)), "weather_std": weather.std(dim=(0, 1, 2)).clamp_min(EPS),
         "soil_mean": soil.mean(dim=0), "soil_std": soil.std(dim=0).clamp_min(EPS),

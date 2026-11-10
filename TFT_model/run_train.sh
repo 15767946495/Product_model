@@ -26,7 +26,9 @@ REMOTE_CONSTANT="${REMOTE_CONSTANT:-0}"
 PVT_LR_SCALE="${PVT_LR_SCALE:-1.0}"
 RUN_ID="${RUN_ID:-$(date -u +%Y%m%d-%H%M%S)}"
 DRY_RUN="${DRY_RUN:-0}"
-GPU_ID=4
+GPU_ID="${GPU_ID:-4}"
+VALID_YEAR="${VALID_YEAR:-}"                 # 非空时：只用 < VALID_YEAR 的年份训练，VALID_YEAR 早停选模
+EARLY_STOP_PATIENCE="${EARLY_STOP_PATIENCE:-10}"
 export CUDA_VISIBLE_DEVICES="$GPU_ID"
 
 for name in EPOCHS NUM_WORKERS BATCH_SIZE HIDDEN_SIZE NUM_HEADS NUM_LSTM_LAYERS; do
@@ -42,6 +44,14 @@ if [[ ! "$DROPOUT" =~ ^(0(\.[0-9]+)?|1(\.0+)?)$ ]]; then
 fi
 if [[ ! "$WARMUP_EPOCHS" =~ ^[0-9]+$ ]]; then
   printf 'error: WARMUP_EPOCHS must be a non-negative integer\n' >&2
+  exit 2
+fi
+if [[ -n "$VALID_YEAR" && ! "$VALID_YEAR" =~ ^[0-9]{4}$ ]]; then
+  printf 'error: VALID_YEAR must be empty or a four-digit year\n' >&2
+  exit 2
+fi
+if [[ ! "$EARLY_STOP_PATIENCE" =~ ^-?[0-9]+$ ]]; then
+  printf 'error: EARLY_STOP_PATIENCE must be an integer\n' >&2
   exit 2
 fi
 for name in DRY_RUN USE_CONSTRUCTED VIT_PRETRAINED PVT_FREEZE_BACKBONE REMOTE_CONSTANT; do
@@ -70,6 +80,7 @@ if [[ "$USE_CONSTRUCTED" == 1 ]]; then train+=(--use-constructed); else train+=(
 if [[ "$VIT_PRETRAINED" == 1 ]]; then train+=(--vit-pretrained --pvt_pretrained_path "$PVT_PRETRAINED_PATH"); fi
 if [[ "$PVT_FREEZE_BACKBONE" == 1 ]]; then train+=(--vit-freeze-backbone); fi
 if [[ "$REMOTE_CONSTANT" == 1 ]]; then train+=(--remote-constant); fi
+if [[ -n "$VALID_YEAR" ]]; then train+=(--valid-year "$VALID_YEAR" --early-stop-patience "$EARLY_STOP_PATIENCE"); fi
 checkpoint="$OUTPUT_ROOT/tft/$RUN_ID/checkpoint-final.pth"
 infer=("$PYTHON" "$MODEL_DIR/infer.py" --checkpoint "$checkpoint" --dataset-jsonl "$DATASET_JSONL"
   --data-root "$DATA_ROOT" --device cuda:0 --num_workers "$NUM_WORKERS" --cutoffs "$CUTOFFS")

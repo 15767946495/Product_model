@@ -20,6 +20,9 @@ GRAD_CHECKPOINTING="${GRAD_CHECKPOINTING:-0}"
 FROZEN_FM="${FROZEN_FM:-0}"
 REUSE_STAGE1_CHECKPOINT="${REUSE_STAGE1_CHECKPOINT:-}"
 GPU_ID="${GPU_ID:-0}"
+VALID_YEAR="${VALID_YEAR:-}"                 # 非空时：微调年取 VALID_YEAR 之前最后一年，VALID_YEAR 早停选模
+EARLY_STOP_PATIENCE="${EARLY_STOP_PATIENCE:-10}"
+CHECKPOINT_POLICY="${CHECKPOINT_POLICY:-best}"   # best: 2021 早停选模；final: 固定轮数取最后一轮
 export CUDA_VISIBLE_DEVICES="$GPU_ID"
 
 for name in EPOCHS STAGE1_EPOCHS STAGE2_EPOCHS NUM_WORKERS; do
@@ -35,6 +38,14 @@ for name in DRY_RUN NO_PRETRAIN GRAD_CHECKPOINTING FROZEN_FM; do
 done
 if [[ -n "${STAGE1_BATCH_SIZE:-}" && ! "$STAGE1_BATCH_SIZE" =~ ^[1-9][0-9]*$ ]]; then
   printf 'error: STAGE1_BATCH_SIZE must be a positive integer\n' >&2
+  exit 2
+fi
+if [[ -n "$VALID_YEAR" && ! "$VALID_YEAR" =~ ^[0-9]{4}$ ]]; then
+  printf 'error: VALID_YEAR must be empty or a four-digit year\n' >&2
+  exit 2
+fi
+if [[ ! "$EARLY_STOP_PATIENCE" =~ ^-?[0-9]+$ ]]; then
+  printf 'error: EARLY_STOP_PATIENCE must be an integer\n' >&2
   exit 2
 fi
 
@@ -70,6 +81,9 @@ stage2=("$PYTHON" "$MODEL_DIR/train_ft.py" --dataset-jsonl "$DATASET_JSONL" --da
   --num_workers "$NUM_WORKERS" --pretrain_model "$stage1_checkpoint")
 if [[ "$GRAD_CHECKPOINTING" == 1 ]]; then stage2+=(--grad_checkpointing); fi
 if [[ "$FROZEN_FM" == 1 ]]; then stage2+=(--frozen_fm); fi
+if [[ -n "$VALID_YEAR" ]]; then
+  stage2+=(--valid-year "$VALID_YEAR" --early-stop-patience "$EARLY_STOP_PATIENCE" --checkpoint-policy "$CHECKPOINT_POLICY")
+fi
 checkpoint="$OUTPUT_ROOT/phenoyieldnet/$RUN_ID/checkpoint-final.pth"
 infer=("$PYTHON" "$MODEL_DIR/infer.py" --checkpoint "$checkpoint" --dataset-jsonl "$DATASET_JSONL"
   --data-root "$DATA_ROOT" --device cuda:0 --num_workers "$NUM_WORKERS")

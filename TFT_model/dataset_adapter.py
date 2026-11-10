@@ -31,10 +31,17 @@ _LAMBDA = 2.45
 
 
 def split_years(test_year: int) -> tuple[tuple[int, ...], tuple[int, ...]]:
-    """逐年留一：test_year 为测试年份，其余年份为训练年份。默认 test_year=2022 即原协议。"""
+    """前向滚动起点：测试年为 test_year，训练年只用它之前的年份。
+
+    默认 test_year=2022 即 2017--2021 训练（与旧协议相同）。2017 没有更早的年份，
+    因此要求 test_year > YEARS[0]。空间交叉验证的 ``--all-years`` 不走这里。
+    """
     if test_year not in YEARS:
         raise ValueError(f"test year {test_year} outside {YEARS}")
-    return tuple(y for y in YEARS if y != test_year), (int(test_year),)
+    train_years = tuple(y for y in YEARS if y < test_year)
+    if not train_years:
+        raise ValueError(f"test year {test_year} has no preceding training years")
+    return train_years, (int(test_year),)
 
 
 def dynamic_feature_names(use_constructed: bool) -> tuple[str, ...]:
@@ -54,6 +61,17 @@ class TFTStats:
     county_offset: dict | None = None
     # 遥感特征的县内中心：fips -> (6, G, K) 训练年份均值；特征先减去本网格历史均值再标准化。
     rs_center: dict | None = None
+    # 空间交叉验证用：sample_id -> 该县更早年份的对数单产均值（留一）。留出县只有
+    # 目标年之前的信息可用；目标年本身不在 offset_dataset 中，由 county_offset 兜底。
+    offset_by_sample: dict | None = None
+    # 标准化的统计口径（第3.6节）：train = 训练年份全局统计量；none = 不标准化；
+    # per-year = 每年用自己的统计量；all-years = 训练年与测试年合并估计。
+    # per_year 非空时按样本年份取用，见 _tft_collate。
+    norm_mode: str = "train"
+    per_year: dict | None = None
+    # 气象特征的县内中心（--demean-weather）：fips -> (6, G, D) 训练年份逐月均值；
+    # 每个网格日的动态特征先减去本县该月的历史均值再标准化，与 rs_center 同一口径。
+    weather_center: dict | None = None
 
 
 class RSFeatureStore:
@@ -171,29 +189,15 @@ def _stats_from_accumulators(total: torch.Tensor, squares: torch.Tensor,
     return mean.float(), variance.sqrt().clamp_min(1e-6).float()
 
 
-def fit_stats(dataset: CropNetDataset, *, use_constructed: bool,
-              rs_store: RSFeatureStore | None = None, train_years=TRAIN_YEARS,
-              county_offset: bool = False, demean_rs: bool = False) -> TFTStats:
-    actual_years = {int(sample["year"]) for sample in dataset.samples}
-    unexpected = sorted(actual_years - set(train_years))
-    if unexpected:
-        raise ValueError(f"statistics require training years only; found {unexpected}")
-    if demean_rs and rs_store is None:
-        raise ValueError("demean_rs requires numeric remote-sensing features")
-    rs_center = None
-    if demean_rs:
-        grouped: dict[str, list] = {}
-        for sample in dataset.samples:
-            grouped.setdefault(sample["fips"], []).append(
-                rs_store.get(sample["sample_id"], len(sample["grid_ids"])).astype(np.float64))
-        rs_center = {fips: np.mean(np.stack(values), axis=0) for fips, values in grouped.items()}
-    offset = None
-    if county_offset:
-        logs: dict[str, list] = {}
-        for sample in dataset.samples:
-            logs.setdefault(sample["fips"], []).append(math.log(float(sample["label"])))
-        offset = {fips: float(np.mean(values)) for fips, values in logs.items()}
-    dynamic_size = len(WEATHER_FEATURES) + (len(CONSTRUCTED_FEATURES) if use_constructed else 1)
+def _weather_month_index(year: int) -> np.ndarray:
+    """168 个气象日 -> 月序号 0--5（四月起算）；各年份的日期布局相同。"""
+    return np.array([int(date[5:7]) - 4 for date in weather_dates(year)], dtype=np.int64)
+
+
+def _accumulate_features(samples, *, dynamic_size: int, use_constructed: bool,
+                         rs_store: RSFeatureStore | None, rs_center: dict | None,
+                         weather_center: dict | None = None, month_index: np.ndarray | None = None):
+    """把一批县年样本的天气、土壤与遥感特征累加成 (sum, sumsq, count)。"""
     dynamic_sum = torch.zeros(dynamic_size, dtype=torch.float64)
     dynamic_sumsq = torch.zeros(dynamic_size, dtype=torch.float64)
     soil_sum = torch.zeros(len(SOIL_FEATURES), dtype=torch.float64)
@@ -202,7 +206,7 @@ def fit_stats(dataset: CropNetDataset, *, use_constructed: bool,
     soil_count = 0
     rs_sum = rs_sumsq = None
     rs_count = 0
-    for sample in dataset.samples:
+    for sample in samples:
         if rs_store is not None:
             values = torch.from_numpy(rs_store.get(sample["sample_id"], len(sample["grid_ids"])).astype(np.float64))
             if rs_center is not None:
@@ -217,6 +221,15 @@ def fit_stats(dataset: CropNetDataset, *, use_constructed: bool,
         weather = torch.from_numpy(sample["weather"])
         coords = torch.from_numpy(sample["coords"])
         features = construct_weather(weather, coords, WEATHER_FEATURES, use_constructed)
+        if weather_center is not None:
+            # (G, T, D) 减去本县该月的训练年均值：center (6, G, D) -> (T, G, D) -> (G, T, D)
+            center = _lookup(weather_center, sample["fips"], "weather centre")
+            if center.shape[1] != features.shape[0]:
+                raise ValueError(
+                    f"{sample['fips']}: weather centre has {center.shape[1]} grids, "
+                    f"sample has {features.shape[0]}")
+            features = features - torch.from_numpy(
+                np.transpose(center[month_index], (1, 0, 2))).to(features.dtype)
         features = features.to(dtype=torch.float64).reshape(-1, dynamic_size)
         dynamic_sum += features.sum(dim=0)
         dynamic_sumsq += (features * features).sum(dim=0)
@@ -231,7 +244,124 @@ def fit_stats(dataset: CropNetDataset, *, use_constructed: bool,
     rs_mean = rs_std = None
     if rs_sum is not None:
         rs_mean, rs_std = _stats_from_accumulators(rs_sum, rs_sumsq, rs_count)
-    return TFTStats(dynamic_mean, dynamic_std, soil_mean, soil_std, rs_mean, rs_std, offset, rs_center)
+    return {"dynamic_mean": dynamic_mean, "dynamic_std": dynamic_std,
+            "soil_mean": soil_mean, "soil_std": soil_std,
+            "rs_mean": rs_mean, "rs_std": rs_std}
+
+
+def fit_stats(dataset: CropNetDataset, *, use_constructed: bool,
+              rs_store: RSFeatureStore | None = None, train_years=TRAIN_YEARS,
+              county_offset: bool = False, demean_rs: bool = False,
+              demean_weather: bool = False,
+              offset_dataset: CropNetDataset | None = None,
+              leave_one_out_offset: bool = True,
+              norm_mode: str = "train",
+              extra_dataset: CropNetDataset | None = None) -> TFTStats:
+    """标准化统计量只用训练县年；县均值偏移与遥感县内中心可用另一份全样本数据估计。
+
+    ``offset_dataset`` 用于空间交叉验证：留出的县不出现在训练集里，但它的历史单产与
+    历史遥感特征在预测时是已知的。前向协议下它只含测试年之前的年份：所有样本都用
+    county_offset（该县更早年份的均值），目标尺度与测试行一致。``leave_one_out_offset``
+    只用于旧版 ``--all-years`` 空间折：那时偏移面板含目标年，测试行必须排除自己。
+
+    ``norm_mode`` 是第3.6节的标准化口径消融：``train``（默认）只用训练年份的统计量；
+    ``none`` 不标准化；``per-year`` 每年用该年自己的统计量；``all-years`` 用训练年与
+    测试年合并的统计量。后两种需要 ``extra_dataset`` 提供测试年份的特征（不使用标签）。
+    """
+    if norm_mode not in ("train", "none", "per-year", "all-years"):
+        raise ValueError(f"unknown norm_mode: {norm_mode}")
+    actual_years = {int(sample["year"]) for sample in dataset.samples}
+    unexpected = sorted(actual_years - set(train_years))
+    if unexpected:
+        raise ValueError(f"statistics require training years only; found {unexpected}")
+    if demean_rs and rs_store is None:
+        raise ValueError("demean_rs requires numeric remote-sensing features")
+    if norm_mode in ("per-year", "all-years") and extra_dataset is None:
+        raise ValueError(f"norm_mode={norm_mode} requires extra_dataset with the test years")
+    source = offset_dataset if offset_dataset is not None else dataset
+    weather_center = None
+    month_index = None
+    if demean_weather:
+        # 与 demean_rs 同口径：本县每个网格月的训练年均值，从所有动态特征（含累积量）中减去。
+        month_index = _weather_month_index(int(source.samples[0]["year"]))
+        grouped_weather: dict[str, list] = {}
+        for sample in source.samples:
+            weather = torch.from_numpy(sample["weather"])
+            coords = torch.from_numpy(sample["coords"])
+            features = construct_weather(weather, coords, WEATHER_FEATURES, use_constructed)
+            grouped_weather.setdefault(sample["fips"], []).append(
+                features.numpy().astype(np.float64))
+        weather_center = {}
+        for fips, values in grouped_weather.items():
+            shapes = {value.shape for value in values}
+            if len(shapes) != 1:
+                raise ValueError(f"{fips}: weather grids differ across years; cannot centre weather")
+            stack = np.stack(values)  # (Y, G, T, D)
+            center = np.zeros((6, stack.shape[1], stack.shape[3]), dtype=np.float64)
+            for month in range(6):
+                center[month] = stack[:, :, month_index == month].mean(axis=(0, 2))
+            weather_center[fips] = center
+    rs_center = None
+    if demean_rs:
+        grouped: dict[str, list] = {}
+        for sample in source.samples:
+            grouped.setdefault(sample["fips"], []).append(
+                rs_store.get(sample["sample_id"], len(sample["grid_ids"])).astype(np.float64))
+        rs_center = {fips: np.mean(np.stack(values), axis=0) for fips, values in grouped.items()}
+    offset = None
+    offset_by_sample = None
+    if county_offset:
+        per_county: dict[str, dict[int, float]] = {}
+        for sample in source.samples:
+            per_county.setdefault(sample["fips"], {})[int(sample["year"])] = math.log(float(sample["label"]))
+        offset = {fips: float(np.mean(list(per_year.values()))) for fips, per_year in per_county.items()}
+        if offset_dataset is not None:
+            fallback = float(np.mean([math.log(float(sample["label"])) for sample in source.samples]))
+            if leave_one_out_offset:
+                # 旧版 --all-years 空间折：偏移面板含目标年，测试行必须排除自己。
+                offset_by_sample = {}
+                for fips, per_year in per_county.items():
+                    for year, value in per_year.items():
+                        others = [v for y, v in per_year.items() if y != year]
+                        offset_by_sample[f"{fips}_{year}"] = float(np.mean(others)) if others else fallback
+            else:
+                # 前向折：所有行用 county_offset（目标尺度与测试行一致）。只有单年前史
+                # （2018 行）时 county_offset 等于样本自身标签，训练目标会恒为 0；
+                # 这些行改用该年跨县均值，测试行不在表里，仍回退到 county_offset。
+                single = {fips: per_year for fips, per_year in per_county.items() if len(per_year) == 1}
+                offset_by_sample = {} if single else None
+                for fips, per_year in single.items():
+                    for year in per_year:
+                        offset_by_sample[f"{fips}_{year}"] = fallback
+    dynamic_size = len(WEATHER_FEATURES) + (len(CONSTRUCTED_FEATURES) if use_constructed else 1)
+    if norm_mode == "none":
+        dynamic_mean = torch.zeros(dynamic_size)
+        dynamic_std = torch.ones(dynamic_size)
+        soil_mean = torch.zeros(len(SOIL_FEATURES))
+        soil_std = torch.ones(len(SOIL_FEATURES))
+        rs_mean = rs_std = None
+        if rs_store is not None:
+            rs_mean = torch.zeros(len(rs_store.names))
+            rs_std = torch.ones(len(rs_store.names))
+        return TFTStats(dynamic_mean, dynamic_std, soil_mean, soil_std, rs_mean, rs_std, offset, rs_center,
+                        offset_by_sample, norm_mode=norm_mode, weather_center=weather_center)
+    accumulate = dict(dynamic_size=dynamic_size, use_constructed=use_constructed,
+                      rs_store=rs_store, rs_center=rs_center,
+                      weather_center=weather_center, month_index=month_index)
+    if norm_mode == "all-years":
+        # 测试年份只贡献特征（无标签），用于检验"不用训练集统计量"的替代口径。
+        stats = _accumulate_features(list(dataset.samples) + list(extra_dataset.samples), **accumulate)
+    else:
+        stats = _accumulate_features(dataset.samples, **accumulate)
+    per_year = None
+    if norm_mode == "per-year":
+        by_year: dict[int, list] = {}
+        for sample in list(dataset.samples) + list(extra_dataset.samples):
+            by_year.setdefault(int(sample["year"]), []).append(sample)
+        per_year = {year: _accumulate_features(samples, **accumulate) for year, samples in sorted(by_year.items())}
+    return TFTStats(stats["dynamic_mean"], stats["dynamic_std"], stats["soil_mean"], stats["soil_std"],
+                    stats["rs_mean"], stats["rs_std"], offset, rs_center, offset_by_sample,
+                    norm_mode=norm_mode, per_year=per_year, weather_center=weather_center)
 
 
 def stats_to_json(stats: TFTStats) -> dict:
@@ -248,6 +378,16 @@ def stats_to_json(stats: TFTStats) -> dict:
         payload["county_offset"] = dict(stats.county_offset)
     if stats.rs_center is not None:
         payload["rs_center"] = {fips: value.tolist() for fips, value in stats.rs_center.items()}
+    if stats.weather_center is not None:
+        payload["weather_center"] = {fips: value.tolist() for fips, value in stats.weather_center.items()}
+    if stats.offset_by_sample is not None:
+        payload["offset_by_sample"] = dict(stats.offset_by_sample)
+    payload["norm_mode"] = stats.norm_mode
+    if stats.per_year is not None:
+        payload["per_year"] = {
+            str(year): {key: (None if value is None else value.tolist()) for key, value in values.items()}
+            for year, values in stats.per_year.items()
+        }
     return payload
 
 
@@ -259,7 +399,20 @@ def stats_from_json(payload: dict) -> TFTStats:
     offset = {k: float(v) for k, v in payload["county_offset"].items()} if "county_offset" in payload else None
     center = ({k: np.asarray(v, dtype=np.float64) for k, v in payload["rs_center"].items()}
               if "rs_center" in payload else None)
-    return TFTStats(**tensors, county_offset=offset, rs_center=center)
+    by_sample = ({k: float(v) for k, v in payload["offset_by_sample"].items()}
+                 if "offset_by_sample" in payload else None)
+    weather = ({k: np.asarray(v, dtype=np.float64) for k, v in payload["weather_center"].items()}
+               if "weather_center" in payload else None)
+    per_year = None
+    if "per_year" in payload:
+        per_year = {
+            int(year): {key: (None if value is None else torch.tensor(value, dtype=torch.float32))
+                        for key, value in values.items()}
+            for year, values in payload["per_year"].items()
+        }
+    return TFTStats(**tensors, county_offset=offset, rs_center=center, offset_by_sample=by_sample,
+                    norm_mode=payload.get("norm_mode", "train"), per_year=per_year,
+                    weather_center=weather)
 
 
 def _standardize(value: torch.Tensor, mean: torch.Tensor, std: torch.Tensor) -> torch.Tensor:
@@ -287,9 +440,32 @@ def _tft_collate(items, stats: TFTStats, use_constructed: bool,
     grid_feats = torch.zeros((batch_size, max_grids, features[0].shape[1], feature_count))
     for index, feature in enumerate(features):
         grid_feats[index, :feature.shape[0]] = feature
-    grid_feats = _standardize(grid_feats, stats.dynamic_mean, stats.dynamic_std)
+    if stats.weather_center is not None:
+        # 气象县内去均值（第5章消融）：先减去本县该月的历史均值，再做全局标准化。
+        month_index = _weather_month_index(int(items[0]["year"]))
+        for index, item in enumerate(items):
+            center = _lookup(stats.weather_center, item["fips"], "weather centre")
+            grids = features[index].shape[0]
+            if center.shape[1] != grids:
+                raise ValueError(
+                    f"{item['fips']}: weather centre has {center.shape[1]} grids, sample has {grids}")
+            centered = np.transpose(center[month_index], (1, 0, 2))
+            grid_feats[index, :grids] -= torch.from_numpy(centered).to(grid_feats.dtype)
+    if stats.per_year is None:
+        grid_feats = _standardize(grid_feats, stats.dynamic_mean, stats.dynamic_std)
+    else:
+        # 按年标准化的消融：每行样本用自己年份的统计量（第3.6节）。
+        years = [int(item["year"]) for item in items]
+        dynamic_mean = torch.stack([stats.per_year[year]["dynamic_mean"] for year in years])
+        dynamic_std = torch.stack([stats.per_year[year]["dynamic_std"] for year in years]).clamp_min(1e-6)
+        grid_feats = (grid_feats - dynamic_mean.view(batch_size, 1, 1, -1)) / dynamic_std.view(batch_size, 1, 1, -1)
     grid_feats = torch.where(raw["grid_mask"].unsqueeze(-1).unsqueeze(-1), grid_feats, torch.zeros_like(grid_feats))
-    soil_feats = _standardize(raw["soil"], stats.soil_mean, stats.soil_std)
+    if stats.per_year is None:
+        soil_feats = _standardize(raw["soil"], stats.soil_mean, stats.soil_std)
+    else:
+        soil_mean = torch.stack([stats.per_year[int(item["year"])]["soil_mean"] for item in items])
+        soil_std = torch.stack([stats.per_year[int(item["year"])]["soil_std"] for item in items]).clamp_min(1e-6)
+        soil_feats = (raw["soil"] - soil_mean) / soil_std
     dates = weather_dates(items[0]["year"])
     month = torch.tensor([int(date[5:7]) for date in dates], dtype=torch.long)
     day = torch.tensor([int(date[8:10]) for date in dates], dtype=torch.long)
@@ -307,11 +483,27 @@ def _tft_collate(items, stats: TFTStats, use_constructed: bool,
             if stats.rs_center is not None:
                 values = values - _lookup(stats.rs_center, item["fips"], "remote-sensing centre")
             values = torch.from_numpy(values).float()
-            rs_features[index, :, :values.shape[1]] = _standardize(values, stats.rs_mean, stats.rs_std)
+            if stats.per_year is None:
+                rs_mean, rs_std = stats.rs_mean, stats.rs_std
+            else:
+                rs_mean, rs_std = stats.per_year[int(item["year"])]["rs_mean"], stats.per_year[int(item["year"])]["rs_std"]
+            rs_features[index, :, :values.shape[1]] = _standardize(values, rs_mean, rs_std)
         ag_grid_mask = raw["grid_mask"][:, None, :].expand(batch_size, 6, max_grids).clone()
         rs_features = rs_features * ag_grid_mask.unsqueeze(-1)
     offset = None
-    if stats.county_offset is not None:
+    if stats.offset_by_sample is not None:
+        values = []
+        for item in items:
+            value = stats.offset_by_sample.get(item["sample_id"])
+            if value is None:
+                # 前向空间折：测试年份不在 offset_dataset 里，回退到该县目标年之前
+                # 各年对数单产的均值（county_offset）。
+                if stats.county_offset is None:
+                    raise KeyError(f"{item['sample_id']}: no county offset for forward test year")
+                value = _lookup(stats.county_offset, item["fips"], "county offset")
+            values.append(value)
+        offset = torch.tensor(values, dtype=torch.float32)
+    elif stats.county_offset is not None:
         offset = torch.tensor([_lookup(stats.county_offset, item["fips"], "county offset") for item in items],
                               dtype=torch.float32)
     return {

@@ -66,17 +66,20 @@ def monthly_weather_view(weather: torch.Tensor) -> torch.Tensor:
 
 
 def collate_gnn_window(batch: Sequence[Sequence[dict]]) -> dict:
-    """batch: 每县一个五年窗口（Dataset item 列表）。
+    """batch: 每县一个连续年窗口（Dataset item 列表）。
 
-    weather (N,5,168,11) 为县内有效网格平均；soil (N,7)；years (5,)；targets (N,) 为窗口最后一年标签；
+    weather (N,T,168,11) 为县内有效网格平均；soil (N,7)；years (T,)；targets (N,) 为窗口最后一年标签；
     edge_index (2,E) 来自 neighbor_fips 并添加自环。标签不进入节点特征。
+    窗口长度 T 由数据给出（默认 5 年；统一协议下的 4 年窗口同样支持）。
     """
     if not batch:
         raise ValueError("empty batch")
     windows = sorted(batch, key=lambda w: w[0]["fips"])
     years = [item["year"] for item in windows[0]]
-    if len(years) != 5:
-        raise ValueError(f"GNN window must have 5 years, got {years}")
+    if len(years) < 2:
+        raise ValueError(f"GNN window must have at least 2 years, got {years}")
+    if any(b - a != 1 for a, b in zip(years, years[1:])):
+        raise ValueError(f"GNN window years must be consecutive, got {years}")
     fips = []
     for window in windows:
         if [item["year"] for item in window] != years:

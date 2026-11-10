@@ -47,9 +47,9 @@ def build_loader(dataset, batch_size: int, shuffle: bool, *, num_workers: int = 
                                        persistent_workers=num_workers > 0)
 
 
-def fit_stats(train_dataset: CropNetDataset) -> dict:
+def fit_stats(train_dataset: CropNetDataset, train_years=TRAIN_YEARS) -> dict:
     """只用训练年份：天气按 (网格, 天) 求每变量均值/方差；标签取 log 后的均值/方差。"""
-    if {s["year"] for s in train_dataset.samples} - set(TRAIN_YEARS):
+    if {s["year"] for s in train_dataset.samples} - set(train_years):
         raise ValueError("stats must be fitted on training years only")
     total = np.zeros(11, dtype=np.float64)
     sq = np.zeros(11, dtype=np.float64)

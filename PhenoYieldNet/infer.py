@@ -24,6 +24,8 @@ def build_parser():
     parser.add_argument("--data-root", dest="data_root", default=str(DATA_ROOT))
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--num_workers", type=int, default=4)
+    parser.add_argument("--eval_jsonl", default="",
+                        help="spatial CV: JSONL holding only the held-out counties for the final test")
     return parser
 
 
@@ -31,4 +33,4 @@ if __name__ == "__main__":
     args = build_parser().parse_args()
     evaluate_final_checkpoint(args.checkpoint, args.dataset_jsonl, args.data_root,
                               Path(args.checkpoint).resolve().parent, device=args.device,
-                              num_workers=args.num_workers)
+                              num_workers=args.num_workers, eval_jsonl=args.eval_jsonl or None)

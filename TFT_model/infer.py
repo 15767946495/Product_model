@@ -100,7 +100,9 @@ def evaluate_final_checkpoint(
     batch_size=4,
     num_workers=0,
     cutoffs=DEFAULT_CUTOFFS,
+    eval_jsonl=None,
 ) -> dict:
+    """``eval_jsonl`` 用于空间交叉验证：校验仍对照训练数据，测试样本改由留出县文件给出。"""
     output_dir = Path(output_dir).resolve()
     checkpoint_path = Path(checkpoint_path).resolve()
     run_dir = checkpoint_path.parent
@@ -109,7 +111,14 @@ def evaluate_final_checkpoint(
         raise ValueError("checkpoint must belong to an existing unified run directory")
     # 逐年留一：测试年份记录在训练时的 config.json；旧运行没有该字段，即原协议的2022年
     run_config = json.loads((run_dir / "config.json").read_text(encoding="utf-8"))
-    train_years, test_years = adapter.split_years(int(run_config.get("test_year", adapter.TEST_YEARS[0])))
+    if run_config.get("all_years"):
+        train_years = test_years = tuple(adapter.YEARS)
+    elif run_config.get("valid_year") is not None:
+        valid_year = int(run_config["valid_year"])
+        test_years = (int(run_config.get("test_year", adapter.TEST_YEARS[0])),)
+        train_years = tuple(y for y in adapter.YEARS if y < valid_year)
+    else:
+        train_years, test_years = adapter.split_years(int(run_config.get("test_year", adapter.TEST_YEARS[0])))
     checkpoint, _ = ro.validate_unified_run(
         checkpoint_path,
         output_dir,
@@ -137,7 +146,8 @@ def evaluate_final_checkpoint(
     stats = adapter.stats_from_json(checkpoint["stats"])
     use_constructed = bool(checkpoint.get("use_constructed", True))
     rs_store = adapter.load_rs_store(checkpoint["model_config"])
-    dataset = adapter.build_dataset(dataset_jsonl, data_root, test_years, load_images=rs_store is None)
+    dataset = adapter.build_dataset(eval_jsonl or dataset_jsonl, data_root, test_years,
+                                    load_images=rs_store is None)
     loader = adapter.build_loader(
         dataset, stats, batch_size, False,
         use_constructed=use_constructed,

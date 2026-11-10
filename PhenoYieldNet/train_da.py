@@ -40,6 +40,8 @@ def build_parser():
                         help="expected SHA-256 of --pretrain_model; empty string skips the check")
     parser.add_argument("--no_pretrain", action="store_true", help="random init (tests only)")
     parser.add_argument("--frame_drop_rate", type=float, default=cfg.STAGE1["frame_drop_rate"])
+    parser.add_argument("--resume", default="",
+                        help="continue an interrupted run from checkpoint-latest.pth (restores model, optimizer and epoch)")
     return parser
 
 
@@ -128,9 +130,17 @@ def main(args) -> Path:
         parameters=ro.count_parameters(net),
     ))
 
+    start_epoch = 0
+    if args.resume:
+        resumed = torch.load(args.resume, map_location="cpu", weights_only=False)
+        net.load_state_dict(resumed["model"])
+        optimizer.load_state_dict(resumed["optimizer"])
+        start_epoch = int(resumed["epoch"]) + 1
+        print(f"Resumed from {args.resume} (epoch {resumed['epoch']}); continuing at epoch {start_epoch}")
+
     generator = torch.Generator().manual_seed(args.seed + 1)
-    epoch = -1
-    for epoch in range(args.epochs):
+    epoch = start_epoch - 1
+    for epoch in range(start_epoch, args.epochs):
         row = train_one_epoch(net, loader, optimizer, device, epoch, args, generator)
         ro.append_jsonl(run_dir / "train_metrics.jsonl", {"epoch": epoch, **row})
         if epoch % args.save_freq == 0 or epoch + 1 == args.epochs:

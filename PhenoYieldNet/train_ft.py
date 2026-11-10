@@ -1,9 +1,10 @@
-"""PhenoYieldNet-unified Stage 2：2021 监督微调（PhenoYieldNet-SC，只做 corn）+ 2022 最终测试。
+"""PhenoYieldNet-unified Stage 2：单年监督微调（PhenoYieldNet-SC，只做 corn）+ 2022 最终测试。
 
 与上游 train_ft.py / scripts/run_finetune.sh 一致：骨干 num_classes=2 后加载 Stage 1 checkpoint，
 ViT_multimodal_multicrop 端到端训练（上游脚本不传 --frozen_fm，公开代码实际不冻结编码器），
 MSE 作用于 log(yield)（--yield_only_loss 语义），AdamW(0.9,0.95)，每步一个县年。
-只用 corn 的 crop query 与回归头；不使用长期气象。固定 epoch，无验证集、无按指标选 checkpoint。
+只用 corn 的 crop query 与回归头；不使用长期气象。
+默认协议：2021 微调、2022 测试。统一协议（--valid-year 2021）：2020 微调、2021 早停选模、2022 测试。
 输出：output_root/phenoyieldnet/<run_id>/{config.json, checkpoint-latest.pth, checkpoint-final.pth,
 train_metrics.jsonl, test_metrics.json, county_predictions.jsonl, run_metadata.json}。
 """
@@ -11,6 +12,7 @@ train_metrics.jsonl, test_metrics.json, county_predictions.jsonl, run_metadata.j
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import sys
 from pathlib import Path
@@ -40,7 +42,27 @@ def build_parser():
                         help="freeze the backbone (paper description); upstream run_finetune.sh does not")
     parser.add_argument("--grad_checkpointing", action="store_true")
     parser.add_argument("--eval_checkpoint", default="", help="only run the final 2022 test on this checkpoint-final.pth")
+    parser.add_argument("--eval_jsonl", default="",
+                        help="spatial CV: JSONL holding only the held-out counties for the final test")
+    parser.add_argument("--valid-year", type=int, default=None,
+                        help="hold-out validation year for early stopping (e.g. 2021); finetuning then uses only the year before it")
+    parser.add_argument("--early-stop-patience", type=int, default=10,
+                        help="stop after N epochs without validation improvement (default 3); -1 disables early stopping")
+    parser.add_argument("--checkpoint-policy", choices=("best", "final"), default="best",
+                        help="best: restore the lowest-validation epoch; final: keep the last epoch (fixed budget, no selection)")
     return parser
+
+
+def _split(args):
+    """返回 (微调年, 验证年或None, 测试年)。微调沿用单年设计，取训练期中最后一年。"""
+    test_year = tuple(cfg.TEST_YEARS)[-1]
+    if args.valid_year is not None:
+        valid_year = int(args.valid_year)
+        if not (min(cfg.PRETRAIN_YEARS) < valid_year < test_year):
+            raise ValueError(f"valid year {valid_year} must lie strictly between {min(cfg.PRETRAIN_YEARS)} and {test_year}")
+        train_years = tuple(y for y in (*cfg.PRETRAIN_YEARS, *cfg.FINETUNE_YEARS) if y < valid_year)
+        return (train_years[-1],), (valid_year,), (test_year,)
+    return tuple(cfg.FINETUNE_YEARS), None, tuple(cfg.TEST_YEARS)
 
 
 def model_config(args) -> dict:
@@ -54,7 +76,7 @@ def build_full_model(config: dict, stage1_state: dict | None = None):
     return build_model(config, net), report
 
 
-def checkpoint_payload(model, optimizer, epoch, args, config) -> dict:
+def checkpoint_payload(model, optimizer, epoch, args, config, train_years, test_years) -> dict:
     return {
         **ro.checkpoint_metadata(
             model_name=getattr(cfg, "MODEL_NAME", "phenoyieldnet"),
@@ -64,8 +86,8 @@ def checkpoint_payload(model, optimizer, epoch, args, config) -> dict:
                 "PhenoYieldNet-unified (PhenoYieldNet-SC, corn only, unified CropNet)",
             ),
             dataset_jsonl=args.dataset_jsonl,
-            train_years=cfg.FINETUNE_YEARS,
-            test_years=cfg.TEST_YEARS,
+            train_years=train_years,
+            test_years=test_years,
             model_config=config,
         ),
         "model": model.state_dict(),
@@ -106,6 +128,25 @@ def train_one_epoch(model, loader, optimizer, device, epoch, args) -> dict:
 
 
 @torch.no_grad()
+def evaluate_loss(model, loader, device) -> float:
+    """验证年上的逐县 MSE(log yield)，与微调损失同口径。"""
+    was_training = model.training
+    model.eval()
+    transform = stage2_transform(train=False)
+    total, seen = 0.0, 0
+    for batch in loader:
+        x, ys, crop_idx = model_inputs(batch, device, transform)
+        z = torch.log(batch["labels"]).unsqueeze(-1).to(device)
+        loss = torch.nn.functional.mse_loss(model(x, ys=ys, crop_idx=crop_idx), z, reduction="sum").item()
+        total += loss
+        seen += z.numel()
+    model.train(was_training)
+    if seen == 0:
+        raise RuntimeError("validation loader has no samples")
+    return total / seen
+
+
+@torch.no_grad()
 def predict(model, loader, device) -> list[dict]:
     model.eval()
     transform = stage2_transform(train=False)
@@ -120,16 +161,27 @@ def predict(model, loader, device) -> list[dict]:
 
 
 def evaluate_final_checkpoint(checkpoint_path, dataset_jsonl, data_root, output_dir, *, device="cuda",
-                               num_workers=0) -> dict:
-    """只加载 checkpoint-final.pth，只读 2022。"""
+                               num_workers=0, eval_jsonl=None) -> dict:
+    """只加载 checkpoint-final.pth，只读运行配置记录的测试年份。
+
+    ``eval_jsonl`` 用于空间交叉验证：校验仍对照训练数据，测试样本改由留出县文件给出。
+    微调/测试年份优先读 run_dir/config.json（支持 --valid-year 的统一协议），旧运行退回 cfg 默认值。
+    """
+    run_dir = Path(output_dir).resolve()
+    config_path = run_dir / "config.json"
+    run_config = json.loads(config_path.read_text(encoding="utf-8")) if config_path.is_file() else {}
+    if run_config.get("valid_year") is not None:
+        finetune_years, _, test_years = _split(argparse.Namespace(valid_year=run_config["valid_year"]))
+    else:
+        finetune_years, test_years = tuple(cfg.FINETUNE_YEARS), tuple(cfg.TEST_YEARS)
     checkpoint, _ = ro.validate_unified_run(
         checkpoint_path,
         output_dir,
         model_name=cfg.MODEL_NAME,
         adaptation=cfg.ADAPTATION,
         dataset_jsonl=dataset_jsonl,
-        train_years=cfg.FINETUNE_YEARS,
-        test_years=cfg.TEST_YEARS,
+        train_years=finetune_years,
+        test_years=test_years,
         required_fields=(
             "model_config.batch_size",
             "model_config.grad_checkpointing",
@@ -141,16 +193,17 @@ def evaluate_final_checkpoint(checkpoint_path, dataset_jsonl, data_root, output_
     model, _ = build_full_model(checkpoint["model_config"])
     model.load_state_dict(checkpoint["model"])
     model.to(device)
-    dataset = build_dataset(dataset_jsonl, data_root, cfg.TEST_YEARS)
+    dataset = build_dataset(eval_jsonl or dataset_jsonl, data_root, test_years)
     rows = predict(model, build_loader(dataset, False, num_workers=num_workers), device)
-    return ro.finish_test(output_dir, rows, dataset.sample_ids, checkpoint_path=checkpoint_path, years=cfg.TEST_YEARS)
+    return ro.finish_test(output_dir, rows, dataset.sample_ids, checkpoint_path=checkpoint_path, years=test_years)
 
 
 def main(args) -> Path:
     if args.eval_checkpoint:
         run_dir = Path(args.eval_checkpoint).resolve().parent
         evaluate_final_checkpoint(args.eval_checkpoint, args.dataset_jsonl, args.data_root, run_dir,
-                                  device=args.device, num_workers=args.num_workers)
+                                  device=args.device, num_workers=args.num_workers,
+                                  eval_jsonl=args.eval_jsonl or None)
         return run_dir
 
     if not args.pretrain_model:
@@ -178,43 +231,77 @@ def main(args) -> Path:
         ro.write_json(run_dir / "stage1_load_report.json", load_report)
     model.to(device)
 
-    dataset = build_dataset(args.dataset_jsonl, args.data_root, cfg.FINETUNE_YEARS)
+    finetune_years, valid_years, test_years = _split(args)
+    dataset = build_dataset(args.dataset_jsonl, args.data_root, finetune_years)
     loader = build_loader(dataset, True, num_workers=args.num_workers,
                           generator=torch.Generator().manual_seed(args.seed))
+    valid_loader = None
+    if valid_years is not None:
+        valid_dataset = build_dataset(args.dataset_jsonl, args.data_root, valid_years)
+        if not len(valid_dataset):
+            raise ValueError(f"validation years {valid_years} have no samples")
+        valid_loader = build_loader(valid_dataset, False, num_workers=args.num_workers)
     optimizer = torch.optim.AdamW(param_groups(model, args.weight_decay), lr=args.lr, betas=(0.9, 0.95))
     ro.write_json(run_dir / "run_metadata.json", ro.base_metadata(
         model=cfg.MODEL_NAME, adaptation=cfg.ADAPTATION, run_id=args.run_id, dataset_jsonl=args.dataset_jsonl,
-        seed=args.seed, train_years=cfg.FINETUNE_YEARS, test_years=cfg.TEST_YEARS,
+        seed=args.seed, train_years=finetune_years, test_years=test_years,
         counties=len({s["fips"] for s in dataset.samples}), inputs=cfg.INPUTS, train_samples=len(dataset),
         pretrain_years=list(cfg.PRETRAIN_YEARS), stage1_checkpoint=args.pretrain_model or None,
         epochs=args.epochs, optimizer="AdamW(0.9,0.95)", lr=args.lr, blr=args.blr, weight_decay=args.weight_decay,
         frozen_backbone=args.frozen_fm, crop="corn", target="log(yield_bu_ac)",
-        parameters=ro.count_parameters(model), checkpoint_policy="final epoch only, no validation selection",
+        parameters=ro.count_parameters(model),
+        checkpoint_policy=("final epoch only, fixed budget" if args.checkpoint_policy == "final"
+                           else ("best validation epoch, early stopping" if valid_loader is not None
+                                 else "final epoch only, no validation selection")),
+        valid_years=list(valid_years) if valid_years is not None else None,
+        valid_samples=len(valid_dataset) if valid_loader is not None else None,
+        early_stop_patience=args.early_stop_patience if valid_loader is not None else None,
     ))
 
+    best_state, best_epoch, best_valid, stale = None, None, math.inf, 0
+    stopped_early = False
     epoch = -1
     for epoch in range(args.epochs):
         row = train_one_epoch(model, loader, optimizer, device, epoch, args)
+        if valid_loader is not None:
+            valid_loss = evaluate_loss(model, valid_loader, device)
+            row["valid_loss"] = valid_loss
+            if valid_loss < best_valid:
+                best_valid, best_epoch, stale = valid_loss, epoch, 0
+                best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+            else:
+                stale += 1
         ro.append_jsonl(run_dir / "train_metrics.jsonl", {"epoch": epoch, **row})
         if epoch % args.save_freq == 0 or epoch + 1 == args.epochs:
             latest = ro.save_checkpoint(
                 run_dir / ro.LATEST_CHECKPOINT,
-                checkpoint_payload(model, optimizer, epoch, args, config),
+                checkpoint_payload(model, optimizer, epoch, args, config, finetune_years, test_years),
             )
             ro.update_json(
                 run_dir / "run_metadata.json", epoch=epoch, latest_checkpoint=str(latest),
                 latest_checkpoint_sha256=ro.sha256_file(latest),
             )
+        if valid_loader is not None and args.early_stop_patience >= 0 and stale >= args.early_stop_patience:
+            stopped_early = True
+            print(f"Early stopping at epoch {epoch} (best epoch {best_epoch}, valid loss {best_valid:.6f})")
+            break
+
+    if best_state is not None and args.checkpoint_policy == "best":
+        model.load_state_dict(best_state)
+        epoch = best_epoch
     final = ro.save_checkpoint(
         run_dir / ro.FINAL_CHECKPOINT,
-        checkpoint_payload(model, optimizer, epoch, args, config),
+        checkpoint_payload(model, optimizer, epoch, args, config, finetune_years, test_years),
     )
     ro.update_json(
         run_dir / "run_metadata.json", epoch=epoch, final_checkpoint=str(final),
         final_checkpoint_sha256=ro.sha256_file(final), trained=ro.now(),
+        stopped_early=stopped_early,
+        best_valid_loss=None if best_epoch is None else best_valid,
+        best_valid_epoch=best_epoch,
     )
     evaluate_final_checkpoint(final, args.dataset_jsonl, args.data_root, run_dir, device=args.device,
-                              num_workers=args.num_workers)
+                              num_workers=args.num_workers, eval_jsonl=args.eval_jsonl or None)
     return run_dir
 
 

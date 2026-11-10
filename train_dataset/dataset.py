@@ -519,8 +519,13 @@ def select_years(samples, years) -> list:
     return sorted((s for s in samples if s["year"] in years), key=lambda s: (s["year"], s["fips"]))
 
 
-def build_gnn_windows(samples) -> dict[str, list[list]]:
-    """每县一个连续五年窗口；缺任一年直接失败，不缩短、不补零。"""
+def build_gnn_windows(samples, windows=None) -> dict[str, list[list]]:
+    """每县一个连续年窗口；缺任一年直接失败，不缩短、不补零。
+
+    ``windows`` 为 {split: years} 时按给定的年窗口构建（新的 2017--2020 训练 / 2021 验证协议），
+    默认使用 GNN_WINDOWS。
+    """
+    windows = GNN_WINDOWS if windows is None else windows
     by_key = {}
     for s in samples:
         key = (s["fips"], s["year"])
@@ -529,7 +534,7 @@ def build_gnn_windows(samples) -> dict[str, list[list]]:
         by_key[key] = s
     counties = sorted({f for f, _ in by_key})
     out = {}
-    for split, years in GNN_WINDOWS.items():
+    for split, years in windows.items():
         windows = []
         for fips in counties:
             missing = [y for y in years if (fips, y) not in by_key]

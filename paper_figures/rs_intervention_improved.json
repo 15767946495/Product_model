@@ -1,21 +1,21 @@
 {
  "2022": {
-  "rmse_baseline": 18.229055462820366,
+  "rmse_baseline": 17.731098974863926,
   "rmse_shuffle": [
-   20.82797137901449,
-   20.928988322124912,
-   21.16396801779088
+   22.408871417836025,
+   22.46429134304581,
+   22.781795466342338
   ],
-  "rmse_shuffle_mean": 20.97364257297676,
-  "rmse_zero": 21.25290677608785,
-  "delta_shuffle": 2.7445871101563952,
-  "delta_zero": 3.0238513132674854,
-  "mean_abs_change_shuffle": 6.498623808922126,
-  "mean_abs_change_zero": 6.790056704831349
+  "rmse_shuffle_mean": 22.551652742408056,
+  "rmse_zero": 22.75343197165272,
+  "delta_shuffle": 4.82055376754413,
+  "delta_zero": 5.022332996788794,
+  "mean_abs_change_shuffle": 9.823723613277407,
+  "mean_abs_change_zero": 9.793815792974351
  },
  "summary": {
-  "delta_shuffle_mean": 2.7445871101563952,
-  "delta_zero_mean": 3.0238513132674854,
+  "delta_shuffle_mean": 4.82055376754413,
+  "delta_zero_mean": 5.022332996788794,
   "years_worse_shuffle": 1,
   "years_worse_zero": 1
  }

@@ -16,12 +16,14 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 RUNS = Path("/data/raid0/hqx/TFT_out/tft")
 OUT = ROOT / "paper_figures"
-TAG = "loyo31-"
+TAG = __import__("os").environ.get("LOYO_TAG", "diag2020-")
 YEAR = 2022
+TRAIN_LAST_YEAR = 2020
 # 种子列表可用 LOYO_SEEDS 覆盖（单种子复核时 LOYO_SEEDS=0）
 SEEDS = tuple(int(s) for s in __import__("os").environ.get("LOYO_SEEDS", "42 1 2").split())
-CONFIGS = {"improved": "完整PA-TFT", "noffset": "去掉县均值偏移",
-           "nodemean": "去掉植被指数县内去均值", "nors": "去掉遥感输入"}
+CONFIGS = {"improved": "完整PA-TFT", "level": "PA-TFT（水平目标）",
+           "noffset": "去掉县均值偏移", "nodemean": "去掉植被指数县内去均值",
+           "nors": "去掉遥感输入", "wdemean": "气象也做县内去均值"}
 
 
 def load_labels():
@@ -77,7 +79,7 @@ def main():
     assert improved, "缺少 PA-TFT 的 2022 折预测"
     fips, truth = improved[0][1], improved[0][2]
     ens_main = np.mean([np.array([p[0][f] for f in fips]) for p in improved], axis=0)
-    base_log = np.array([np.mean([np.log(labels[(c, u)]) for u in range(2017, 2022)]) for c in fips])
+    base_log = np.array([np.mean([np.log(labels[(c, u)]) for u in range(2017, TRAIN_LAST_YEAR + 1)]) for c in fips])
     states = np.array([c[:2] for c in fips])
 
     out = {"year": YEAR, "n": int(len(fips)),

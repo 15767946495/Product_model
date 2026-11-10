@@ -1,10 +1,8 @@
-"""PA-TFT 在新面板（29 州 741 县，2017—2022）上的论文数值：2022 折的模型比较与逐年留一汇总。
+"""PA-TFT 在新面板（29 州 741 县，2017—2022）上的论文数值：2022 折的模型比较。
 
 数据来源：
-- `paper_figures/loyo_summary.json`（`TFT_model/loyo_summary.py` 生成）：各配置在 2022 折的 RMSE 与异常相关
-- `paper_figures/panel.json`（`TFT_model/panel_report.py` 生成）：仅县固定效应基线的逐年参照
 - 运行目录 `/data/raid0/hqx/TFT_out/tft`（环境变量 LOYO_RUNS 可覆盖），编号 `loyo31-{配置}-y{年}-s{种子}`
-- 比较模型的运行目录见 BASELINES / LOYO_BASELINES（缺测的自动跳过）
+- 比较模型的运行目录见 BASELINES（缺测的自动跳过）
 
 主模型 = PA-TFT（improved 配置，学习率 1e-4，种子 0，单次运行）。其他模型同样只报告一次运行。
 岭回归面板模型不在本脚本里：它只作为第5.8节置换检验的估计器，不使用测试折作预测比较。
@@ -19,7 +17,6 @@ import sys
 from pathlib import Path
 
 import numpy as np
-from scipy import stats
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -32,19 +29,18 @@ RUNS = Path(os.environ.get("LOYO_RUNS", "/data/raid0/hqx/TFT_out/tft"))
 FEATURES = "/data/raid0/hqx/train_dataset/rs_signal_features_31states.npz"
 # 种子列表可用环境变量 LOYO_SEEDS 覆盖（例如单种子复核时 LOYO_SEEDS=0）
 SEEDS = tuple(int(s) for s in os.environ.get("LOYO_SEEDS", "42 1 2").split())
-# PVT-TFT 的失败以三个种子的重复运行报告（都退化为常数解，不存在按测试结果挑种子的问题）
-BASE_SEEDS = (42, 1, 2)
-YEARS = [str(y) for y in range(2017, 2023)]
-TAG = "loyo31"
+# PVT-TFT 与其它模型一样只跑种子 0（单次运行，不按测试结果挑种子）
+BASE_SEEDS = (0,)
+TAG = os.environ.get("LOYO_TAG", "diag2020")
+# 统一协议：训练 2017--2020，各方法固定轮数（不使用验证集），2022 测试。县均值基准与固定效应用训练年份。
+TRAIN_LAST_YEAR = 2020
 
 # 比较模型的 2022 折运行目录（新面板重跑后填写；不存在的自动跳过）
 BASELINES = {
-    "UNet-ConvLSTM": Path("/data/raid0/hqx/baselines/unet_convlstm/loyo31-unet"),
-    "GNN-RNN": Path("/data/raid0/hqx/baselines/gnn_rnn/loyo31-gnn"),
-    "PhenoYieldNet": Path("/data/raid0/hqx/baselines/phenoyieldnet/loyo31-pheno"),
+    "UNet-ConvLSTM": Path("/data/raid0/hqx/baselines/unet_convlstm/p2020-unet-final"),
+    "GNN-RNN": Path("/data/raid0/hqx/baselines/gnn_rnn/p2020-gnn-final"),
+    "PhenoYieldNet": Path("/data/raid0/hqx/baselines/phenoyieldnet/p2020-pheno-final"),
 }
-# 比较模型的逐年留一目录：{模型: {年份: 运行目录}}，2022 折复用上面的目录
-LOYO_BASELINES: dict[str, dict[int, Path]] = {name: {2022: path} for name, path in BASELINES.items()}
 
 
 def load(run_dir: Path):
@@ -74,12 +70,11 @@ def ensemble_runs(pattern, seeds=None):
 
 
 def main():
-    loyo = json.loads((F / "loyo_summary.json").read_text(encoding="utf-8"))
-    panel = json.loads((F / "panel.json").read_text(encoding="utf-8"))
+    # 单折协议：只报告 2022 折，不再生成逐年留一汇总
 
-    # ---- 2022 折：县均值基准（2017—2021） ----
+    # ---- 2022 折：县均值基准（训练年份 2017—2020） ----
     data = load_features(FEATURES)
-    train = data["year"] <= 2021
+    train = data["year"] <= TRAIN_LAST_YEAR
     county_mean = {c: data["z"][train & (data["fips"] == c)].mean() for c in np.unique(data["fips"])}
 
     fips, truth, preds = ensemble_runs(f"{TAG}-improved-y2022-s{{s}}")
@@ -131,72 +126,12 @@ def main():
                       "diff_state_ci": [lo, hi], "share_neg_state": share,
                       "diff_county_ci": [lo_c, hi_c], "share_neg_county": share_c}
 
-    # ---- 逐年留一 ----
-    fe = np.array([panel["loyo"]["county_fe_only"]["per_year_rmse"][y] for y in YEARS])
-    pan = np.array([panel["loyo"]["weather+veg"]["per_year_rmse"][y] for y in YEARS])
-
-    def summarize(name):
-        c = loyo["configs"][name]
-        full = [y for y in YEARS if y in c and "ensemble" in c[y]]
-        if not full:
-            return None
-        ens_y = np.array([c[y]["ensemble"]["rmse"] for y in full])
-        row = {"years": full,
-               "ensemble_by_year": {y: c[y]["ensemble"]["rmse"] for y in full},
-               "single_mean_by_year": {y: c[y]["single_rmse_mean"] for y in full},
-               "single_sd_by_year": {y: c[y]["single_rmse_sd"] for y in full},
-               "ensemble_anom_corr_by_year": {y: c[y]["ensemble"]["anom_corr"] for y in full},
-               "ensemble_mean": float(ens_y.mean()),
-               "single_mean": float(np.mean([c[y]["single_rmse_mean"] for y in full]))}
-        sds = [c[y]["single_rmse_sd"] for y in full if c[y]["single_rmse_sd"]]
-        row["seed_sd_mean"] = float(np.mean(sds)) if sds else None
-        if len(full) == 6:
-            row["vs_fe"] = paired(ens_y, fe)
-            row["vs_panel"] = paired(ens_y, pan)
-        return row
-
-    def paired(a, b):
-        return {"diff": float((a - b).mean()), "better": int((a < b).sum()),
-                "t_p": float(stats.ttest_rel(a, b).pvalue), "w_p": float(stats.wilcoxon(a, b).pvalue)}
-
-    loyo_rows = {name: summarize(name) for name in ("improved", "original", "noffset", "nodemean", "nors")}
-    loyo_rows = {k: v for k, v in loyo_rows.items() if v is not None}
-
-    # 已有深度模型的逐年留一（只比较双方都有结果的年份）
-    loyo_baselines = {}
-    for name, per_fold in LOYO_BASELINES.items():
-        by_year = {}
-        for year, path in per_fold.items():
-            if (path / "county_predictions.jsonl").exists():
-                _, p, t = load(path)
-                by_year[str(year)] = metrics(t, p)["rmse"]
-        if by_year:
-            loyo_baselines[name] = {"by_year": by_year, "mean": float(np.mean(list(by_year.values()))),
-                                    "n_years": len(by_year)}
-
-    def paired_other(ref_name, ref_by_year):
-        for name, row in loyo_rows.items():
-            common = sorted(set(row["ensemble_by_year"]) & set(ref_by_year))
-            if len(common) < 3:
-                continue
-            a = np.array([row["ensemble_by_year"][y] for y in common])
-            b = np.array([ref_by_year[y] for y in common])
-            row.setdefault("paired_other", {})[ref_name] = {"n_years": len(common), **paired(a, b)}
-
-    if "original" in loyo_rows:
-        paired_other("PVT-TFT", loyo_rows["original"]["ensemble_by_year"])
-    for model, v in loyo_baselines.items():
-        paired_other(model, v["by_year"])
-
     out = {"main_2022": main_2022, "compare_2022": rows, "original_2022": orig_2022,
            "state_rmse_2022": {
                STATE_NAMES[s]: {"n": int((states == s).sum()),
                                 "tft": float(np.sqrt(((ens - truth)[states == s] ** 2).mean())),
                                 "fe": float(np.sqrt(((np.exp(base_log) - truth)[states == s] ** 2).mean()))}
                for s in np.unique(states)},
-           "loyo": {"fe_by_year": dict(zip(YEARS, fe.tolist())), "panel_by_year": dict(zip(YEARS, pan.tolist())),
-                    "fe_mean": float(fe.mean()), "panel_mean": float(pan.mean()),
-                    "compare": loyo_baselines, "configs": loyo_rows},
            "runs": {"improved": f"{TAG}-improved", "original": f"{TAG}-original"}}
     (F / "tft_main.json").write_text(json.dumps(out, ensure_ascii=False, indent=1), encoding="utf-8")
 
@@ -208,12 +143,6 @@ def main():
     for name, r in rows.items():
         print(f"  vs {name:26s} RMSE {r['rmse']:6.2f}  state CI [{r['diff_state_ci'][0]:+.2f},{r['diff_state_ci'][1]:+.2f}]"
               f"  county CI [{r['diff_county_ci'][0]:+.2f},{r['diff_county_ci'][1]:+.2f}]")
-    for name, row in loyo_rows.items():
-        extra = ""
-        if "vs_fe" in row:
-            extra = f", 优于县FE {row['vs_fe']['better']}/6 (t p={row['vs_fe']['t_p']:.3f})"
-        print(f"LOYO {name:9s} {len(row['years'])}折 集成均值 {row['ensemble_mean']:.2f}, 单次均值 {row['single_mean']:.2f}{extra}")
-    print(f"参考: 县FE 逐年留一均值 {fe.mean():.2f}, 线性面板 6 年 {pan.mean():.2f}")
 
 
 if __name__ == "__main__":

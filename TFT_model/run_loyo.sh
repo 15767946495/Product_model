@@ -19,10 +19,15 @@ read -r -a GPUS <<< "${GPU_IDS:-0 1 2 3 4 5 6 7}"
 read -r -a CONFIGS <<< "${CONFIGS:-improved noffset nodemean nors}"
 read -r -a YEARS <<< "${YEARS:-2022}"
 read -r -a SEEDS <<< "${SEEDS:-0}"
+VALID_YEAR="${VALID_YEAR:-}"                 # 非空时：只用 < VALID_YEAR 的年份训练，VALID_YEAR 早停选模
+EARLY_STOP_PATIENCE="${EARLY_STOP_PATIENCE:-10}"
 
 COMMON=(--dataset-jsonl "$ROOT/train_dataset/dataset.jsonl" --data-root "$DATA_ROOT" --output_root "$OUT"
         --device cuda:0 --epochs 20 --num_workers "${NUM_WORKERS:-4}" --batch_size 4 --hidden_size 512 --num_heads 4
         --num_lstm_layers 1 --dropout 0.1 --warmup_epochs 5 --use-constructed)
+if [[ -n "$VALID_YEAR" ]]; then
+  COMMON+=(--valid-year "$VALID_YEAR" --early-stop-patience "$EARLY_STOP_PATIENCE")
+fi
 # 配置名 -> 额外参数。学习率按配置给出：PA-TFT 及其消融用 1e-4（第4.11节），
 # 对照配置 PVT-TFT 沿用 TFT 原文的 1e-3。
 declare -A CFG=(
@@ -31,8 +36,19 @@ declare -A CFG=(
   # 消融：每次去掉改进模型的一个组件，其余与 improved 相同
   [noffset]="--rs-features $RS --demean-rs --grad-clip 1.0 --lr 1e-4"
   [nodemean]="--rs-features $RS --county-offset --grad-clip 1.0 --lr 1e-4"
+  # 消融：气象也做县内去均值（本县逐年逐月历史均值），其余与 improved 相同（第5章）
+  [wdemean]="--rs-features $RS --county-offset --demean-rs --demean-weather --grad-clip 1.0 --lr 1e-4"
   # 消融：遥感输入全部置零（模型结构不变，遥感分支只剩常数偏置，不含任何影像信息）
   [nors]="--rs-features $RS_ZERO --county-offset --demean-rs --grad-clip 1.0 --lr 1e-4"
+  # 同目标对照：水平目标 + 只做全局标准化，不加县均值偏移、不做遥感县内去均值。
+  # 与三个基线的目标与输入标准化口径一致，用来单独检验 TFT 架构的贡献（第5.1节）。
+  [level]="--rs-features $RS --grad-clip 1.0 --lr 1e-4"
+  # 标准化口径消融（第3.6节）：其余与 improved 相同
+  #   normnone = 不标准化；normyear = 每年用该年自己的统计量；
+  #   normall  = 训练年与测试年合并估计统计量（测试年只提供无标签特征）
+  [normnone]="--rs-features $RS --county-offset --demean-rs --grad-clip 1.0 --lr 1e-4 --norm-mode none"
+  [normyear]="--rs-features $RS --county-offset --demean-rs --grad-clip 1.0 --lr 1e-4 --norm-mode per-year"
+  [normall]="--rs-features $RS --county-offset --demean-rs --grad-clip 1.0 --lr 1e-4 --norm-mode all-years"
 )
 
 jobs=()

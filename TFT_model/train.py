@@ -71,12 +71,36 @@ def build_parser() -> argparse.ArgumentParser:
         help="leave-one-year-out: this year is the test year, all other years train (default 2022)",
     )
     parser.add_argument(
+        "--valid-year", type=int, default=None,
+        help="hold-out validation year for early stopping (e.g. 2021); training then uses only years before it",
+    )
+    parser.add_argument(
+        "--early-stop-patience", type=int, default=10,
+        help="stop after N epochs without validation improvement (default 10); -1 disables early stopping",
+    )
+    parser.add_argument(
+        "--checkpoint-policy", choices=("best", "final"), default="best",
+        help="best: restore the lowest-validation checkpoint; final: keep the last epoch (diagnostic only)",
+    )
+    parser.add_argument(
         "--county-offset", action="store_true", default=False,
         help="predict log-yield as training-year county mean + network output (network learns the anomaly)",
     )
     parser.add_argument(
         "--demean-rs", action="store_true", default=False,
         help="centre numeric RS features on each grid-month's training-year mean before standardising",
+    )
+    parser.add_argument(
+        "--demean-weather", action="store_true", default=False,
+        help="centre each grid-day weather feature on that county's training-year monthly mean "
+             "before standardising (same within-county treatment as --demean-rs)",
+    )
+    parser.add_argument(
+        "--norm-mode", dest="norm_mode", choices=("train", "none", "per-year", "all-years"),
+        default="train",
+        help="standardisation ablation (Section 3.6): train = training-year statistics only (default); "
+             "none = no standardisation; per-year = each year's own statistics; "
+             "all-years = training and test years pooled (test-year features only, no labels)",
     )
     parser.add_argument(
         "--grad-clip", type=float, default=0.0,
@@ -106,6 +130,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--eval_checkpoint", default="",
         help="only run the final 2022 test on this checkpoint-final.pth",
+    )
+    parser.add_argument(
+        "--test-jsonl", default="",
+        help="spatial CV: JSONL holding only the held-out counties; defaults to --dataset-jsonl",
+    )
+    parser.add_argument(
+        "--offset-jsonl", default="",
+        help="spatial CV: panel JSONL used to fit per-county offsets and RS centres; "
+             "in forward mode only years before --test-year are used",
+    )
+    parser.add_argument(
+        "--all-years", action="store_true", default=False,
+        help="spatial CV: train and test on every year in the panel instead of one test year",
+    )
+    parser.add_argument(
+        "--spatial-fold", type=int, default=-1,
+        help="spatial CV: county fold index (recorded in metadata only; the split lives in the JSONL files)",
     )
     return parser
 
@@ -209,6 +250,30 @@ def train_one_epoch(model, loader, optimizer, device, epoch, args, monitor=None)
 
 
 @torch.no_grad()
+def evaluate_loss(model, loader, device, args) -> float:
+    """验证损失：与训练目标一致（有县均值偏移时减偏移），按有效样本加权。"""
+    was_training = model.training
+    model.eval()
+    total = 0.0
+    seen = 0
+    for batch in loader:
+        pred, _, aux = model(**adapter.model_inputs(batch, device))
+        valid = aux["sample_valid"]
+        if not bool(valid.any()):
+            continue
+        target = torch.log(batch["labels"].to(device))
+        if batch.get("county_offset") is not None:
+            target = target - batch["county_offset"].to(device)
+        total += torch.nn.functional.mse_loss(
+            pred[valid, 0], target[valid], reduction="sum").item()
+        seen += int(valid.sum())
+    model.train(was_training)
+    if seen == 0:
+        raise RuntimeError("validation loader has no valid samples")
+    return total / seen
+
+
+@torch.no_grad()
 def _pvt_mean_token(model, dataset, stats, device, args, samples: int = 64) -> torch.Tensor:
     """固定训练年份子集上有效 PVT token 的均值：与坍缩后 PVT 同量级、但不含影像内容的常数。"""
     from TFT_model.pvt_monitor import build_probe_loader
@@ -238,8 +303,34 @@ def _pvt_mean_token(model, dataset, stats, device, args, samples: int = 64) -> t
     return (total / count).float()
 
 
-def _checkpoint_payload(model, optimizer, epoch, args, stats, model_config) -> dict:
+def _split(args):
+    """返回 (训练年, 验证年或None, 测试年)。
+
+    空间交叉验证下训练与测试都用全部年份；设置了 ``--valid-year`` 时，训练只用
+    该年之前的年份，验证年单独留出，测试年为 ``--test-year``；否则沿用旧的逐年留一。
+    """
+    if getattr(args, "all_years", False):
+        return tuple(adapter.YEARS), None, tuple(adapter.YEARS)
+    valid_year = getattr(args, "valid_year", None)
+    if valid_year is not None:
+        valid_year = int(valid_year)
+        if not (adapter.YEARS[0] < valid_year < args.test_year):
+            raise ValueError(
+                f"valid year {valid_year} must lie strictly between {adapter.YEARS[0]} and test year {args.test_year}")
+        train_years = tuple(y for y in adapter.YEARS if y < valid_year)
+        return train_years, (valid_year,), (int(args.test_year),)
     train_years, test_years = adapter.split_years(args.test_year)
+    return train_years, None, test_years
+
+
+def _years(args):
+    """旧接口：返回 (训练年, 测试年)。"""
+    train_years, _, test_years = _split(args)
+    return train_years, test_years
+
+
+def _checkpoint_payload(model, optimizer, epoch, args, stats, model_config) -> dict:
+    train_years, test_years = _years(args)
     return {
         **ro.checkpoint_metadata(
             model_name=MODEL_NAME,
@@ -274,7 +365,7 @@ def main(args) -> Path:
         raise ValueError("--rs-features has no PVT: it excludes --remote-constant, --rs-aux-weight and --monitor-pvt-every")
     if args.demean_rs and not args.rs_features:
         raise ValueError("--demean-rs requires --rs-features")
-    train_years, test_years = adapter.split_years(args.test_year)
+    train_years, valid_years, test_years = _split(args)
 
     ro.seed_everything(args.seed)
     device = torch.device(args.device)
@@ -298,10 +389,15 @@ def main(args) -> Path:
         weight_decay=args.weight_decay,
         scheduler=f"linear warmup {args.warmup_epochs} epochs + cosine",
         target="log(yield_bu_ac) - county_mean" if args.county_offset else "log(yield_bu_ac)",
-        checkpoint_policy="final epoch only, no validation selection",
+        checkpoint_policy=("best validation epoch, early stopping" if valid_years is not None
+                           else "final epoch only, no validation selection"),
+        valid_years=valid_years,
+        early_stop_patience=args.early_stop_patience if valid_years is not None else None,
         pvt_pretrained_path=str(Path(args.pvt_pretrained_path).expanduser().resolve()),
         pvt_pretrained_sha256=ro.sha256_file(args.pvt_pretrained_path) if args.vit_pretrained else None,
         remote_constant=bool(args.remote_constant),
+        spatial_fold=args.spatial_fold if args.spatial_fold >= 0 else None,
+        test_jsonl=args.test_jsonl or None,
     ))
 
     epoch = -1
@@ -310,9 +406,28 @@ def main(args) -> Path:
         dataset = adapter.build_dataset(
             args.dataset_jsonl, args.data_root, train_years, load_images=rs_store is None,
         )
+        offset_dataset = None
+        if args.offset_jsonl:
+            # 空间折：留出县的县均值偏移与遥感县内中心取自偏移面板。
+            # 前向协议（默认）只用测试年之前的年份；旧的 --all-years 空间折仍用全部年份。
+            offset_years = tuple(adapter.YEARS) if args.all_years else train_years
+            offset_dataset = adapter.build_dataset(
+                args.offset_jsonl, args.data_root, offset_years, load_images=False,
+            )
+        extra_dataset = None
+        if args.norm_mode in ("per-year", "all-years"):
+            if args.all_years:
+                raise ValueError(f"--norm-mode {args.norm_mode} is defined for the single-fold protocol only")
+            # 只用测试年份的特征（不含标签）；遥感缓存不落盘影像，按需读取
+            extra_dataset = adapter.build_dataset(
+                args.dataset_jsonl, args.data_root, test_years, load_images=rs_store is None,
+            )
         stats = adapter.fit_stats(
             dataset, use_constructed=args.use_constructed, rs_store=rs_store, train_years=train_years,
             county_offset=args.county_offset, demean_rs=args.demean_rs,
+            demean_weather=args.demean_weather, offset_dataset=offset_dataset,
+            leave_one_out_offset=bool(args.all_years),
+            norm_mode=args.norm_mode, extra_dataset=extra_dataset,
         )
         loader = adapter.build_loader(
             dataset, stats, args.batch_size, True,
@@ -321,6 +436,20 @@ def main(args) -> Path:
             generator=torch.Generator().manual_seed(args.seed),
             rs_store=rs_store,
         )
+        valid_loader = None
+        if valid_years is not None:
+            valid_dataset = adapter.build_dataset(
+                args.dataset_jsonl, args.data_root, valid_years, load_images=rs_store is None,
+            )
+            if not len(valid_dataset):
+                raise ValueError(f"validation year {valid_years} has no samples")
+            valid_loader = adapter.build_loader(
+                valid_dataset, stats, args.batch_size, False,
+                use_constructed=args.use_constructed,
+                num_workers=args.num_workers,
+                rs_store=rs_store,
+            )
+            ro.update_json(run_dir / "run_metadata.json", valid_samples=len(valid_dataset))
         model_config = {
             "hidden_size": args.hidden_size,
             "num_heads": args.num_heads,
@@ -336,6 +465,8 @@ def main(args) -> Path:
             "rs_aux": args.rs_aux_weight > 0,
             "county_offset": bool(args.county_offset),
             "demean_rs": bool(args.demean_rs),
+            "demean_weather": bool(args.demean_weather),
+            "norm_mode": args.norm_mode,
             "test_year": int(args.test_year),
         }
         if rs_store is not None:
@@ -375,8 +506,27 @@ def main(args) -> Path:
             )
             monitor.probe(-1)
 
+        best_state = None
+        best_epoch = -1
+        best_valid = float("inf")
+        stale = 0
+        stopped_early = False
         for epoch in range(args.epochs):
             row = train_one_epoch(model, loader, optimizer, device, epoch, args, monitor)
+            if valid_loader is not None:
+                valid_loss = evaluate_loss(model, valid_loader, device, args)
+                row["valid_loss"] = valid_loss
+                if valid_loss < best_valid - 1e-9:
+                    best_valid = valid_loss
+                    best_epoch = epoch
+                    stale = 0
+                    best_state = {
+                        key: value.detach().cpu().clone() for key, value in model.state_dict().items()
+                    }
+                else:
+                    stale += 1
+                    if args.early_stop_patience > 0 and stale >= args.early_stop_patience:
+                        stopped_early = True
             ro.append_jsonl(run_dir / "train_metrics.jsonl", {"epoch": epoch, **row})
             if monitor is not None:
                 monitor.probe(epoch)
@@ -391,9 +541,17 @@ def main(args) -> Path:
                     latest_checkpoint=str(latest),
                     latest_checkpoint_sha256=ro.sha256_file(latest),
                 )
+            if stopped_early:
+                print(f"early stop at epoch {epoch}: best valid epoch {best_epoch}, loss {best_valid:.6f}")
+                break
 
         if monitor is not None:
             monitor.close()
+        if best_state is not None and args.checkpoint_policy == "best":
+            model.load_state_dict(best_state)
+            epoch = best_epoch
+        # 诊断用（policy=final）：保留最后一轮参数，不按验证集恢复最优检查点
+        best_state_for_meta = best_state
         final = ro.save_checkpoint(
             run_dir / ro.FINAL_CHECKPOINT,
             _checkpoint_payload(model, optimizer, epoch, args, stats, model_config),
@@ -401,6 +559,10 @@ def main(args) -> Path:
         ro.update_json(
             run_dir / "run_metadata.json",
             epoch=epoch,
+            checkpoint_policy=args.checkpoint_policy,
+            best_valid_loss=None if best_state_for_meta is None else best_valid,
+            best_valid_epoch=None if best_state_for_meta is None else best_epoch,
+            stopped_early=stopped_early,
             final_checkpoint=str(final),
             final_checkpoint_sha256=ro.sha256_file(final),
             trained=ro.now(),
@@ -408,6 +570,7 @@ def main(args) -> Path:
         evaluate_final_checkpoint(
             final, args.dataset_jsonl, args.data_root, run_dir,
             device=args.device, batch_size=args.batch_size, num_workers=args.num_workers,
+            eval_jsonl=args.test_jsonl or None,
         )
     except Exception as error:
         ro.update_json(
