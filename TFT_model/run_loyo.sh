@@ -2,7 +2,6 @@
 # 论文的批量训练入口：配置 × 测试年份 × 种子的笛卡尔积，任务按 GPU 排队并行。
 # 论文只报告 2022 这一折、种子 0 的单次运行（第5.1节），所以默认 YEARS=2022、SEEDS=0：
 #   bash TFT_model/run_loyo.sh                       # PA-TFT + 三个组件消融，2022 折，种子 0
-#   CONFIGS=original SEEDS="42 1 2" bash TFT_model/run_loyo.sh   # 对照配置 PVT-TFT 的三个种子
 #   DRY_RUN=1 bash TFT_model/run_loyo.sh             # 只打印命令
 # 输出根目录务必外置（默认 /data/raid0/hqx/TFT_out），run 子目录名为 ${TAG}-${配置}-y${年份}-s${种子}。
 set -euo pipefail
@@ -13,10 +12,9 @@ OUT="${OUTPUT_ROOT:-/data/raid0/hqx/TFT_out}"
 DATA_ROOT="${DATA_ROOT:-/data/raid0/hqx/DataSrc}"
 RS="${RS_FEATURES:-/data/raid0/hqx/train_dataset/rs_grid_features_31states.npz}"
 RS_ZERO="${RS_ZERO_FEATURES:-/data/raid0/hqx/train_dataset/rs_grid_features_zero_31states.npz}"
-PVT="${PVT_PRETRAINED_PATH:-/data/raid0/hqx/pretrained/pvt_tiny.pth}"
 TAG="${TAG:-loyo31}"
 read -r -a GPUS <<< "${GPU_IDS:-0 1 2 3 4 5 6 7}"
-read -r -a CONFIGS <<< "${CONFIGS:-improved noffset nodemean nors}"
+read -r -a CONFIGS <<< "${CONFIGS:-improved noffset nors}"
 read -r -a YEARS <<< "${YEARS:-2022}"
 read -r -a SEEDS <<< "${SEEDS:-0}"
 VALID_YEAR="${VALID_YEAR:-}"                 # 非空时：只用 < VALID_YEAR 的年份训练，VALID_YEAR 早停选模
@@ -31,24 +29,19 @@ fi
 # 配置名 -> 额外参数。学习率按配置给出：PA-TFT 及其消融用 1e-4（第4.11节），
 # 对照配置 PVT-TFT 沿用 TFT 原文的 1e-3。
 declare -A CFG=(
-  [improved]="--rs-features $RS --county-offset --demean-rs --grad-clip 1.0 --lr 1e-4"
-  [original]="--vit-pretrained --pvt_pretrained_path $PVT --lr 1e-3"
-  # 消融：每次去掉改进模型的一个组件，其余与 improved 相同
-  [noffset]="--rs-features $RS --demean-rs --grad-clip 1.0 --lr 1e-4"
-  [nodemean]="--rs-features $RS --county-offset --grad-clip 1.0 --lr 1e-4"
-  # 消融：气象也做县内去均值（本县逐年逐月历史均值），其余与 improved 相同（第5章）
-  [wdemean]="--rs-features $RS --county-offset --demean-rs --demean-weather --grad-clip 1.0 --lr 1e-4"
+  # 主模型：县均值偏移 + 遥感县内标准化（默认，不做消融）
+  [improved]="--rs-features $RS --county-offset --grad-clip 1.0 --lr 1e-4"
+  # 消融：去掉县均值偏移（水平目标），其余与 improved 相同
+  [noffset]="--rs-features $RS --grad-clip 1.0 --lr 1e-4"
   # 消融：遥感输入全部置零（模型结构不变，遥感分支只剩常数偏置，不含任何影像信息）
-  [nors]="--rs-features $RS_ZERO --county-offset --demean-rs --grad-clip 1.0 --lr 1e-4"
-  # 同目标对照：水平目标 + 只做全局标准化，不加县均值偏移、不做遥感县内去均值。
-  # 与三个基线的目标与输入标准化口径一致，用来单独检验 TFT 架构的贡献（第5.1节）。
-  [level]="--rs-features $RS --grad-clip 1.0 --lr 1e-4"
-  # 标准化口径消融（第3.6节）：其余与 improved 相同
-  #   normnone = 不标准化；normyear = 每年用该年自己的统计量；
-  #   normall  = 训练年与测试年合并估计统计量（测试年只提供无标签特征）
-  [normnone]="--rs-features $RS --county-offset --demean-rs --grad-clip 1.0 --lr 1e-4 --norm-mode none"
-  [normyear]="--rs-features $RS --county-offset --demean-rs --grad-clip 1.0 --lr 1e-4 --norm-mode per-year"
-  [normall]="--rs-features $RS --county-offset --demean-rs --grad-clip 1.0 --lr 1e-4 --norm-mode all-years"
+  [nors]="--rs-features $RS_ZERO --county-offset --grad-clip 1.0 --lr 1e-4"
+  # 同目标对照：水平目标 + 全局标准化，与三个比较模型的输入口径一致（第5.1节）
+  [level]="--rs-features $RS --no-rs-within-norm --grad-clip 1.0 --lr 1e-4"
+  [leveloff]="--rs-features $RS --county-offset --no-rs-within-norm --grad-clip 1.0 --lr 1e-4"
+  # 气象标准化口径消融（第3.6节）
+  [normnone]="--rs-features $RS --county-offset --grad-clip 1.0 --lr 1e-4 --norm-mode none"
+  [normyear]="--rs-features $RS --county-offset --grad-clip 1.0 --lr 1e-4 --norm-mode per-year"
+  [normall]="--rs-features $RS --county-offset --grad-clip 1.0 --lr 1e-4 --norm-mode all-years"
 )
 
 jobs=()

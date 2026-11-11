@@ -87,8 +87,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="predict log-yield as training-year county mean + network output (network learns the anomaly)",
     )
     parser.add_argument(
+        "--rs-within-scope", choices=("month", "index"), default="index",
+        help="县内标准化的分组维度：month=每个县每月每指数一对参数；index=每个县每指数一对参数（跨月合并）",
+    )
+    parser.add_argument(
         "--demean-rs", action="store_true", default=False,
         help="centre numeric RS features on each grid-month's training-year mean before standardising",
+    )
+    parser.add_argument(
+        "--rs-within-norm", action=argparse.BooleanOptionalAction, default=True,
+        help="默认开启：对每个县、每个特征，用该县训练年份（合并网格）的均值与标准差做标准化；"
+             "即 (x - 本县均值) / 本县标准差。--no-rs-within-norm 退回全局标准化；"
+             "--demean-rs 为旧口径（逐网格去中心 + 全局标准差），优先级更高",
     )
     parser.add_argument(
         "--demean-weather", action="store_true", default=False,
@@ -365,6 +375,10 @@ def main(args) -> Path:
         raise ValueError("--rs-features has no PVT: it excludes --remote-constant, --rs-aux-weight and --monitor-pvt-every")
     if args.demean_rs and not args.rs_features:
         raise ValueError("--demean-rs requires --rs-features")
+    if args.rs_within_norm and args.demean_rs and args.rs_features:
+        args.rs_within_norm = False
+    if not args.rs_features:
+        args.rs_within_norm = False
     train_years, valid_years, test_years = _split(args)
 
     ro.seed_everything(args.seed)
@@ -425,7 +439,7 @@ def main(args) -> Path:
         stats = adapter.fit_stats(
             dataset, use_constructed=args.use_constructed, rs_store=rs_store, train_years=train_years,
             county_offset=args.county_offset, demean_rs=args.demean_rs,
-            demean_weather=args.demean_weather, offset_dataset=offset_dataset,
+            rs_within_norm=bool(args.rs_within_norm and args.rs_features), rs_within_scope=args.rs_within_scope, demean_weather=args.demean_weather, offset_dataset=offset_dataset,
             leave_one_out_offset=bool(args.all_years),
             norm_mode=args.norm_mode, extra_dataset=extra_dataset,
         )
@@ -465,6 +479,8 @@ def main(args) -> Path:
             "rs_aux": args.rs_aux_weight > 0,
             "county_offset": bool(args.county_offset),
             "demean_rs": bool(args.demean_rs),
+            "rs_within_norm": bool(args.rs_within_norm and args.rs_features),
+            "rs_within_scope": args.rs_within_scope,
             "demean_weather": bool(args.demean_weather),
             "norm_mode": args.norm_mode,
             "test_year": int(args.test_year),

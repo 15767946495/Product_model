@@ -72,6 +72,10 @@ class TFTStats:
     # 气象特征的县内中心（--demean-weather）：fips -> (6, G, D) 训练年份逐月均值；
     # 每个网格日的动态特征先减去本县该月的历史均值再标准化，与 rs_center 同一口径。
     weather_center: dict | None = None
+    # 县内标准化（默认）：fips -> (2, K)，[0] 为本县该指数在训练年份、全部月份与网格上合并的均值，
+    # [1] 为同一范围的标准差。遥感输入按 (x - 本县均值)/本县标准差 计算，不再使用全局
+    # rs_mean/rs_std；与 rs_center（demean_rs 的逐网格中心）互斥。
+    rs_within: dict | None = None
 
 
 class RSFeatureStore:
@@ -252,7 +256,7 @@ def _accumulate_features(samples, *, dynamic_size: int, use_constructed: bool,
 def fit_stats(dataset: CropNetDataset, *, use_constructed: bool,
               rs_store: RSFeatureStore | None = None, train_years=TRAIN_YEARS,
               county_offset: bool = False, demean_rs: bool = False,
-              demean_weather: bool = False,
+              rs_within_norm: bool = False, rs_within_scope: str = "month", demean_weather: bool = False,
               offset_dataset: CropNetDataset | None = None,
               leave_one_out_offset: bool = True,
               norm_mode: str = "train",
@@ -274,8 +278,10 @@ def fit_stats(dataset: CropNetDataset, *, use_constructed: bool,
     unexpected = sorted(actual_years - set(train_years))
     if unexpected:
         raise ValueError(f"statistics require training years only; found {unexpected}")
-    if demean_rs and rs_store is None:
-        raise ValueError("demean_rs requires numeric remote-sensing features")
+    if (demean_rs or rs_within_norm) and rs_store is None:
+        raise ValueError("demean_rs / rs_within_norm require numeric remote-sensing features")
+    if demean_rs and rs_within_norm:
+        raise ValueError("demean_rs and rs_within_norm are mutually exclusive")
     if norm_mode in ("per-year", "all-years") and extra_dataset is None:
         raise ValueError(f"norm_mode={norm_mode} requires extra_dataset with the test years")
     source = offset_dataset if offset_dataset is not None else dataset
@@ -302,12 +308,32 @@ def fit_stats(dataset: CropNetDataset, *, use_constructed: bool,
                 center[month] = stack[:, :, month_index == month].mean(axis=(0, 2))
             weather_center[fips] = center
     rs_center = None
-    if demean_rs:
+    rs_within = None
+    if demean_rs or rs_within_norm:
         grouped: dict[str, list] = {}
         for sample in source.samples:
             grouped.setdefault(sample["fips"], []).append(
                 rs_store.get(sample["sample_id"], len(sample["grid_ids"])).astype(np.float64))
-        rs_center = {fips: np.mean(np.stack(values), axis=0) for fips, values in grouped.items()}
+        if rs_within_norm:
+            # 县内标准化：
+            #   scope="month"：每个县、每个月、每个指数，在训练年份与网格上合并估计 (6, K)
+            #   scope="index"：每个县、每个指数，在训练年份、全部月份与网格上合并估计 (K,)
+            rs_within = {}
+            for fips, values in grouped.items():
+                stack = np.stack(values)                       # (Y, 6, G, K)
+                if rs_within_scope == "month":
+                    n = stack.shape[0] * stack.shape[2]
+                    mean = stack.sum(axis=(0, 2)) / n
+                    var = (stack * stack).sum(axis=(0, 2)) / n - mean * mean
+                elif rs_within_scope == "index":
+                    n = stack.shape[0] * stack.shape[1] * stack.shape[2]
+                    mean = stack.sum(axis=(0, 1, 2)) / n
+                    var = (stack * stack).sum(axis=(0, 1, 2)) / n - mean * mean
+                else:
+                    raise ValueError(f"unknown rs_within_scope: {rs_within_scope}")
+                rs_within[fips] = np.stack([mean, np.sqrt(np.maximum(var, 1e-12))])
+        else:
+            rs_center = {fips: np.mean(np.stack(values), axis=0) for fips, values in grouped.items()}
     offset = None
     offset_by_sample = None
     if county_offset:
@@ -361,7 +387,8 @@ def fit_stats(dataset: CropNetDataset, *, use_constructed: bool,
         per_year = {year: _accumulate_features(samples, **accumulate) for year, samples in sorted(by_year.items())}
     return TFTStats(stats["dynamic_mean"], stats["dynamic_std"], stats["soil_mean"], stats["soil_std"],
                     stats["rs_mean"], stats["rs_std"], offset, rs_center, offset_by_sample,
-                    norm_mode=norm_mode, per_year=per_year, weather_center=weather_center)
+                    norm_mode=norm_mode, per_year=per_year, weather_center=weather_center,
+                    rs_within=rs_within)
 
 
 def stats_to_json(stats: TFTStats) -> dict:
@@ -380,6 +407,8 @@ def stats_to_json(stats: TFTStats) -> dict:
         payload["rs_center"] = {fips: value.tolist() for fips, value in stats.rs_center.items()}
     if stats.weather_center is not None:
         payload["weather_center"] = {fips: value.tolist() for fips, value in stats.weather_center.items()}
+    if stats.rs_within is not None:
+        payload["rs_within"] = {fips: value.tolist() for fips, value in stats.rs_within.items()}
     if stats.offset_by_sample is not None:
         payload["offset_by_sample"] = dict(stats.offset_by_sample)
     payload["norm_mode"] = stats.norm_mode
@@ -403,6 +432,8 @@ def stats_from_json(payload: dict) -> TFTStats:
                  if "offset_by_sample" in payload else None)
     weather = ({k: np.asarray(v, dtype=np.float64) for k, v in payload["weather_center"].items()}
                if "weather_center" in payload else None)
+    within = ({k: np.asarray(v, dtype=np.float64) for k, v in payload["rs_within"].items()}
+              if "rs_within" in payload else None)
     per_year = None
     if "per_year" in payload:
         per_year = {
@@ -412,7 +443,7 @@ def stats_from_json(payload: dict) -> TFTStats:
         }
     return TFTStats(**tensors, county_offset=offset, rs_center=center, offset_by_sample=by_sample,
                     norm_mode=payload.get("norm_mode", "train"), per_year=per_year,
-                    weather_center=weather)
+                    weather_center=weather, rs_within=within)
 
 
 def _standardize(value: torch.Tensor, mean: torch.Tensor, std: torch.Tensor) -> torch.Tensor:
@@ -474,7 +505,7 @@ def _tft_collate(items, stats: TFTStats, use_constructed: bool,
         ag_grid_mask = raw["image_mask"]
         ag_images = raw["images"]
     else:
-        if stats.rs_mean is None:
+        if stats.rs_mean is None and stats.rs_within is None:
             raise ValueError("stats lack remote-sensing statistics; fit_stats needs the feature store")
         ag_images = None
         rs_features = torch.zeros((batch_size, 6, max_grids, len(rs_store.names)))
@@ -482,12 +513,22 @@ def _tft_collate(items, stats: TFTStats, use_constructed: bool,
             values = rs_store.get(item["sample_id"], len(item["grid_ids"])).astype(np.float64)
             if stats.rs_center is not None:
                 values = values - _lookup(stats.rs_center, item["fips"], "remote-sensing centre")
+            if stats.rs_within is not None:
+                mean, sd = _lookup(stats.rs_within, item["fips"], "remote-sensing within-county stats")
+                if mean.ndim == 1:                     # (K,)：县内逐指数口径
+                    mean, sd = mean[None, None, :], sd[None, None, :]
+                else:                                  # (6, K)：县内逐月逐指数口径
+                    mean, sd = mean[:, None, :], sd[:, None, :]
+                values = (values - mean) / sd
             values = torch.from_numpy(values).float()
-            if stats.per_year is None:
+            if stats.rs_within is not None:
+                rs_mean, rs_std = None, None
+            elif stats.per_year is None:
                 rs_mean, rs_std = stats.rs_mean, stats.rs_std
             else:
                 rs_mean, rs_std = stats.per_year[int(item["year"])]["rs_mean"], stats.per_year[int(item["year"])]["rs_std"]
-            rs_features[index, :, :values.shape[1]] = _standardize(values, rs_mean, rs_std)
+            rs_features[index, :, :values.shape[1]] = (
+                values if stats.rs_within is not None else _standardize(values, rs_mean, rs_std))
         ag_grid_mask = raw["grid_mask"][:, None, :].expand(batch_size, 6, max_grids).clone()
         rs_features = rs_features * ag_grid_mask.unsqueeze(-1)
     offset = None

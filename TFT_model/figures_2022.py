@@ -1,10 +1,10 @@
-"""第5章图：2022 折（2017—2020 训练、固定轮数、2022 测试）。
+"""第5章图：2022 折（2017—2021 训练、固定轮数、2022 测试）。
 
 图5-1  2022年观测—预测散点（PA-TFT 与仅县固定效应）
 图5-2  分州RMSE哑铃图（PA-TFT 对仅县固定效应，按差值排序）
-图5-3  面板设计交叉与组件消融的RMSE
+图5-3  组件消融的RMSE
 
-预测来自 `/data/raid0/hqx/TFT_out/tft/diag2020-improved-y2022-s0`（环境变量
+预测来自 `/data/raid0/hqx/TFT_out/tft/loyo31-improved-y2022-s0`（环境变量
 `LOYO_RUN`、`LOYO_FEATURES` 可覆盖）；仅县固定效应与图5-3 的数值口径与
 `paper_report_tft.py`、`single_fold_report.py` 一致，分别读取特征文件的训练年份县均值
 与 `paper_figures/single_fold_2022.json`。
@@ -28,9 +28,9 @@ from TFT_model.attention_analysis import _configure_chinese_font  # noqa: E402
 from TFT_model.paper_report import STATE_NAMES, metrics  # noqa: E402
 
 OUT = ROOT / "paper_figures"
-RUN = Path(os.environ.get("LOYO_RUN", "/data/raid0/hqx/TFT_out/tft/diag2020-improved-y2022-s0"))
+RUN = Path(os.environ.get("LOYO_RUN", "/data/raid0/hqx/TFT_out/tft/loyo31-improved-y2022-s0"))
 FEATURES = os.environ.get("LOYO_FEATURES", "/data/raid0/hqx/train_dataset/rs_signal_features_31states.npz")
-TRAIN_LAST_YEAR = 2020
+TRAIN_LAST_YEAR = 2021
 
 # 分类色板（dataviz 校验通过：蓝 #2a78d6 / 橙 #eb6834）
 BLUE, ORANGE = "#2a78d6", "#eb6834"
@@ -105,13 +105,13 @@ def fig_state_dumbbell(plt, fips, pred, truth, fe):
     ax.set_yticks(ys)
     ax.set_yticklabels([f"{r['name']}（{r['n']}）" for r in reversed(rows)], fontsize=8.5, color=INK)
     ax.set_xlabel("2022年分州RMSE（bu/ac）", fontsize=10, color=INK)
-    ax.set_xlim(0, 45)
+    ax.set_xlim(0, 55)
     style(ax)
     for side in ("left",):
         ax.spines[side].set_visible(False)
     ax.tick_params(axis="y", length=0)
     ax.grid(False, axis="y")
-    ax.legend(fontsize=9, frameon=False, loc="lower right")
+    ax.legend(fontsize=9, frameon=False, loc="upper right")
     gains = [r["fe"] - r["tft"] for r in rows]
     better = int(sum(g > 0 for g in gains))
     median_gain = float(np.median([g for g in gains if g > 0]))
@@ -121,15 +121,12 @@ def fig_state_dumbbell(plt, fips, pred, truth, fe):
     return rows
 
 
-def fig_ablation(plt, fe_rmse):
+def fig_ablation(plt, fe_rmse, main_rmse):
     report = json.loads((OUT / "single_fold_2022.json").read_text(encoding="utf-8"))
     cfgs = report["configs"]
     order = [
         ("improved", "完整PA-TFT"),
-        ("wdemean", "气象也做县内去均值"),
         ("nors", "去掉遥感输入"),
-        ("nodemean", "去掉植被指数县内去均值"),
-        ("level", "水平目标（两项设计均不加）"),
         ("noffset", "去掉县均值偏移"),
     ]
     rows = [(label, cfgs[key]["rmse"]) for key, label in order]
@@ -173,7 +170,7 @@ def main():
     scores = fig_scatter(plt, fips, pred, truth, fe)
     states = fig_state_dumbbell(plt, fips, pred, truth, fe)
     fe_rmse = float(np.sqrt(((fe - truth) ** 2).mean()))
-    ablation = fig_ablation(plt, fe_rmse)
+    ablation = fig_ablation(plt, fe_rmse, scores["（a）PA-TFT"]["rmse"])
 
     for name, m in scores.items():
         print(f"{name}: RMSE {m['rmse']:.2f} MAE {m['mae']:.2f} R2 {m['r2']:.3f} r {m['corr']:.3f}")
@@ -181,7 +178,7 @@ def main():
     print(f"states: {int(sum(g > 0 for g in gains))}/{len(gains)} better, "
           f"median gain {np.median([g for g in gains if g > 0]):.2f}")
     for label, v in ablation:
-        print(f"{label}: {v:.2f} (+{v - 17.73:.2f})")
+        print(f"{label}: {v:.2f} ({v - scores['（a）PA-TFT']['rmse']:+.2f})")
     print("wrote fig5_1_scatter.png, fig5_2_state_rmse.png, fig5_3_ablation.png")
 
 

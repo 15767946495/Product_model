@@ -28,18 +28,16 @@ F = ROOT / "paper_figures"
 RUNS = Path(os.environ.get("LOYO_RUNS", "/data/raid0/hqx/TFT_out/tft"))
 FEATURES = "/data/raid0/hqx/train_dataset/rs_signal_features_31states.npz"
 # 种子列表可用环境变量 LOYO_SEEDS 覆盖（例如单种子复核时 LOYO_SEEDS=0）
-SEEDS = tuple(int(s) for s in os.environ.get("LOYO_SEEDS", "42 1 2").split())
-# PVT-TFT 与其它模型一样只跑种子 0（单次运行，不按测试结果挑种子）
-BASE_SEEDS = (0,)
-TAG = os.environ.get("LOYO_TAG", "diag2020")
-# 统一协议：训练 2017--2020，各方法固定轮数（不使用验证集），2022 测试。县均值基准与固定效应用训练年份。
-TRAIN_LAST_YEAR = 2020
+SEEDS = tuple(int(s) for s in os.environ.get("LOYO_SEEDS", "0").split())
+TAG = os.environ.get("LOYO_TAG", "loyo31")
+# 统一协议：训练 2017--2021，各方法固定 20 轮（不使用验证集），2022 测试。县均值基准与固定效应用训练年份。
+TRAIN_LAST_YEAR = 2021
 
 # 比较模型的 2022 折运行目录（新面板重跑后填写；不存在的自动跳过）
 BASELINES = {
-    "UNet-ConvLSTM": Path("/data/raid0/hqx/baselines/unet_convlstm/p2020-unet-final"),
-    "GNN-RNN": Path("/data/raid0/hqx/baselines/gnn_rnn/p2020-gnn-final"),
-    "PhenoYieldNet": Path("/data/raid0/hqx/baselines/phenoyieldnet/p2020-pheno-final"),
+    "UNet-ConvLSTM": Path("/data/raid0/hqx/baselines/unet_convlstm/loyo31-unet-e20"),
+    "GNN-RNN": Path("/data/raid0/hqx/baselines/gnn_rnn/loyo31-gnn-vi-e20"),
+    "PhenoYieldNet": Path("/data/raid0/hqx/baselines/phenoyieldnet/loyo31-pheno-e20"),
 }
 
 
@@ -98,20 +96,6 @@ def main():
             f, p, t = load(path)
             assert (f == fips).all() and np.allclose(t, truth), name
             others[name] = p
-    # PVT-TFT：同一骨干 + 端到端图像编码器、无面板适配的配置；只报一行（三个种子的平均）
-    base = ensemble_runs(f"{TAG}-original-y2022-s{{s}}", BASE_SEEDS)
-    orig_2022 = None
-    if base is not None:
-        _, _, base_preds = base
-        others["PVT-TFT"] = np.mean(base_preds, axis=0)
-        orig_2022 = {"single_runs": {
-            f"original-s{seed}": {**metrics(truth, p), "anom_corr": anomaly_corr(p, truth, base_log, fips),
-                                  "pred_sd": float(p.std())}
-            for seed, p in zip(BASE_SEEDS[:len(base_preds)], base_preds)},
-            "single_rmse_mean": float(np.mean([metrics(truth, p)["rmse"] for p in base_preds])),
-            "single_rmse_sd": float(np.std([metrics(truth, p)["rmse"] for p in base_preds], ddof=1)) if len(base_preds) > 1 else None,
-            "ensemble": {**metrics(truth, np.mean(base_preds, axis=0)),
-                         "anom_corr": anomaly_corr(np.mean(base_preds, axis=0), truth, base_log, fips)}}
     # 仅县固定效应：PA-TFT 在 g≡0 时的特例
     others["仅县固定效应"] = np.exp(base_log)
     # 岭回归面板模型不进模型比较：它只在第5.8节的置换检验中作为估计器（全样本、按年份CV）
@@ -126,13 +110,13 @@ def main():
                       "diff_state_ci": [lo, hi], "share_neg_state": share,
                       "diff_county_ci": [lo_c, hi_c], "share_neg_county": share_c}
 
-    out = {"main_2022": main_2022, "compare_2022": rows, "original_2022": orig_2022,
+    out = {"main_2022": main_2022, "compare_2022": rows,
            "state_rmse_2022": {
                STATE_NAMES[s]: {"n": int((states == s).sum()),
                                 "tft": float(np.sqrt(((ens - truth)[states == s] ** 2).mean())),
                                 "fe": float(np.sqrt(((np.exp(base_log) - truth)[states == s] ** 2).mean()))}
                for s in np.unique(states)},
-           "runs": {"improved": f"{TAG}-improved", "original": f"{TAG}-original"}}
+           "runs": {"improved": f"{TAG}-improved"}}
     (F / "tft_main.json").write_text(json.dumps(out, ensure_ascii=False, indent=1), encoding="utf-8")
 
     m = main_2022

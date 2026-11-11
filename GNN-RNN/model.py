@@ -1,7 +1,8 @@
 """GNN-RNN（gomes-lab/GNN-RNN 的 SAGE_RNN 结构，纯 PyTorch 实现，不依赖 DGL）。
 
 数据流（规范 10.4）：
-    每年县级天气 (N,168,11) -> 单年 1D CNN；县级土壤 (N,7) -> 线性编码
+    每年县级天气 (N,168,11) -> 单年 1D CNN；县级土壤 (N,7) -> 线性编码；
+    可选：县—月植被指数 (N,60) -> 线性编码并拼入（输入对等配置，见 use_vi）
     -> 县年环境表示 -> 同年县图 GraphSAGE（n_layers 层）-> 县年空间表示
     五个年度空间表示 -> LSTM -> 回归头 -> 末年单产（标准化尺度）
 上游每层 SAGEConv 后都做 ReLU + dropout（含最后一层），此处保持一致；上游 forward 中的
@@ -73,26 +74,40 @@ class SAGEConv(nn.Module):
 
 class GNNRNN(nn.Module):
     def __init__(self, *, aggregator: str = "mean", n_layers: int = 4, z_dim: int = 64, dropout: float = 0.0,
-                 num_weather_vars: int = 11, num_soil_vars: int = 7):
+                 num_weather_vars: int = 11, num_soil_vars: int = 7,
+                 use_vi: bool = False, num_vi_vars: int = 60):
         super().__init__()
         if n_layers < 1:
             raise ValueError("n_layers must be >= 1")
         self.encoder = WeatherSoilEncoder(num_weather_vars, num_soil_vars)
-        dims = [self.encoder.out_dim] + [z_dim] * n_layers
+        # 输入对等配置：GNN-RNN 本身不消费影像，把与 PA-TFT 相同的县—月植被指数
+        # （6 个月 × 10 个指数）经一层线性编码后拼入县年环境表示，使三个基线中唯一
+        # 不使用遥感输入的模型也能获得同一来源的遥感信息。
+        self.use_vi = use_vi
+        if use_vi:
+            self.vi_fc = nn.Sequential(nn.Linear(num_vi_vars, 40), nn.ReLU())
+        in_dim = self.encoder.out_dim + (40 if use_vi else 0)
+        dims = [in_dim] + [z_dim] * n_layers
         self.layers = nn.ModuleList(SAGEConv(dims[i], dims[i + 1], aggregator) for i in range(n_layers))
         self.dropout = nn.Dropout(dropout)
         self.lstm = nn.LSTM(input_size=z_dim, hidden_size=z_dim, num_layers=1, batch_first=True)
         self.regressor = nn.Sequential(nn.Linear(z_dim, z_dim // 2), nn.ReLU(), nn.Linear(z_dim // 2, 1))
 
-    def forward(self, weather: torch.Tensor, soil: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
-        """weather (N,Y,T,F) 已标准化、soil (N,S)、edge_index (2,E) -> 每年预测 (N,Y)（标准化尺度）。
+    def forward(self, weather: torch.Tensor, soil: torch.Tensor, edge_index: torch.Tensor,
+                vi: torch.Tensor | None = None) -> torch.Tensor:
+        """weather (N,Y,T,F) 已标准化、soil (N,S)、edge_index (2,E)、vi (N,Y,60) 可选
+        -> 每年预测 (N,Y)（标准化尺度）。
 
         图在全部 N 个县上运行（固定县集合很小），不做邻居采样。
         """
         n, years = weather.shape[:2]
+        if self.use_vi and vi is None:
+            raise ValueError("model was built with use_vi=True but vi input is missing")
         hs = []
         for y in range(years):
             h = self.encoder(weather[:, y], soil)
+            if self.use_vi:
+                h = torch.cat([h, self.vi_fc(vi[:, y])], dim=1)
             for layer in self.layers:
                 h = self.dropout(F.relu(layer(h, edge_index)))
             hs.append(h)

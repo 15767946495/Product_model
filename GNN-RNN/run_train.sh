@@ -18,6 +18,7 @@ GPU_ID="${GPU_ID:-2}"
 VALID_YEAR="${VALID_YEAR:-}"                 # 非空时：训练窗口止于 VALID_YEAR-1，VALID_YEAR 早停选模
 EARLY_STOP_PATIENCE="${EARLY_STOP_PATIENCE:-10}"
 CHECKPOINT_POLICY="${CHECKPOINT_POLICY:-best}"   # best: 2021 早停选模；final: 固定轮数取最后一轮
+RS_FEATURES="${RS_FEATURES:-}"   # 非空时启用 GNN-RNN+VI 输入对等配置
 export CUDA_VISIBLE_DEVICES="$GPU_ID"
 
 for name in EPOCHS NUM_WORKERS; do
@@ -58,6 +59,7 @@ train=("$PYTHON" "$MODEL_DIR/train.py" --dataset-jsonl "$DATASET_JSONL" --data-r
   --output_root "$OUTPUT_ROOT" --run_id "$RUN_ID" --device cuda:0 --epochs "$EPOCHS"
   --num_workers "$NUM_WORKERS" --aggregator "$AGGREGATOR")
 if [[ -n "${BATCH_SIZE:-}" ]]; then train+=(--batch_size "$BATCH_SIZE"); fi
+if [[ -n "$RS_FEATURES" ]]; then train+=(--rs-features "$RS_FEATURES"); fi
 if [[ -n "$VALID_YEAR" ]]; then
   train+=(--valid-year "$VALID_YEAR" --early-stop-patience "$EARLY_STOP_PATIENCE" --checkpoint-policy "$CHECKPOINT_POLICY")
 fi

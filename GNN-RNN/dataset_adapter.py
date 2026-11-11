@@ -11,6 +11,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import numpy as np
 import torch
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -37,8 +38,33 @@ def protocol_windows(valid_year: int, test_year: int, length: int = 4) -> dict:
     }
 
 
-def load_windows(jsonl_path, data_root=DATA_ROOT, windows=None) -> dict:
-    """返回 {split: batch}；各窗口县集合、节点顺序、边已校验一致且只来自 Census 接壤。"""
+def load_vi_table(path) -> dict:
+    """(fips, year) -> 60 维县—月植被指数（6 个月 × 10 个指数，顺序同 TFT 特征）。"""
+    data = np.load(path)
+    veg = data["veg"].reshape(len(data["fips"]), -1).astype(np.float32)
+    return {(str(f), int(y)): torch.from_numpy(veg[i].copy())
+            for i, (f, y) in enumerate(zip(data["fips"], data["year"]))}
+
+
+def attach_vi(batches: dict, table: dict) -> None:
+    """把县—月植被指数挂到每个 split 的 batch 上，形状 (N,Y,60)，节点顺序同 batch["fips"]。"""
+    for split, batch in batches.items():
+        years = batch["years"].tolist()
+        rows = []
+        for fips in batch["fips"]:
+            missing = [(fips, y) for y in years if (fips, y) not in table]
+            if missing:
+                raise ValueError(f"vegetation indices missing for {missing[:3]} (+{len(missing) - 3})")
+            rows.append(torch.stack([table[(fips, y)] for y in years]))
+        batch["vi"] = torch.stack(rows)
+
+
+def load_windows(jsonl_path, data_root=DATA_ROOT, windows=None, rs_features=None) -> dict:
+    """返回 {split: batch}；各窗口县集合、节点顺序、边已校验一致且只来自 Census 接壤。
+
+    给出 ``rs_features``（rs_signal_features_31states.npz）时额外附带县—月植被指数，
+    用于与 PA-TFT 输入对等的 GNN-RNN 配置。
+    """
     windows = GNN_WINDOWS if windows is None else windows
     years = sorted({y for ys in windows.values() for y in ys})
     dataset = CropNetDataset(Path(jsonl_path), tuple(years), load_images=False, data_root=Path(data_root))
@@ -58,6 +84,8 @@ def load_windows(jsonl_path, data_root=DATA_ROOT, windows=None) -> dict:
     # 输出顺序与统一 Dataset 中目标年份样本顺序一致（按 fips 排序）
     for split, batch in batches.items():
         batch["target_sample_ids"] = [ids[-1] for ids in batch["sample_id"]]
+    if rs_features:
+        attach_vi(batches, load_vi_table(rs_features))
     return batches
 
 
@@ -68,20 +96,28 @@ def fit_stats(train: dict, mask=None) -> dict:
     targets = train["targets"]  # (N,) 2021
     if mask is not None:
         weather, soil, targets = weather[mask], soil[mask], targets[mask]
-    return {
+    stats = {
         "weather_mean": weather.mean(dim=(0, 1, 2)), "weather_std": weather.std(dim=(0, 1, 2)).clamp_min(EPS),
         "soil_mean": soil.mean(dim=0), "soil_std": soil.std(dim=0).clamp_min(EPS),
         "y_mean": targets.mean(), "y_std": targets.std().clamp_min(EPS),
     }
+    if "vi" in train:
+        vi = train["vi"] if mask is None else train["vi"][mask]
+        stats["vi_mean"] = vi.mean(dim=(0, 1))
+        stats["vi_std"] = vi.std(dim=(0, 1)).clamp_min(EPS)
+    return stats
 
 
 def model_inputs(batch: dict, stats: dict) -> dict:
     """标准化后的模型输入；不含任何标签。"""
-    return {
+    inputs = {
         "weather": (batch["weather"] - stats["weather_mean"]) / stats["weather_std"],
         "soil": (batch["soil"] - stats["soil_mean"]) / stats["soil_std"],
         "edge_index": batch["edge_index"],
     }
+    if "vi" in batch:
+        inputs["vi"] = (batch["vi"] - stats["vi_mean"]) / stats["vi_std"]
+    return inputs
 
 
 def stats_to_json(stats: dict) -> dict:

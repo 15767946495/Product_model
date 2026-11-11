@@ -16,14 +16,13 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 RUNS = Path("/data/raid0/hqx/TFT_out/tft")
 OUT = ROOT / "paper_figures"
-TAG = __import__("os").environ.get("LOYO_TAG", "diag2020-")
+TAG = __import__("os").environ.get("LOYO_TAG", "loyo31-")
 YEAR = 2022
-TRAIN_LAST_YEAR = 2020
+TRAIN_LAST_YEAR = 2021
 # 种子列表可用 LOYO_SEEDS 覆盖（单种子复核时 LOYO_SEEDS=0）
-SEEDS = tuple(int(s) for s in __import__("os").environ.get("LOYO_SEEDS", "42 1 2").split())
+SEEDS = tuple(int(s) for s in __import__("os").environ.get("LOYO_SEEDS", "0").split())
 CONFIGS = {"improved": "完整PA-TFT", "level": "PA-TFT（水平目标）",
-           "noffset": "去掉县均值偏移", "nodemean": "去掉植被指数县内去均值",
-           "nors": "去掉遥感输入", "wdemean": "气象也做县内去均值"}
+           "noffset": "去掉县均值偏移", "nors": "去掉遥感输入"}
 
 
 def load_labels():

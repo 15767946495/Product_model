@@ -52,6 +52,9 @@ def build_parser():
                         help="spatial CV: folds.json from train_dataset/make_spatial_folds.py")
     parser.add_argument("--county-fold", type=int, default=-1,
                         help="spatial CV: held-out fold index; loss and standardisation use the other counties")
+    parser.add_argument("--rs-features", default="",
+                        help="county-month vegetation-index npz (rs_signal_features_31states.npz); "
+                             "enables the GNN-RNN+VI input-parity configuration")
     parser.add_argument("--valid-year", type=int, default=None,
                         help="hold-out validation year for early stopping (e.g. 2021); training window then ends before it")
     parser.add_argument("--early-stop-patience", type=int, default=10,
@@ -74,7 +77,8 @@ def logcosh(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
 
 
 def build_model(model_config: dict) -> GNNRNN:
-    return GNNRNN(**{k: model_config[k] for k in MODEL_KEYS})
+    return GNNRNN(**{k: model_config[k] for k in MODEL_KEYS},
+                  use_vi=bool(model_config.get("use_vi", False)))
 
 
 def train_one_epoch(model, inputs, y_std_target, optimizer, scheduler, epoch, args, generator,
@@ -88,7 +92,7 @@ def train_one_epoch(model, inputs, y_std_target, optimizer, scheduler, epoch, ar
     for step in range(steps):
         idx = order[step * args.batch_size:(step + 1) * args.batch_size].to(y_std_target.device)
         # 全图前向；损失只作用于本步目标县的最后一年（上游 c1=0, c2=1）
-        pred = model(inputs["weather"], inputs["soil"], inputs["edge_index"])[:, -1]
+        pred = model(**inputs)[:, -1]
         loss = logcosh(pred[idx], y_std_target[idx])
         if not torch.isfinite(loss):
             raise FloatingPointError(f"epoch {epoch} step {step}: loss is {loss.item()}")
@@ -111,7 +115,7 @@ def evaluate_loss(model, batch, stats, device) -> float:
     was_training = model.training
     model.eval()
     inputs = {k: v.to(device) for k, v in model_inputs(batch, stats).items()}
-    pred = model(inputs["weather"], inputs["soil"], inputs["edge_index"])[:, -1]
+    pred = model(**inputs)[:, -1]
     loss = torch.nn.functional.mse_loss(pred, std_target(batch, stats, device)).item()
     model.train(was_training)
     return loss
@@ -122,7 +126,7 @@ def predict(model, batch, stats, device) -> torch.Tensor:
     """返回末年预测（bu/ac），按窗口节点（fips）顺序。"""
     model.eval()
     inputs = {k: v.to(device) for k, v in model_inputs(batch, stats).items()}
-    pred_std = model(inputs["weather"], inputs["soil"], inputs["edge_index"])[:, -1].cpu()
+    pred_std = model(**inputs)[:, -1].cpu()
     return pred_std * stats["y_std"] + stats["y_mean"]
 
 
@@ -157,7 +161,9 @@ def evaluate_final_checkpoint(checkpoint_path, dataset_jsonl, data_root, output_
     model = build_model(checkpoint["model_config"]).to(device)
     model.load_state_dict(checkpoint["model"])
     stats = stats_from_json(checkpoint["stats"])
-    test = (windows or load_windows(dataset_jsonl, data_root, windows=window_spec))["test"]
+    rs_features = run_config.get("rs_features") or None
+    test = (windows or load_windows(dataset_jsonl, data_root, windows=window_spec,
+                                    rs_features=rs_features))["test"]
     if test["years"].tolist() != list(test_years):
         raise ValueError(f"test window years {test['years'].tolist()} != {list(test_years)}")
     target_test_year = int(test_years[-1])
@@ -182,7 +188,8 @@ def main(args) -> Path:
     args.run_id = run_dir.name
     ro.write_json(run_dir / "config.json", vars(args))
 
-    windows = load_windows(args.dataset_jsonl, args.data_root, windows=_run_windows(vars(args)))
+    windows = load_windows(args.dataset_jsonl, args.data_root, windows=_run_windows(vars(args)),
+                           rs_features=args.rs_features or None)
     train = windows["train"]
     valid = windows.get("valid")
     target_train_year = int(train["years"][-1])
@@ -199,6 +206,7 @@ def main(args) -> Path:
     y_std_target = std_target(train, stats, device)
 
     model_config = {k: getattr(args, k) for k in MODEL_KEYS}
+    model_config["use_vi"] = bool(args.rs_features)
     checkpoint_metadata = ro.checkpoint_metadata(
         model_name=cfg.MODEL_NAME,
         adaptation=cfg.ADAPTATION,
@@ -215,7 +223,9 @@ def main(args) -> Path:
         model=cfg.MODEL_NAME, adaptation=cfg.ADAPTATION, run_id=args.run_id, dataset_jsonl=args.dataset_jsonl,
         seed=args.seed, train_years=windows["train"]["years"].tolist(),
         test_years=windows["test"]["years"].tolist(), counties=len(train["fips"]),
-        inputs=cfg.INPUTS, target_train_year=target_train_year, target_test_year=target_test_year,
+        inputs=cfg.INPUTS + (("vegetation_indices",) if args.rs_features else ()),
+        rs_features=args.rs_features or None,
+        target_train_year=target_train_year, target_test_year=target_test_year,
         epochs=args.epochs, optimizer="Adam", lr=args.lr, weight_decay=args.weight_decay,
         scheduler=f"CosineAnnealingWarmRestarts(T0={args.T0}, T_mult={args.T_mult}, eta_min={args.eta_min})",
         aggregator=args.aggregator, main_aggregator=cfg.MAIN_AGGREGATOR,
