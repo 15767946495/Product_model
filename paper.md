@@ -1,18 +1,18 @@
-# 面向小样本县级面板的面板感知时间融合变换器及美国玉米产区单产预测研究
+# 面向小样本县级面板的面板感知融合网络及美国玉米产区单产预测研究
 
 ## 摘要
 
 县级作物单产预测是农业风险管理、粮食供需研判和农业保险定价的重要基础。玉米单产同时受到土壤等静态条件、逐日气象和冠层状态的影响，这些因素具有时间累积性和县内空间异质性。本文以CropNet多模态数据为基础[1]，研究美国29个州741个县2017—2022年的平衡面板（4446个县年观测），协变量包括约9 km × 9 km网格上的逐日气象、4—9月六期Sentinel-2 RGB影像和七维县级土壤属性。
 
-县级单产预测这一任务本身有三个难点。一是样本量小、县际差异占主导：741个县只有2017—2022六年的标签，其中可用于有标签训练（2017—2021）的有3705个县年，县际稳定差异占据了对数单产方差的大部分，可用于学习的年际变化很有限。二是多源输入需要融合：逐日网格气象、月度卫星影像和静态土壤要进入同一个模型，而高容量的图像编码器在如此少的年度标签上难以端到端训练。三是小样本优化需要与样本规模相称的设置：在如此少的年度标签上，按大规模数据的惯例配置学习率与轮数并不自动收敛到有用的解。现有的深度单产模型各有侧重，但没有一个针对上述三点设计：CNN-RNN与GNN-RNN一类方法先把县内网格平均为县级序列，UNet-ConvLSTM对网格等权汇总，PhenoYieldNet依赖大规模预训练与物候对齐，而且大多只报告单次运行的结果。时间融合变换器（Temporal Fusion Transformer，TFT）以静态协变量编码、变量选择网络、长短期记忆网络（Long Short-Term Memory，LSTM）和可解释注意力为核心组件，能同时处理静态与动态协变量、在较多候选变量中自适应选择并刻画生长季内的时间依赖，因而是适合这一任务的基础框架。但把TFT按常规做法直接适配到网格级多模态数据上，并不能自动满足这三点要求。
+县级单产预测这一任务本身有三个难点。一是样本量小、县际差异占主导：741个县只有2017—2022六年的标签，其中可用于有标签训练（2017—2021）的有3705个县年，县际稳定差异占据了对数单产方差的大部分，可用于学习的年际变化很有限。二是多源输入需要融合：逐日网格气象、月度卫星影像和静态土壤要进入同一个模型，而高容量的图像编码器在如此少的年度标签上难以端到端训练。三是小样本优化需要与样本规模相称的设置：在如此少的年度标签上，按大规模数据的惯例配置学习率与轮数并不自动收敛到有用的解。现有的深度单产模型各有侧重，但没有一个针对上述三点设计：CNN-RNN与GNN-RNN一类方法先把县内网格平均为县级序列，UNet-ConvLSTM对网格等权汇总，PhenoYieldNet依赖大规模预训练与物候对齐，而且大多只报告单次运行的结果。时间融合变换器（Temporal Fusion Transformer，TFT）以静态协变量编码、变量选择网络、门控残差网络和可解释的时间注意力为核心组件，能同时处理静态与动态协变量、在较多候选变量中自适应选择并刻画生长季内的时间依赖，这些正是本文所需的构件。但TFT面向单条多变量序列的多步预测，把这几个构件直接套用到网格级多模态面板数据上，并不能自动满足这三点要求。
 
-针对这三个难点，本文提出面板感知时间融合变换器（Panel-Aware Temporal Fusion Transformer，PA-TFT）。第一，针对县际差异主导方差，模型直接预测县级对数单产的水平，不把县历史均值作为偏移量；气象、土壤与遥感输入都按训练年份的全局统计量标准化，保留县际水平差异，使网络能够从静态与动态输入中同时估计县的产量水平与年际变化。第二，针对图像编码器在少量年度标签上不可训练，以由RGB影像逐像素计算、并作全局标准化的可见光植被指数作为遥感输入，使遥感信息以低维、可训练的形式进入模型，同时保留县际与年际的绿度差异。第三，针对小样本优化容易失效，依据训练集准则事先确定较小的学习率，并配合梯度裁剪、权重衰减与固定轮数，使训练在同一协议下可复现。
+针对这三个难点，本文提出面板感知融合网络（Panel-Aware Fusion Network，PAF-Net）。模型取用时间融合变换器的静态协变量编码、变量选择网络、门控残差与因果时间注意力，在此基础上补充三处面板专用设计：变量选择作用于县内每个网格的每一天，县内空间注意力把网格表示汇总为县序列，日气象按月聚合以与月度遥感同频。第一，针对县际差异主导方差，模型直接预测县级对数单产的水平，不把县历史均值作为偏移量；气象、土壤与遥感输入都按训练年份的全局统计量标准化，保留县际水平差异，使网络能够从静态与动态输入中同时估计县的产量水平与年际变化。第二，针对图像编码器在少量年度标签上不可训练，以由RGB影像逐像素计算、并作全局标准化的可见光植被指数作为遥感输入，使遥感信息以低维、可训练的形式进入模型，同时保留县际与年际的绿度差异。第三，针对小样本优化容易失效，依据训练集准则事先确定较小的学习率，并配合梯度裁剪、权重衰减与固定轮数，使训练在同一协议下可复现。
 
-本文以2017—2021年训练、2022年测试的单折时间外推评价PA-TFT。各比较模型按各自方法的预算固定训练轮数并保留最后一轮，不使用验证集选模，也不依据2022年指标选择轮次。在这一协议下，PA-TFT的均方根误差（Root Mean Square Error，RMSE）为21.22 bu/ac，平均绝对误差（Mean Absolute Error，MAE）为15.78 bu/ac，$R^2$为0.739，州内异常相关为0.299，比UNet-ConvLSTM（32.52）、GNN-RNN（29.25）和PhenoYieldNet（34.64）分别低34.8%、27.5%和38.7%。组件消融显示，删除遥感支路使误差上升3.59 bu/ac，删除土壤静态支路使误差上升4.65 bu/ac。测试时在县之间置换植被指数使误差上升7.44 bu/ac，全部置零则使误差上升15.31 bu/ac，说明模型确实使用了遥感的县年信息。在县分组五折交叉验证中，留出县2017—2022年的全部县年都不参与训练，PA-TFT在4446个县年上的RMSE为19.81 bu/ac，低于同一划分上重新训练的UNet-ConvLSTM（22.10）、GNN-RNN（27.76）与PhenoYieldNet（22.43）；由于训练集包含测试年份其他县的标签，这一结果评价的是同州内未见县的插值式外推，不能与时间外推的21.22直接比较。
+本文以2017—2021年训练、2022年测试的单折时间外推评价PAF-Net。各比较模型按各自方法的预算固定训练轮数并保留最后一轮，不使用验证集选模，也不依据2022年指标选择轮次。在这一协议下，PAF-Net的均方根误差（Root Mean Square Error，RMSE）为21.22 bu/ac，平均绝对误差（Mean Absolute Error，MAE）为15.78 bu/ac，$R^2$为0.739，州内异常相关为0.299，比UNet-ConvLSTM（32.52）、GNN-RNN（29.25）和PhenoYieldNet（34.64）分别低34.8%、27.5%和38.7%。组件消融显示，把县内空间注意力换成等权均值使误差上升1.79 bu/ac，而把变量选择移到县—月级与主模型相当（−0.44 bu/ac）；输入消融显示，删除遥感支路使误差上升3.59 bu/ac，删除土壤静态支路使误差上升4.65 bu/ac。测试时在县之间置换植被指数使误差上升7.44 bu/ac，全部置零则使误差上升15.31 bu/ac，说明模型确实使用了遥感的县年信息。在县分组五折交叉验证中，留出县2017—2022年的全部县年都不参与训练，PAF-Net在4446个县年上的RMSE为19.81 bu/ac，低于同一划分上重新训练的UNet-ConvLSTM（22.10）、GNN-RNN（27.76）与PhenoYieldNet（22.43）；由于训练集包含测试年份其他县的标签，这一结果评价的是同州内未见县的插值式外推，不能与时间外推的21.22直接比较。
 
-分州看，PA-TFT在22个州中是四个模型里RMSE最低的一个。相对于总体最好的基线GNN-RNN，它在24个州更低、5个州更高：降幅最大的是田纳西、得克萨斯、内布拉斯加与堪萨斯，升幅最大的是阿肯色、路易斯安那与威斯康星；北卡罗来纳的42个县占2022年MSE的12.4%，是最大的单一误差来源。本文同时评价已见县的时间外推与县分组五折的空间外推；轮数规则未经独立验证，结论需要在新的年份上前瞻性地检验。
+分州看，PAF-Net在22个州中是四个模型里RMSE最低的一个。相对于总体最好的基线GNN-RNN，它在24个州更低、5个州更高：降幅最大的是田纳西、得克萨斯、内布拉斯加与堪萨斯，升幅最大的是阿肯色、路易斯安那与威斯康星；北卡罗来纳的42个县占2022年MSE的12.4%，是最大的单一误差来源。本文同时评价已见县的时间外推与县分组五折的空间外推；轮数规则未经独立验证，结论需要在新的年份上前瞻性地检验。
 
-**关键词：** 玉米单产预测；时间融合变换器；多模态学习；植被指数；时间外推
+**关键词：** 玉米单产预测；面板感知融合网络；面板数据；多模态学习；植被指数；时间外推
 
 ---
 
@@ -20,13 +20,13 @@
 
 County-level crop yield prediction supports agricultural risk management, food supply assessment, and crop insurance. Corn yield depends on static conditions such as soil, on daily weather, and on canopy state, with temporal accumulation and within-county spatial heterogeneity. Using the CropNet data [1], this thesis studies a balanced panel of 741 counties in 29 U.S. states from 2017 to 2022 (4,446 county-years), with daily gridded weather, six monthly Sentinel-2 RGB images from April to September, and seven county-level soil attributes.
 
-County-level yield prediction poses three difficulties of its own. First, the sample is small and between-county differences dominate: the 741 counties have only five labelled training years, 3,705 training county-years in all, and stable between-county differences account for most of the variance of log yield, so little year-to-year variation is left to learn. Second, the inputs are heterogeneous: daily gridded weather, monthly satellite imagery and static soil must enter one model, yet a high-capacity image encoder cannot be trained end-to-end on so few annual labels. Third, optimisation at this sample size requires settings in proportion to the data: with so few annual labels, a network trained on the absolute level can spend most of its capacity on identifying counties, and a single validation year can select a nearly untrained checkpoint. Existing deep yield models each emphasise a different aspect of the task, but none is designed for these three difficulties: CNN-RNN and GNN-RNN based methods first average the grid cells within a county into a county series, UNet-ConvLSTM aggregates the grid cells with equal weights, PhenoYieldNet relies on large-scale pre-training and phenological alignment, and most report only single runs. The Temporal Fusion Transformer (TFT) combines static covariate encoders, variable selection networks, an LSTM, and interpretable attention, so it can handle static and dynamic covariates together, select adaptively among many candidate variables, and capture within-season temporal dependence, which makes it a suitable framework for this task. Adapting TFT directly to grid-level multimodal data in the conventional way, however, does not by itself meet these requirements.
+County-level yield prediction poses three difficulties of its own. First, the sample is small and between-county differences dominate: the 741 counties have only five labelled training years, 3,705 training county-years in all, and stable between-county differences account for most of the variance of log yield, so little year-to-year variation is left to learn. Second, the inputs are heterogeneous: daily gridded weather, monthly satellite imagery and static soil must enter one model, yet a high-capacity image encoder cannot be trained end-to-end on so few annual labels. Third, optimisation at this sample size requires settings in proportion to the data: with so few annual labels, a network trained on the absolute level can spend most of its capacity on identifying counties, and a single validation year can select a nearly untrained checkpoint. Existing deep yield models each emphasise a different aspect of the task, but none is designed for these three difficulties: CNN-RNN and GNN-RNN based methods first average the grid cells within a county into a county series, UNet-ConvLSTM aggregates the grid cells with equal weights, PhenoYieldNet relies on large-scale pre-training and phenological alignment, and most report only single runs. The Temporal Fusion Transformer (TFT) combines static covariate encoders, variable selection networks, gated residual networks and interpretable temporal attention, so it can handle static and dynamic covariates together, select adaptively among many candidate variables, and capture within-season temporal dependence; these are exactly the components this task needs. TFT, however, is built for multi-horizon forecasting of a single multivariate series, and applying these components directly to grid-level multimodal panel data does not by itself meet these requirements.
 
-To address these three difficulties we propose the Panel-Aware Temporal Fusion Transformer (PA-TFT). Against dominant between-county variance, the model predicts the level of county log yield directly and does not add the county's historical mean as an offset; weather, soil and remote-sensing inputs are standardised with global training-year statistics, so that between-county level differences are retained and the network can estimate both the county level and year-to-year variation from static and dynamic inputs. Against an image encoder that cannot be trained on so few annual labels it substitutes visible-band vegetation indices, computed pixel by pixel from the RGB images and globally standardised, so that remote sensing enters the model in a low-dimensional, trainable form that retains between-county and year-to-year greenness differences. Against that failure mode it fixes a smaller learning rate in advance by a training-set criterion and adds gradient clipping, weight decay and a fixed number of epochs, so that training is reproducible under one protocol.
+To address these three difficulties we propose the Panel-Aware Fusion Network (PAF-Net). Against dominant between-county variance, the model predicts the level of county log yield directly and does not add the county's historical mean as an offset; weather, soil and remote-sensing inputs are standardised with global training-year statistics, so that between-county level differences are retained and the network can estimate both the county level and year-to-year variation from static and dynamic inputs. Against an image encoder that cannot be trained on so few annual labels it substitutes visible-band vegetation indices, computed pixel by pixel from the RGB images and globally standardised, so that remote sensing enters the model in a low-dimensional, trainable form that retains between-county and year-to-year greenness differences. Against that failure mode it fixes a smaller learning rate in advance by a training-set criterion and adds gradient clipping, weight decay and a fixed number of epochs, so that training is reproducible under one protocol.
 
-We evaluate PA-TFT by a single time-forward hold-out: trained on 2017–2021 and tested on 2022. Every comparison model is trained for a fixed budget of epochs set per method and keeps its final epoch; no validation-based model selection is used, and no epoch is chosen by the 2022 metric. Under this protocol PA-TFT attains an RMSE of 21.22 bu/ac, an MAE of 15.78 bu/ac, an R² of 0.739 and a within-state anomaly correlation of 0.299. It is 34.8%, 27.5% and 38.7% below UNet-ConvLSTM (32.52), GNN-RNN (29.25) and PhenoYieldNet (34.64) respectively. Removing the remote-sensing branch raises the error by 3.59 bu/ac, and removing the soil static branch by 4.65 bu/ac. Shuffling the vegetation indices across counties at test time raises the error by 7.44 bu/ac, and zeroing them raises it by 15.31 bu/ac, so the model does use county-year information in remote sensing. In a county-grouped five-fold cross-validation, where all county-years of the held-out counties are excluded from training, PA-TFT attains an RMSE of 19.81 bu/ac over the 4,446 county-years, lower than UNet-ConvLSTM (22.10), GNN-RNN (27.76, 2019–2022) and PhenoYieldNet (22.43) retrained on the same folds. Because the training set contains same-year labels of other counties, this is an interpolation-style evaluation of unseen counties within a state and is not comparable with the 21.22 of the time hold-out.
+We evaluate PAF-Net by a single time-forward hold-out: trained on 2017–2021 and tested on 2022. Every comparison model is trained for a fixed budget of epochs set per method and keeps its final epoch; no validation-based model selection is used, and no epoch is chosen by the 2022 metric. Under this protocol PAF-Net attains an RMSE of 21.22 bu/ac, an MAE of 15.78 bu/ac, an R² of 0.739 and a within-state anomaly correlation of 0.299. It is 34.8%, 27.5% and 38.7% below UNet-ConvLSTM (32.52), GNN-RNN (29.25) and PhenoYieldNet (34.64) respectively. Removing the remote-sensing branch raises the error by 3.59 bu/ac, and removing the soil static branch by 4.65 bu/ac. Shuffling the vegetation indices across counties at test time raises the error by 7.44 bu/ac, and zeroing them raises it by 15.31 bu/ac, so the model does use county-year information in remote sensing. In a county-grouped five-fold cross-validation, where all county-years of the held-out counties are excluded from training, PAF-Net attains an RMSE of 19.81 bu/ac over the 4,446 county-years, lower than UNet-ConvLSTM (22.10), GNN-RNN (27.76, 2019–2022) and PhenoYieldNet (22.43) retrained on the same folds. Because the training set contains same-year labels of other counties, this is an interpolation-style evaluation of unseen counties within a state and is not comparable with the 21.22 of the time hold-out.
 
-By state, PA-TFT has the lowest RMSE of the four models in 22 states. Against GNN-RNN, the strongest baseline overall, it is lower in 24 states and higher in 5, with the largest gains in Tennessee, Texas, Nebraska and Kansas and the largest losses in Arkansas, Louisiana and Wisconsin; the 42 counties of North Carolina account for 12.4% of the 2022 MSE. We evaluate both seen-county, unseen-year extrapolation and county-grouped spatial extrapolation, and the epoch rule was not independently validated, so the conclusions need a prospective test on new years.
+By state, PAF-Net has the lowest RMSE of the four models in 22 states. Against GNN-RNN, the strongest baseline overall, it is lower in 24 states and higher in 5, with the largest gains in Tennessee, Texas, Nebraska and Kansas and the largest losses in Arkansas, Louisiana and Wisconsin; the 42 counties of North Carolina account for 12.4% of the 2022 MSE. We evaluate both seen-county, unseen-year extrapolation and county-grouped spatial extrapolation, and the epoch rule was not independently validated, so the conclusions need a prospective test on new years.
 
 **Keywords:** corn yield prediction; temporal fusion transformer; multimodal learning; vegetation indices; temporal hold-out validation
 
@@ -86,11 +86,11 @@ $$
 
 本文的理论与方法意义主要体现在三个方面。
 
-第一，把面板数据的结构引入深度时空模型。在县级单产面板中，响应变量的方差可以分解为县际稳定差异和县内年际变化。前者主要由土壤、气候带和管理习惯决定，后者主要由天气和冠层状态解释。通用的深度时空模型常常把两部分混在一起，网络可能只学会"识别县别"；但如果把县历史均值直接作为预测起点，又会在预测年份整体偏离历史水平时失效。本文提出PA-TFT，在模型内部以静态协变量编码县际背景、以动态输入估计年际变化，直接预测对数单产水平，为深度模型利用面板结构提供了一种做法。
+第一，把面板数据的结构引入深度时空模型。在县级单产面板中，响应变量的方差可以分解为县际稳定差异和县内年际变化。前者主要由土壤、气候带和管理习惯决定，后者主要由天气和冠层状态解释。通用的深度时空模型常常把两部分混在一起，网络可能只学会"识别县别"；但如果把县历史均值直接作为预测起点，又会在预测年份整体偏离历史水平时失效。本文提出PAF-Net，在模型内部以静态协变量编码县际背景、以动态输入估计年际变化，直接预测对数单产水平，为深度模型利用面板结构提供了一种做法。
 
 第二，为小样本条件下的多模态融合提供经验。高容量的图像编码器在县级年度样本上难以训练；本文以低维、可解释的植被指数作为遥感输入，并配合与样本规模相称的优化设置。第5章的结果表明，这一形式可以稳定训练，且全局标准化下的遥感输入在测试时干预中表现出明显的县年信息；如何进一步改进特征形式与接入方式，仍是后续工作要解决的问题。
 
-第三，为深度时空模型的评价提供统计规范。本文采用同一预测目标下的架构比较、单折时间外推、县分组五折交叉验证、组件消融与测试时干预评价模型之间的差异。这些检验同样适用于其他多模态农业预测模型。
+第三，为深度时空模型的评价提供统计规范。本文采用同一预测目标下的架构比较、单折时间外推、县分组五折交叉验证、组件消融、输入消融与测试时干预评价模型之间的差异。这些检验同样适用于其他多模态农业预测模型。
 
 在应用层面，县级预测可服务于区域供需研判、灾害损失评估、农业保险和衍生品风险管理。更准确的年度单产信息有可能降低供给判断误差，辅助期货套保比例和期权结构选择，从而改善风险调整后的经营结果。但本文没有进行价格预测或交易回测，不能声称当前模型已经产生实际利润。若未来针对不同月末截点重新训练或校准模型，并严格控制信息可用时点，生长季内更新才可能进一步服务于风险预警和期权动态对冲。本文的模型与分析也可迁移到大豆、小麦等作物，但跨作物推广仍需重新定义物候窗口、特征构造和训练样本，不能由本文结果直接外推。
 
@@ -132,9 +132,9 @@ ConvLSTM把循环门作用扩展到空间特征图，能同时保持局部空间
 
 时间融合变换器（Temporal Fusion Transformer，TFT）由Lim等提出，面向含多种协变量的时间序列预测[30]。它由五类组件构成：静态协变量编码器把不随时间变化的协变量转换为若干上下文向量；变量选择网络在每个时间步为候选变量给出归一化权重，并可接受静态上下文作为条件；门控残差网络是各组件的基本单元，在不需要非线性变换时可以退化为近似的残差通路；LSTM处理局部的顺序依赖；可解释多头注意力则直接建立远距离时间步之间的联系。
 
-与第1.2.2节和第1.2.3节的方法相比，TFT在三个方面正好回应了它们的不足。其一，静态协变量编码器把土壤等静态信息送入变量选择、循环网络初始化和注意力等多个环节，而不只是在最后拼接。其二，变量选择网络能根据样本和时间步自适应地分配变量权重，并且可以把遥感状态作为条件上下文，从而以很少的额外参数实现第1.2.3节所述的条件化融合。其三，变量选择权重和时间注意力权重为解释模型依赖了哪些变量、哪些时期提供了入口。因此，本文以TFT为基础框架。
+与第1.2.2节和第1.2.3节的方法相比，TFT在三个方面正好回应了它们的不足。其一，静态协变量编码器把土壤等静态信息送入变量选择、循环网络初始化和注意力等多个环节，而不只是在最后拼接。其二，变量选择网络能根据样本和时间步自适应地分配变量权重，并且可以把遥感状态作为条件上下文，从而以很少的额外参数实现第1.2.3节所述的条件化融合。其三，变量选择权重和时间注意力权重为解释模型依赖了哪些变量、哪些时期提供了入口。这三处正是本文所要取用的构件。
 
-但TFT原本面向规则的时间序列，不能直接处理县内的多个网格和遥感影像，需要加以扩展。更重要的是，TFT和多数深度时空模型一样，没有专门处理面板数据的结构：同一县在不同年份的单产高度相关，县际稳定差异占据大部分方差，而年度标签的数量又很少。本文第4章提出的PA-TFT在模型结构上回应这一问题：静态协变量编码器显式输入县不变量的土壤属性与绝对坐标，空间注意力把县内各网格聚合为县年表示，使模型能够学习县际差异与年际变化，而不必把县别当作隐变量去记忆。预测目标则直接取对数单产水平，不使用县历史均值作为偏移量；第4.10节说明了这一选择在异常年份的考虑，第5.3节与第6.1节报告了它在州一级的得失。
+但TFT原本面向规则的时间序列，不能直接处理县内的多个网格和遥感影像，需要加以扩展。更重要的是，TFT和多数深度时空模型一样，没有专门处理面板数据的结构：同一县在不同年份的单产高度相关，县际稳定差异占据大部分方差，而年度标签的数量又很少。本文第4章提出的PAF-Net在模型结构上回应这一问题：静态协变量编码器显式输入县不变量的土壤属性与绝对坐标，空间注意力把县内各网格聚合为县年表示，使模型能够学习县际差异与年际变化，而不必把县别当作隐变量去记忆。预测目标则直接取对数单产水平，不使用县历史均值作为偏移量；第4.10节说明了这一选择在异常年份的考虑，第5.3节与第6.1节报告了它在州一级的得失。
 
 还需强调，可解释预测不同于因果解释。注意力权重描述模型计算路径中的相对分配，变量选择权重也不等同于回归系数或显著性统计量。相关权重可以用于提出农学假设，但若要识别温度或降水的因果效应，仍需额外的识别假设、处理定义和反事实设计。
 
@@ -158,16 +158,16 @@ ConvLSTM把循环门作用扩展到空间特征图，能同时保持局部空间
 
 第五，统计精度与经济价值之间缺少桥梁，单产误差的改善很少通过样本外价格映射和期权回测来检验。
 
-针对前两点，本文选用TFT作为基础框架：它的静态协变量编码器、变量选择网络和时间注意力，分别回应了静态信息融合、变量自适应选择和可解释性的需要，而以变量选择为核心的条件化融合方式参数很少，适合小样本场景。针对第三点，本文提出面板感知时间融合变换器（PA-TFT）：模型以静态协变量编码县级背景，以网格—日变量选择和县内空间注意力利用动态输入，直接预测对数单产水平，不依赖县历史均值。针对第四点，本文同时用组件消融和测试时干预检验遥感的作用。期权部分仅用于说明准确单产信息的潜在决策价值，不作为本文已完成的交易实证。
+针对前两点，本文取用TFT的四类构件作为PAF-Net的内部机制：静态协变量编码器、变量选择网络、门控残差单元与因果时间注意力，它们分别回应了静态信息融合、变量自适应选择和可解释性的需要，而以变量选择为核心的条件化融合方式参数很少，适合小样本场景。针对第三点，本文提出面板感知融合网络（PAF-Net），并在上述构件之外补充三处面板专用设计：模型以静态协变量编码县级背景，以网格—日变量选择和县内空间注意力利用动态输入，以月为时间步对齐日气象与月度遥感，直接预测对数单产水平，不依赖县历史均值。针对第四点，本文同时用输入消融和测试时干预检验遥感的作用。期权部分仅用于说明准确单产信息的潜在决策价值，不作为本文已完成的交易实证。
 
 ## 1.3 研究内容
 
 本文主要研究内容如下：
 
 1. 构建县年层面的多模态数据体系，明确响应、网格气象、遥感影像、县级土壤和空间坐标的索引关系；从RGB影像逐像素计算可见光植被指数。
-2. 分析县级单产预测对模型的要求，说明选用时间融合变换器（TFT）作为基础框架的理由，并据此提出面板感知时间融合变换器（PA-TFT）：直接预测对数单产水平、全局标准化的植被指数输入、按样本规模设定的训练协议。
-3. 以2017—2021年训练、固定轮数、2022年测试的单折时间外推评价PA-TFT，并与三个已有深度模型在同一划分上比较。
-4. 通过同一预测目标下的架构比较、组件消融、测试时干预和县分组五折空间交叉验证，评价PA-TFT各项设计的作用以及对未见县的外推能力。
+2. 分析县级单产预测对模型的要求，说明取用时间融合变换器（TFT）四类构件的理由，并据此提出面板感知融合网络（PAF-Net）：在取用的构件之上补充网格—日变量选择、县内空间注意力与月时间轴，直接预测对数单产水平，采用全局标准化的植被指数输入，并按样本规模设定训练协议。
+3. 以2017—2021年训练、固定轮数、2022年测试的单折时间外推评价PAF-Net，并与三个已有深度模型在同一划分上比较。
+4. 通过同一预测目标下的架构比较、组件消融、输入消融、测试时干预和县分组五折空间交叉验证，评价PAF-Net各项设计的作用以及对未见县的外推能力。
 
 ## 1.4 技术路线
 
@@ -175,22 +175,22 @@ ConvLSTM把循环门作用扩展到空间特征图，能同时保持局部空间
 
 第一阶段是数据匹配：将县级单产与县内网格天气、月度遥感影像、坐标和土壤属性按县和年份连接，并从影像计算植被指数。
 
-第二阶段是模型设计：依据任务对模型的要求选用TFT框架，确定PA-TFT的预测目标、遥感输入与训练协议。
+第二阶段是模型设计：取用TFT的静态协变量编码器、变量选择网络、门控残差与因果时间注意力，针对县级面板在输入形态与输出形态上的四处不匹配（多网格、日—月混合频率、无未来协变量、单一年度标签）补充网格—日变量选择、县内空间注意力与月时间轴，并舍弃解码器与分位数输出，确定PAF-Net的预测目标、遥感接入方式与训练协议。
 
-第三阶段是模型实现：在TFT组件的基础上实现网格—日变量选择、县内空间注意力与对数单产预测头。
+第三阶段是模型实现：在上述构件的基础上实现网格—日变量选择、县内空间注意力与对数单产预测头。
 
-第四阶段是评价：在同一预测目标下比较各模型、以单折时间外推给出PA-TFT的精度，并用组件消融与测试时干预评价各项设计的作用。
+第四阶段是评价：在同一预测目标下比较各模型、以单折时间外推给出PAF-Net的精度，并用组件消融、输入消融与测试时干预评价各项设计的作用。
 
 ## 1.5 本文的主要创新与工作特点
 
-本文的主要贡献在于面向小样本县级面板的PA-TFT模型及其评价，而不在于提出新的注意力算子或网络基础组件。
+本文的主要贡献在于面向小样本县级面板的PAF-Net模型及其评价，而不在于提出新的注意力算子或网络基础组件。
 
-1. **提出面向小样本县级面板的PA-TFT模型。** 县级单产面板年份少，且县际稳定差异占据了大部分方差。针对这一结构，本文以静态协变量编码县级背景，以网格—日变量选择和县内空间注意力利用动态输入，直接预测对数单产水平，而不把县历史均值作为偏移量；以全局标准化的可见光植被指数代替高容量图像编码器，使遥感以低维、可训练的形式进入模型；并配合按样本规模设定的学习率与梯度裁剪。在2022年这一折上，按2017—2021年训练、各方法固定轮数的统一规则，PA-TFT的RMSE为21.22 bu/ac，比UNet-ConvLSTM（32.52）、GNN-RNN（29.25）和PhenoYieldNet（34.64）分别低34.8%、27.5%和38.7%。测试时干预表明，模型确实使用遥感的县年信息：县间置换使RMSE上升7.44 bu/ac，全部置零使RMSE上升15.31 bu/ac。遥感消融的结果见第5.4节。
-2. **建立与证据强度相匹配的评价规范。** 在同一预测目标（绝对水平）下比较PA-TFT与三个已有深度模型；以组件消融和测试时干预检验各项设计与遥感的使用；以县分组五折交叉验证评价模型对未见县的外推能力。本文同时报告"已见县、未见年份"的时间外推与"未见县"的空间外推两类结果。
+1. **提出面向小样本县级面板的PAF-Net模型。** 县级单产面板年份少，且县际稳定差异占据了大部分方差。针对这一结构，本文以静态协变量编码县级背景，以网格—日变量选择和县内空间注意力利用动态输入，直接预测对数单产水平，而不把县历史均值作为偏移量；以全局标准化的可见光植被指数代替高容量图像编码器，使遥感以低维、可训练的形式进入模型；并配合按样本规模设定的学习率与梯度裁剪。在2022年这一折上，按2017—2021年训练、各方法固定轮数的统一规则，PAF-Net的RMSE为21.22 bu/ac，比UNet-ConvLSTM（32.52）、GNN-RNN（29.25）和PhenoYieldNet（34.64）分别低34.8%、27.5%和38.7%。测试时干预表明，模型确实使用遥感的县年信息：县间置换使RMSE上升7.44 bu/ac，全部置零使RMSE上升15.31 bu/ac。遥感消融的结果见第5.4节。
+2. **建立与证据强度相匹配的评价规范。** 在同一预测目标（绝对水平）下比较PAF-Net与三个已有深度模型；以组件消融、输入消融和测试时干预检验各项设计与遥感的使用；以县分组五折交叉验证评价模型对未见县的外推能力。本文同时报告"已见县、未见年份"的时间外推与"未见县"的空间外推两类结果。
 
 ## 1.6 本章小结
 
-本章从农业生产、粮食供需和玉米期货期权风险管理三个层面阐述了县级单产预测的意义，回顾了统计方法、深度时空模型和多模态遥感方法的研究现状，指出了基线、遥感检验、训练随机性和经济价值四个方面的不足。本文据此以TFT为基础框架，针对小样本县级面板的结构提出PA-TFT模型，并在同一预测目标的架构对照、强基线与单折时间外推下评价。
+本章从农业生产、粮食供需和玉米期货期权风险管理三个层面阐述了县级单产预测的意义，回顾了统计方法、深度时空模型和多模态遥感方法的研究现状，指出了基线、遥感检验、训练随机性和经济价值四个方面的不足。本文据此取用TFT的静态条件化、变量选择与因果时间注意力作为内部构件，针对小样本县级面板的结构补充网格—日选择、县内空间注意力与月时间轴，封装为PAF-Net模型，并在同一预测目标的架构对照、强基线与单折时间外推下评价。
 
 ---
 
@@ -220,7 +220,7 @@ Z_i=f_\theta(X_i)+\varepsilon_i,
 \varepsilon_i\mid X_i\sim N(0,\sigma^2).
 $$
 
-这里，$f_\theta$ 表示条件均值函数，在第4章中由PA-TFT刻画；$\sigma>0$ 表示条件误差标准差。在基线设定中，所有县年样本共享同一个 $\sigma$，这就是同方差假设。该假设并不是说所有县年单产具有相同均值，而只是说在扣除条件均值 $f_\theta(X_i)$ 后，剩余误差的条件离散程度不随县、产量水平或其他协变量系统变化。本文将其作为推导MSE目标的工作假设，不据此声称该假设已经得到数据验证。
+这里，$f_\theta$ 表示条件均值函数，在第4章中由PAF-Net刻画；$\sigma>0$ 表示条件误差标准差。在基线设定中，所有县年样本共享同一个 $\sigma$，这就是同方差假设。该假设并不是说所有县年单产具有相同均值，而只是说在扣除条件均值 $f_\theta(X_i)$ 后，剩余误差的条件离散程度不随县、产量水平或其他协变量系统变化。本文将其作为推导MSE目标的工作假设，不据此声称该假设已经得到数据验证。
 
 为推导基线估计准则，先采用给定协变量后样本误差条件独立的工作近似。第 $i$ 个样本的负对数似然为
 
@@ -260,15 +260,15 @@ $$
 \varepsilon_{cy}=u_c+v_y+s_{cy}+e_{cy},
 $$
 
-其中 $u_c$ 表示县级稳定异质性，$v_y$ 表示共同年份冲击，$s_{cy}$ 表示空间相关成分，$e_{cy}$ 为剩余扰动。本文主要任务是预测而非参数推断，模型没有显式估计上述方差分量；但这一结构决定了评价时必须以县为单位聚合误差、以县为单位报告结果，而不能把全部县年当作彼此独立的观测。第5.3节的分州误差与第5.4节的组件消融、测试时干预，都是在这一意义上逐县评价的。
+其中 $u_c$ 表示县级稳定异质性，$v_y$ 表示共同年份冲击，$s_{cy}$ 表示空间相关成分，$e_{cy}$ 为剩余扰动。本文主要任务是预测而非参数推断，模型没有显式估计上述方差分量；但这一结构决定了评价时必须以县为单位聚合误差、以县为单位报告结果，而不能把全部县年当作彼此独立的观测。第5.3节的分州误差与第5.4节的输入消融、测试时干预，都是在这一意义上逐县评价的。
 
 按年留出测试通过年份划分训练集与测试集，考察模型从历史年份迁移到一个后续年份的表现。该设计不同于随机划分，因为随机划分可能将相同年份的共同冲击同时放入训练和测试。本文以2022年为测试年份、2017—2021年为训练年份，各模型按预定轮数固定训练、不使用验证集选模（第5.1节）；这一设计属于"已见县、未见年份"的预测评价。第5.5节另以县分组五折交叉验证评价"未见县"的外推，两类设计回答不同的问题，结果分别报告；两者都不代表对研究区外区域的外推能力。
 
-县级面板的常见处理是对数据作组内变换，以县固定效应吸收县际稳定差异、只用县内年际变化估计协变量系数，并把预测写成县历史均值加年际异常。本文不采用这一做法，PA-TFT直接预测对数单产水平，理由见第4.10节。
+县级面板的常见处理是对数据作组内变换，以县固定效应吸收县际稳定差异、只用县内年际变化估计协变量系数，并把预测写成县历史均值加年际异常。本文不采用这一做法，PAF-Net直接预测对数单产水平，理由见第4.10节。
 
 ## 2.3 长短期记忆网络
 
-本节至第2.5节介绍第4章PA-TFT模型所用的网络组件。
+本节至第2.5节介绍第4章PAF-Net模型所用的网络组件。
 
 对于序列输入 $x_t$，LSTM[32]通过输入门、遗忘门和输出门更新状态：
 
@@ -395,7 +395,7 @@ $$
 
 ## 2.8 本章小结
 
-本章首先在对数单产同方差条件正态的工作假设下，由极大似然原理推导出平方损失目标，并说明面板数据中县效应、年份冲击和空间相关构成的误差结构。之后介绍第4章PA-TFT模型使用的LSTM、注意力机制、门控残差网络和变量选择网络，并定义预测评价指标，其中包括本文引入的州内异常相关。最后说明年度单产信息与商品期权风险管理之间的联系。
+本章首先在对数单产同方差条件正态的工作假设下，由极大似然原理推导出平方损失目标，并说明面板数据中县效应、年份冲击和空间相关构成的误差结构。之后介绍第4章PAF-Net模型使用的LSTM、注意力机制、门控残差网络和变量选择网络，并定义预测评价指标，其中包括本文引入的州内异常相关。最后说明年度单产信息与商品期权风险管理之间的联系。
 
 ---
 
@@ -479,7 +479,7 @@ $$
 =\sum_{r\le d}P_{cygr}-\sum_{r\le d}\operatorname{PET}_{cygr}.
 $$
 
-因此第4章PA-TFT模型的动态候选变量共15个；其月度汇总形成第3.5节的面板模型特征。构造变量引入了农学先验，也引入阈值和蒸散近似误差。潜在蒸散中的日序按168个规则序列位置从4月初连续编号，没有恢复每个月被舍弃的29日至月末日期，因此属于压缩日历近似。其统计作用是提供低维非线性摘要，而不是替代完整作物生理过程。
+因此第4章PAF-Net模型的动态候选变量共15个；其月度汇总形成第3.5节的面板模型特征。构造变量引入了农学先验，也引入阈值和蒸散近似误差。潜在蒸散中的日序按168个规则序列位置从4月初连续编号，没有恢复每个月被舍弃的29日至月末日期，因此属于压缩日历近似。其统计作用是提供低维非线性摘要，而不是替代完整作物生理过程。
 
 ## 3.4 遥感、土壤与坐标数据
 
@@ -505,7 +505,7 @@ $$
 
 ### 3.4.3 网格坐标
 
-网格坐标记为 $\ell_{cg}=(\operatorname{lat}_{cg},\operatorname{lon}_{cg})$。坐标用于空间位置表示和潜在蒸散计算。第3.6节把经纬度按固定比例缩放到约 $[-1,1]$，保留县的绝对地理位置；坐标不作县内标准化，否则各县县中心都会变成 $(0,0)$，县际地理位置将无法区分。本文的PA-TFT不使用县际邻接图，不刻画县际空间溢出。
+网格坐标记为 $\ell_{cg}=(\operatorname{lat}_{cg},\operatorname{lon}_{cg})$。坐标用于空间位置表示和潜在蒸散计算。第3.6节把经纬度按固定比例缩放到约 $[-1,1]$，保留县的绝对地理位置；坐标不作县内标准化，否则各县县中心都会变成 $(0,0)$，县际地理位置将无法区分。本文的PAF-Net不使用县际邻接图，不刻画县际空间溢出。
 
 ### 3.4.4 可见光植被指数
 
@@ -526,9 +526,9 @@ CropNet影像只有红、绿、蓝三个波段，无法计算NDVI等需要近红
 
 ## 3.5 模型使用的县级特征
 
-PA-TFT使用144个县级特征：6个月各14个天气变量（84个）与各10个植被指数（60个）。
+PAF-Net使用144个县级特征：6个月各14个天气变量（84个）与各10个植被指数（60个）。
 
-**天气特征。** 每个月14个变量为11个原始气象变量的月均值，加上生长度日（GDD，按日均温、基温8℃）、高温度日（KDD，按日最高温、基温30℃）和水分盈亏（降水减Hargreaves潜在蒸散）的月增量。累积量取月增量而非从4月起的累计值，以减少月份之间的共线性；其构造见第3.3节。第3.3节的第四类构造变量累计降水没有纳入县级特征：县级特征对本月的原始气象变量取月均值，降水已由其中的原始降水变量表示，再放入累计降水会与其高度相关。因此县级天气特征为14个，比PA-TFT的15个动态候选变量少一个。
+**天气特征。** 每个月14个变量为11个原始气象变量的月均值，加上生长度日（GDD，按日均温、基温8℃）、高温度日（KDD，按日最高温、基温30℃）和水分盈亏（降水减Hargreaves潜在蒸散）的月增量。累积量取月增量而非从4月起的累计值，以减少月份之间的共线性；其构造见第3.3节。第3.3节的第四类构造变量累计降水没有纳入县级特征：县级特征对本月的原始气象变量取月均值，降水已由其中的原始降水变量表示，再放入累计降水会与其高度相关。因此县级天气特征为14个，比PAF-Net的15个动态候选变量少一个。
 
 **遥感特征。** 每个月10个植被指数，构造见第3.4.4节。若某县某月没有有效影像，该位置在县内去均值后记为0，即视为"与本县平常相同"；本文样本中这一规则没有被触发。
 
@@ -573,7 +573,7 @@ $$
 
 第二，遥感只有RGB影像，没有近红外波段；植被指数是县域整体的平均，没有按玉米种植面积加权。
 
-第三，时间外推评价所用的测试县都在训练年份出现过。PA-TFT直接预测对数单产水平，不要求县历史标签进入模型，因此可以用县分组交叉验证评价它对未见县的表现；但模型没有专门设计从土壤、坐标与气候常态推断未见县水平的模块；空间外推只用县分组交叉验证作初步评价，结果见第5.5节。
+第三，时间外推评价所用的测试县都在训练年份出现过。PAF-Net直接预测对数单产水平，不要求县历史标签进入模型，因此可以用县分组交叉验证评价它对未见县的表现；但模型没有专门设计从土壤、坐标与气候常态推断未见县水平的模块；空间外推只用县分组交叉验证作初步评价，结果见第5.5节。
 
 第四，面板只有6个年份，单折评价只覆盖2022年一个测试年份，年份特有的冲击与方法的误差难以区分开。
 
@@ -581,27 +581,58 @@ $$
 
 ## 3.8 本章小结
 
-本章定义了29州741县、6年、4446个县年观测的数据结构，说明了响应变量、15个动态气象变量、六期遥感影像、七维土壤和网格坐标，并给出了由RGB影像计算的10个可见光植被指数，以及PA-TFT使用的144个县—月特征。标准化量只在训练年份内估计。这些数据支持在已见县上评价下一个年份的预测，也支持用县分组五折交叉验证评价对未见县的外推；但不支持对管理措施效应、研究区外地区或更长时期的一般化结论。
+本章定义了29州741县、6年、4446个县年观测的数据结构，说明了响应变量、15个动态气象变量、六期遥感影像、七维土壤和网格坐标，并给出了由RGB影像计算的10个可见光植被指数，以及PAF-Net使用的144个县—月特征。标准化量只在训练年份内估计。这些数据支持在已见县上评价下一个年份的预测，也支持用县分组五折交叉验证评价对未见县的外推；但不支持对管理措施效应、研究区外地区或更长时期的一般化结论。
 
 ---
 
-# 第4章 面板感知时间融合变换器（PA-TFT）
+# 第4章 面板感知融合网络（PAF-Net）
 
-县级单产面板有两个结构性特点：可用于有标签训练的样本只有3705个县年；对数单产的方差主要来自县与县之间，而不是同一年份内部的年际变动。本章据此提出面板感知时间融合变换器（Panel-Aware Temporal Fusion Transformer，PA-TFT）。第4.1节说明为什么以时间融合变换器（Temporal Fusion Transformer，TFT）为基础框架；第4.2—4.9节定义模型的计算流程；第4.10—4.12节给出预测目标、训练协议与模型规模；第4.13节说明内部权重的解释边界，第4.14节为本章小结。
+县级单产面板有两个结构性特点：可用于有标签训练的样本只有3705个县年；对数单产的方差主要来自县与县之间，而不是同一年份内部的年际变动。本章据此提出面板感知融合网络（Panel-Aware Fusion Network，PAF-Net）。第4.1节说明从时间融合变换器（Temporal Fusion Transformer，TFT）取用了哪几类组件、又为县级面板补充了哪些设计；第4.2—4.9节定义模型的计算流程；第4.10—4.12节给出预测目标、训练协议与模型规模；第4.13节说明内部权重的解释边界，第4.14节为本章小结。
 
-## 4.1 选用TFT的理由
+## 4.1 PAF-Net的组件来源与封装
 
-县级单产预测对模型提出了四个方面的要求。逐一对照可以看到，TFT的各个组件恰好对应这些要求，这是本文以它为基础框架的原因。
+县级单产预测对模型提出四项要求：静态信息要在多个环节调节动态输入；要在高度相关的气象变量中自适应地选择；要刻画生长季内的时间依赖；参数规模要与3705个县年标签相称。TFT[30]为这四项要求各提供了一个成熟而低参数的构件。PAF-Net取用这四类组件（第4.1.1节），再针对县级面板补上三处TFT没有的设计（第4.1.2节），并舍弃与多步预测绑定的部分（第4.1.3节）。
 
-**第一，同时处理静态协变量与动态协变量。** 每个县年样本既有不随时间变化的县级土壤属性，也有逐日变化的气象和逐月变化的遥感。同一段天气在不同土壤条件下对单产的影响不同，因此静态信息不应只是在最后与动态特征拼接。TFT专门设有静态协变量编码器，把静态信息转换为若干上下文向量，分别用于调节变量选择、初始化循环网络的状态和增强时间注意力[30]。这让土壤能够在模型的多个环节中影响对天气的解读。
+### 4.1.1 从TFT取用的四类组件
 
-**第二，从较多的候选变量中自适应地选择。** 本文的动态候选变量有15个，包括11个原始气象变量和4个农学构造变量，它们之间高度相关，而且在不同生育阶段的重要性不同。TFT的变量选择网络对每个时间步、每个样本给出一组归一化的变量权重，并且可以接受上下文条件[30]，适合"不同县、不同日期关注不同天气变量"的情形，也便于事后检查模型依赖了哪些变量。
+**（1）静态协变量编码器。** 每个县年样本既有不随时间变化的7维土壤属性，也有逐日变化的气象和逐月变化的遥感；同一段天气在不同土壤条件下对单产的影响不同，因此静态信息不应只在最后与动态特征拼接。TFT的静态协变量编码器把静态输入转换为四路上下文，分别用于条件化变量选择、初始化循环网络状态和增强时间注意力[30]。PAF-Net直接取用这一编码器，把输入换成土壤（第4.4节）。
 
-**第三，刻画生长季内的时间依赖。** 玉米单产取决于整个生长季的累积过程，开花期和灌浆期的条件尤为关键，前期状态又会影响后期对胁迫的响应。TFT以LSTM处理局部的顺序依赖，再以带未来屏蔽的多头注意力直接建立远距离月份之间的联系[30,37]，比单独使用循环网络更容易捕捉"5月状态影响8月响应"这类跨月依赖。
+**（2）条件化变量选择网络。** 本文的15个动态变量（11个气象变量与4个农学构造变量）高度相关，且在不同生育阶段的重要性不同。TFT的变量选择网络在每个时间步给出一组归一化的变量权重，并接受上下文条件[30]。PAF-Net取用这一网络，由它承担"不同县、不同日期关注不同天气变量"的选择功能，其权重也可事后检查。
 
-**第四，模型规模可控，结构可以解释。** 与为全部气象token和遥感patch构建两两cross-attention的多模态Transformer相比，TFT以门控残差网络为基本单元，在不需要非线性变换时可以退化为近似的残差通路[30]；它的变量选择权重和时间注意力权重也为结果解释提供了入口。在县级年度标签数量有限的情况下，这两点都很重要。
+**（3）门控残差单元。** TFT以门控残差网络（Gated Residual Network，GRN）为基本构件：不需要非线性变换时可以退化为近似的残差通路，参数少而且容易训练[30]。PAF-Net把它用作三处的公共积木：遥感条件的注入、LSTM输出的预处理、以及最后的预测头（第4.3、4.9、4.10节）。这不是一个"拿来即用"的模块，而是贯穿全网络的构造单元。
 
-TFT原本面向规则的多步时间序列预测，其输入是单个序列的协变量，而不是县内的多个网格和遥感影像。PA-TFT保留TFT的四个组件——静态协变量编码器、变量选择网络、LSTM时间编码与未来屏蔽时间注意力——并针对县级面板数据的结构作三处扩展。第一，在网格—日层面进行变量选择，以利用县内空间异质性，再由县内空间注意力把网格汇总为县级表示。第二，把预测目标直接取为对数单产水平，不引入县历史均值偏移，使网络同时估计县际水平与年际变化（第4.10节）。第三，以全局标准化的可见光植被指数代替图像编码器，使遥感输入以低维、可训练的形式进入模型，并保留县际与年际的绿度差异（第3.6节）。训练协议按样本规模设定（第4.11节）。PA-TFT没有原始TFT的编码器—解码器结构、多步分位数输出和已知未来协变量分支，因此应称为"受TFT启发的网格级多模态模型"，而不是原始TFT的逐项实现。下面各节给出具体定义。
+**（4）LSTM与因果多头注意力。** 玉米单产取决于整个生长季的累积过程，开花期与灌浆期的条件尤为关键，前期状态又会影响后期对胁迫的响应。TFT以LSTM处理局部顺序依赖，再以带未来屏蔽的多头注意力建立远距离时间步之间的联系[30,33]。PAF-Net取用这两层作为时序编码器（第4.8—4.9节），输入是6个月步。
+
+### 4.1.2 PAF-Net补上的三处设计
+
+TFT面向单条多变量序列。县级面板在每个时间步上有县内$G$个网格、两种不同观测频率的输入，还有"多条网格序列如何汇成一条县序列"的问题。这三处TFT没有给出直接的处理办法，PAF-Net自行设计。
+
+**（1）网格—日变量选择（第4.5节）。** 变量选择的作用单位从"单序列的每个时间步"改为"每个网格的每一天"：同一县内不同网格的土壤质地、灌溉条件与玉米种植比例不同，同一组气象变量在不同网格上的重要性可能不同；若先把网格平均掉，这部分差异在第一步就消失。
+
+**（2）县内空间注意力（第4.7节）。** 一个月内，一个县有$G$条网格表示需要汇成一条。PAF-Net以可学习的CLS向量加县中心位置编码作为查询，对带经纬度与月份位置编码的$G$个网格表示做注意力加权。这是PAF-Net新增的唯一完整网络模块，约79万参数；等权均值作为对照在第5.4.1节检验。
+
+**（3）月尺度与遥感条件化（第4.6、4.3节）。** 日气象有168个时间步，遥感只有6个月度观测，两者必须落到同一条时间轴上。PAF-Net把时间步取为月，并把该月的遥感作为条件上下文，调节该月内气象变量选择的权重。为什么取月而不是日、为什么月内用等权平均，第4.6节给出理由。
+
+### 4.1.3 取用、补充与弃用的账目
+
+表4-1按来源汇总：哪些组件取自TFT，哪些是本文为县级面板补充的，哪些没有采用。
+
+| 组件或设计 | 来源 | 在PAF-Net中的作用 | 节 |
+|---|---|---|---|
+| 静态协变量编码器 | TFT[30] | 7维土壤→四路上下文 | 4.4 |
+| 变量选择网络 | TFT[30] | 条件化的变量权重 | 4.5 |
+| 门控残差单元 | TFT[30] | 条件注入、特征预处理、预测头 | 4.3/4.9/4.10 |
+| LSTM | TFT[30] | 6步时序编码 | 4.8 |
+| 因果多头注意力 | TFT[30,33] | 6步时间注意力 | 4.9 |
+| 网格—日变量选择 | 本文 | 保留县内异质性 | 4.5 |
+| 县内空间注意力 | 本文 | $G$个网格→县表示 | 4.7 |
+| 月尺度聚合 | 本文 | 日气象与月度遥感对齐 | 4.6 |
+| 遥感条件化 | 本文 | 冠层状态调节气象权重 | 4.3 |
+| 解码器、已知未来协变量、分位数头 | 未采用 | 单一年度水平，不需要多步预测 | 4.10 |
+
+**表4-1  PAF-Net的组件来源：取用、补充与未采用的部分。**
+
+按表4-1，静态条件化、变量选择、门控残差与因果时间注意力来自TFT，网格—日变量选择、县内空间注意力、月尺度聚合与遥感条件化是本文为面板补充的，解码器、已知未来协变量与分位数头没有采用。第5.4.1节的组件消融检验的正是本文补充的两处架构设计。
 
 ## 4.2 问题定义与总体框架
 
@@ -619,11 +650,11 @@ $$
 
 模型由五个层次组成：第一，植被指数输入与时间对齐；第二，土壤静态上下文和网格—日动态变量选择；第三，日到月汇总及县内空间注意力；第四，LSTM和未来屏蔽时间注意力；第五，对数单产预测。
 
-各层次与TFT组件的对应关系如下：土壤静态上下文对应TFT的静态协变量编码器；网格—日动态变量选择对应变量选择网络；LSTM与未来屏蔽时间注意力对应TFT的时间处理部分；植被指数输入与县内空间注意力是本文为适配网格级面板数据所作的扩展。
+五个层次与TFT组件的来源关系是：土壤静态上下文取用TFT的静态协变量编码器（第4.4节）；网格—日动态变量选择取用变量选择网络，作用单位由时间步放大到（网格，日）（第4.5节）；LSTM与未来屏蔽时间注意力原样取用（第4.8—4.9节）；植被指数输入、日→月聚合与县内空间注意力是PAF-Net为网格级面板补充的设计（第4.3、4.6、4.7节）；输出端不采用TFT的解码器与分位数头（第4.10节）。
 
 ### 4.2.1 模型流程图
 
-为清晰展示各类数据在模型中的传递路径，图4-1给出PA-TFT的统计计算流程。模型的基本单位不是单个县年向量，而是县年样本内部的"网格—日"观测；只有在完成变量选择、日到月汇总和县内空间聚合后，才形成进入月序列模块的县级状态，最终输出年度对数单产预测。
+为清晰展示各类数据在模型中的传递路径，图4-1给出PAF-Net的统计计算流程。模型的基本单位不是单个县年向量，而是县年样本内部的"网格—日"观测；只有在完成变量选择、日到月汇总和县内空间聚合后，才形成进入月序列模块的县级状态，最终输出年度对数单产预测。
 
 ```mermaid
 flowchart TD
@@ -655,13 +686,13 @@ flowchart TD
     OUT --> Y[Y_hat_cy]
 ```
 
-**图4-1  PA-TFT的统计计算流程。** 当前实证使用图中所示的确定性点预测路径。
+**图4-1  PAF-Net的统计计算流程。** 当前实证使用图中所示的确定性点预测路径。
 
 从统计建模角度看，图4-1包含三个关键的支持转换。第一，网格—日气象与网格—月植被指数通过逐变量嵌入和线性映射转换为可比较的局部特征；第二，多个网格和日期通过可学习聚合转换为县—月状态；第三，六个月状态通过有序递推和未来屏蔽转换为县—年对数单产预测，再经指数变换得到原尺度预测。该流程避免在最初阶段直接把全部空间信息压缩成一个县级标量，但最终监督信号仍只有一个县年单产标签，不能将每个中间表示解释为拥有独立观测响应。
 
 ## 4.3 植被指数输入与时间对齐
 
-PA-TFT的遥感输入是第3.4.4节由RGB影像逐像素计算的10个可见光植被指数：超绿指数（ExG）、超红指数（ExR）、植被颜色指数（VEG）、可见光大气阻抗指数（VARI）、绿红植被指数（GRVI）、绿蓝归一化差值指数（GBNDVI）、红绿蓝植被指数（RGBVI）、绿度色度坐标（GCC）、归一化绿红差值指数（NGRDI）与改良绿红植被指数（MGRVI）。对网格 $g$、月份 $m$ 的指数向量 $v_{cymg}\in\mathbb R^{10}$，按训练年份的全局统计量标准化：每个指数只使用一对由训练年份全部县、全部月份与全部网格估计的均值与标准差：
+PAF-Net的遥感输入是第3.4.4节由RGB影像逐像素计算的10个可见光植被指数：超绿指数（ExG）、超红指数（ExR）、植被颜色指数（VEG）、可见光大气阻抗指数（VARI）、绿红植被指数（GRVI）、绿蓝归一化差值指数（GBNDVI）、红绿蓝植被指数（RGBVI）、绿度色度坐标（GCC）、归一化绿红差值指数（NGRDI）与改良绿红植被指数（MGRVI）。对网格 $g$、月份 $m$ 的指数向量 $v_{cymg}\in\mathbb R^{10}$，按训练年份的全局统计量标准化：每个指数只使用一对由训练年份全部县、全部月份与全部网格估计的均值与标准差：
 
 $$
 \widetilde v_{cymgk}=\frac{v_{cymgk}-\widehat\mu_{k}}{\max(\widehat\sigma_{k},10^{-6})},
@@ -770,7 +801,7 @@ $$
 
 由此，变量权重可随县、年份、网格和日期变化，并由土壤与最近遥感状态条件化。与固定回归系数不同，$\alpha_{cygdj}$ 不能直接解释为变量增加一个单位导致单产改变多少；它仅表示在当前网络参数和输入条件下，该变量表示参与融合的相对权重。第5.4节用测试时干预检验遥感输入是否真正影响预测。
 
-## 4.6 日到月聚合
+## 4.6 时间轴与日到月聚合
 
 后续时间模块以月份为基本步长。设 $\mathcal D_m$ 为月份 $m$ 的28个日位置，则网格月表示为
 
@@ -780,7 +811,11 @@ $$
 \sum_{d\in\mathcal D_m}x_{cygd}.
 $$
 
-变量选择发生在日尺度，因此极端天气能够先影响逐日权重和表示；但月内汇总为等权平均，模型没有额外的日内注意力。LSTM与时间注意力实际处理六个月步，而不是168个日步。该设计降低序列长度和计算量，但可能平滑短时极端事件。
+时间轴取月而不是日，有三个理由。第一，输入的观测频率不同：气象是逐日168天，植被指数是逐月的6次观测，标签又只有一个年度水平，三种频率必须落到同一条时间轴上。以月为步长，每个时间步对应该月的气象汇总与一次遥感观测，遥感作为条件上下文在月内保持常量，与它实际的观测频率一致。第二，4月到9月本身构成玉米的生育阶段序列，播种、出苗、拔节、抽雄、灌浆、成熟大体按月推进，月是判读"哪一段生育期条件不利"的自然粒度。第三，标签只有3705个县年。若序列为168个日步，一个县年的日表示约3000个，变量选择的权重要在同样的标签数下估计；6步序列让LSTM与时间注意力只需刻画月际转移，与标签量相称。
+
+月内采用等权平均，学习日权重不作考虑。遥感在月内是常数，逐日变化的只有气象；若为月内每天给一个权重，这些权重在每个网格每个月上只有约28个位置、却共享同一个年度标签，无法辨识，而且会与日表示的尺度纠缠。等权平均是假设最少的选择：不引入额外参数，也不预设月内哪几天更重要。需要指出，日尺度上的信息并没有在聚合前被丢弃——变量选择发生在日尺度（第4.5节），一场高温或干旱会先改变该日的变量权重与表示，再进入月平均。被平滑掉的是月内日与日的先后顺序，而不是极端日是否出现。
+
+这一安排也有代价：月均值削弱了短时极端事件在序列上的对比度，LSTM与时间注意力实际处理6个月步而不是168个日步，无法表达同一月内"前旱后涝"这类次序。本文接受这一代价，原因仍是标签量：把每个年度标签摊到168个日位置上去学习次序，样本不足以支撑。极端天气的作用因此主要通过日尺度的变量选择与月度均值水平体现，而不是通过月内次序。
 
 ## 4.7 县内空间注意力聚合
 
@@ -878,7 +913,7 @@ $$
 
 ## 4.10 预测目标与输出变换
 
-记县 $c$ 在年份 $y$ 的玉米单产为 $Y_{cy}$，对数单产为 $Z_{cy}=\log Y_{cy}$。PA-TFT直接预测对数单产的水平，不引入县历史均值作为偏移量：
+记县 $c$ 在年份 $y$ 的玉米单产为 $Y_{cy}$，对数单产为 $Z_{cy}=\log Y_{cy}$。PAF-Net直接预测对数单产的水平，不引入县历史均值作为偏移量：
 
 $$
 \widehat Z_{cy}=g_\theta(\mathcal X_{cy}),
@@ -908,9 +943,9 @@ $$
 
 ## 4.11 训练协议
 
-PA-TFT的训练协议按样本规模设定，在全部实验中固定如下。
+PAF-Net的训练协议按样本规模设定，在全部实验中固定如下。
 
-**优化器与轮数。** 采用AdamW[35,36]，权重衰减为0.05；前5轮线性预热，之后使用余弦变化；批量大小为4，固定训练20轮，保留最后一轮参数。轮数预算取20，与第5.1节各比较模型的预算一并事先确定；训练结束时训练损失仍在缓慢下降（完整PA-TFT第19轮为0.0049），本文不按测试年份继续加训或回调轮数。训练过程中不使用验证集比较轮次，2022年的测试只评估最后一轮，不依据2022年指标选择轮次。隐藏维数为512，LSTM为1层，Dropout率为0.1，随机种子设置为0。第5.1节说明全部比较模型共用同一固定轮数规则。
+**优化器与轮数。** 采用AdamW[35,36]，权重衰减为0.05；前5轮线性预热，之后使用余弦变化；批量大小为4，固定训练20轮，保留最后一轮参数。轮数预算取20，与第5.1节各比较模型的预算一并事先确定；训练结束时训练损失仍在缓慢下降（完整PAF-Net第19轮为0.0049），本文不按测试年份继续加训或回调轮数。训练过程中不使用验证集比较轮次，2022年的测试只评估最后一轮，不依据2022年指标选择轮次。隐藏维数为512，LSTM为1层，Dropout率为0.1，随机种子设置为0。第5.1节说明全部比较模型共用同一固定轮数规则。
 
 **学习率。** 全部实验使用同一个学习率 $1\times10^{-4}$。该取值在训练集上确定，在看到任何测试年份的结果之前即已固定，不按年份或按折调整。
 
@@ -918,7 +953,7 @@ PA-TFT的训练协议按样本规模设定，在全部实验中固定如下。
 
 ## 4.12 模型规模
 
-PA-TFT约有3421万个可变参数，绝大部分位于隐藏维数为512的嵌入、GRN与LSTM部分，遥感分支只有 $10H+H$ 个参数。受县年标签数量限制，参数量的正则化由第4.11节的较小学习率、权重衰减、dropout与固定轮数共同承担；第5.4节的组件消融检验了各组成部分的作用。
+PAF-Net约有3421万个可变参数，绝大部分位于隐藏维数为512的嵌入、GRN与LSTM部分，遥感分支只有 $10H+H$ 个参数。受县年标签数量限制，参数量的正则化由第4.11节的较小学习率、权重衰减、dropout与固定轮数共同承担；第5.4节的组件消融与输入消融检验了各组成部分的作用。
 
 ## 4.13 模型权重的统计解释
 
@@ -928,13 +963,13 @@ PA-TFT约有3421万个可变参数，绝大部分位于隐藏维数为512的嵌�
 
 ## 4.14 本章小结
 
-本章提出了面向小样本县级面板的面板感知时间融合变换器PA-TFT。模型以TFT的静态协变量编码器、变量选择网络、LSTM和未来屏蔽时间注意力为组件，并针对县级面板的结构作三处扩展：在网格—日层面进行变量选择，再由县内空间注意力把网格汇总为县级序列；以全局标准化的10个可见光植被指数替代图像编码器；以直接预测对数单产水平为训练目标。训练协议按样本规模设定，包括较小的学习率、梯度裁剪、权重衰减与固定轮数。PA-TFT约有3421万个参数，在对数尺度上最小化平方误差，以指数变换得到原尺度点预测。第5章以2017—2021年训练、固定轮数、2022年测试的单折时间外推评价PA-TFT，并通过组件消融与测试时干预检验各项设计与遥感的作用。
+本章提出了面向小样本县级面板的面板感知融合网络PAF-Net。模型取用TFT的静态协变量编码器、变量选择网络、门控残差、LSTM与未来屏蔽时间注意力作为内部构件（第4.1节），在保留这些构件的前提下补充三处面板专用设计：变量选择作用于（网格，日）、网格内日→月聚合、县内空间注意力，并以月度植被指数作为条件上下文；同时不采用与多步预测绑定的解码器、已知未来协变量与分位数输出，直接预测对数单产水平。训练协议按样本规模设定，包括较小的学习率、梯度裁剪、权重衰减与固定轮数。PAF-Net约有3421万个参数，在对数尺度上最小化平方误差，以指数变换得到原尺度点预测。第5章以2017—2021年训练、固定轮数、2022年测试的单折时间外推评价PAF-Net，并通过组件消融、输入消融与测试时干预检验各项设计与遥感的作用。
 
 ---
 
 # 第5章 实证结果
 
-本章报告PA-TFT模型的结果。第5.1节说明评价协议与比较模型；第5.2节给出同一预测目标下的架构比较与完整PA-TFT的2022年时间外推结果；第5.3节报告分州结果；第5.4节报告组件消融与测试时干预；第5.5节以县分组五折交叉验证评价对未见县的空间外推；第5.6节为本章小结。除特别说明外，所有指标都在原始单产尺度（bu/ac）上计算。
+本章报告PAF-Net模型的结果。第5.1节说明评价协议与比较模型；第5.2节给出同一预测目标下的架构比较与完整PAF-Net的2022年时间外推结果；第5.3节报告分州结果；第5.4节报告组件消融、输入消融与测试时干预；第5.5节以县分组五折交叉验证评价对未见县的空间外推；第5.6节为本章小结。除特别说明外，所有指标都在原始单产尺度（bu/ac）上计算。
 
 ## 5.1 评价协议与比较模型
 
@@ -944,13 +979,13 @@ PA-TFT约有3421万个可变参数，绝大部分位于隐藏维数为512的嵌�
 
 **训练轮数。** 全部比较模型使用同一条规则：每个配置按各自方法的训练预算固定轮数，训练结束后直接保留最后一轮参数（`final`检查点），不使用验证集比较轮次，也不依据2022年指标选择轮次或调整超参数。各模型的轮数预算在训练前按各自方法的常用设置确定（表5-1），训练过程中不作调整。
 
-**同一目标下的架构比较。** 本文的四个深度模型都以绝对水平为预测目标：输入按训练年份的全局统计量标准化，标签为对数单产本身，不使用县历史均值偏移。PA-TFT是本文提出的模型，三个已有深度模型是同数据、同划分、同目标下的比较对象。因此表5-2各行回答的是同一个问题——在相同的目标与输入标准化口径下，哪个模型更能预测2022年的绝对单产。
+**同一目标下的架构比较。** 本文的四个深度模型都以绝对水平为预测目标：输入按训练年份的全局统计量标准化，标签为对数单产本身，不使用县历史均值偏移。PAF-Net是本文提出的模型，三个已有深度模型是同数据、同划分、同目标下的比较对象。因此表5-2各行回答的是同一个问题——在相同的目标与输入标准化口径下，哪个模型更能预测2022年的绝对单产。
 
-**比较模型。** 本文比较GNN-RNN、PhenoYieldNet与UNet-ConvLSTM三个已有深度模型（见下）。三个模型与PA-TFT使用同一份统一数据和同一套训练/测试划分，GNN-RNN同样接入植被指数，以保证输入模态对齐。
+**比较模型。** 本文比较GNN-RNN、PhenoYieldNet与UNet-ConvLSTM三个已有深度模型（见下）。三个模型与PAF-Net使用同一份统一数据和同一套训练/测试划分，GNN-RNN同样接入植被指数，以保证输入模态对齐。
 
-**训练配置。** 四个深度模型共享同一份县年面板与同一绝对水平目标，但结构、输入与训练预算按各自方法设定。表5-1汇总各模型的完整配置：输入模态与维度、主要结构超参数、参数量、优化器与学习率、批量、训练轮数与损失。四个模型都只运行一次，随机种子固定为0。三个基线在标准化后的对数单产上计算损失，PA-TFT的损失直接作用于未标准化的对数单产；两者相差一次全局仿射变换，不改变"直接预测绝对水平"的口径，全部指标在反变换回bu/ac后计算。
+**训练配置。** 四个深度模型共享同一份县年面板与同一绝对水平目标，但结构、输入与训练预算按各自方法设定。表5-1汇总各模型的完整配置：输入模态与维度、主要结构超参数、参数量、优化器与学习率、批量、训练轮数与损失。四个模型都只运行一次，随机种子固定为0。三个基线在标准化后的对数单产上计算损失，PAF-Net的损失直接作用于未标准化的对数单产；两者相差一次全局仿射变换，不改变"直接预测绝对水平"的口径，全部指标在反变换回bu/ac后计算。
 
-| 配置项 | PA-TFT | UNet-ConvLSTM | GNN-RNN | PhenoYieldNet |
+| 配置项 | PAF-Net | UNet-ConvLSTM | GNN-RNN | PhenoYieldNet |
 |---|---|---|---|---|
 | 输入 | 网格—日气象15项（11项原始+4项构造）、6个月网格植被指数10项、县级土壤7项、网格坐标 | 6个月每网格3通道$128\times128$影像、县内逐网格11项日气象 | 县内平均11项日气象、县级土壤7项、县—月植被指数10项、县邻接图（5年窗口） | 6个月每网格3通道$128\times128$影像、县内逐网格11项日气象（另取9项作视觉上下文），不含土壤 |
 | 主要结构 | 隐层512、4头注意力、1层LSTM、dropout 0.1 | U-Net基通道32、ConvLSTM隐层64、dropout 0.1 | 4层GraphSAGE、隐层64、dropout 0 | ViT-B/8视觉骨干、drop_path 0.2 |
@@ -961,7 +996,7 @@ PA-TFT约有3421万个可变参数，绝大部分位于隐藏维数为512的嵌�
 | 训练轮数 | 20 | 50 | 100 | 10+20 |
 | 损失 | 对数单产的MSE（标签不标准化） | 标准化对数单产MSE | 标准化对数单产log-cosh | 标准化对数单产MSE |
 
-**表5-1  四个比较模型的配置（2022年时间折）。** "优化器"一列括号内为学习率与权重衰减；PA-TFT、UNet-ConvLSTM与GNN-RNN为单阶段训练，PhenoYieldNet依次为阶段一与阶段二。PhenoYieldNet的阶段一是无标签表示适配（2017—2020年），阶段二是监督微调（2021年）；其余模型直接训练2017—2021年。四个模型都训练到预定轮数并保留最后一轮参数（`final`检查点），不按验证损失或2022年指标选轮次；每个配置只运行一次，随机种子固定为0。参数量按最终检查点中全部张量的元素数统计。
+**表5-1  四个比较模型的配置（2022年时间折）。** "优化器"一列括号内为学习率与权重衰减；PAF-Net、UNet-ConvLSTM与GNN-RNN为单阶段训练，PhenoYieldNet依次为阶段一与阶段二。PhenoYieldNet的阶段一是无标签表示适配（2017—2020年），阶段二是监督微调（2021年）；其余模型直接训练2017—2021年。四个模型都训练到预定轮数并保留最后一轮参数（`final`检查点），不按验证损失或2022年指标选轮次；每个配置只运行一次，随机种子固定为0。参数量按最终检查点中全部张量的元素数统计。
 
 这一口径保证的是"同一数据、同一划分、同一目标、同一固定轮数规则"，不是"同等调参强度"：基线采用各方法的常用设置与本文的CropNet适配，没有在训练年份内部做逐模型超参数搜索。各模型在结构、学习率、批量与轮数上按各自方法设定，固定的是数据、划分、目标与指标，这与该领域的常见做法一致：MMST-ViT对比较模型"除特别说明外，超参数取各自原文报告的值"[19]，PhenoYieldNet则把全部基线在其框架内按可用的输入模态重新实现[20]。因此表5-2回答的是"在本文的统一实现与训练预算下，哪个模型更能预测2022年"，差距中同时包含结构、输入模态、实现细节与训练预算四类因素，不能全部归因于TFT的注意力算子。
 
@@ -979,7 +1014,7 @@ $$
 
 **（2）PhenoYieldNet。**
 
-PhenoYieldNet使用带气象上下文的视觉骨干、县内空间Transformer和作物感知时间解码器[20]。本研究采用面向玉米和统一数据的适配版本，其流程是在测试年之前的若干年份上作无标签表示适配，在紧邻测试年的前一年监督微调，再在测试年预测。为使预训练阶段仍有代表性，只在预训练年份不少于两年时报告结果；在以2022年为测试年的这一折上，无标签预训练使用2017—2020年、监督微调使用2021年、固定20轮后直接预测2022年，满足这一条件。其输入不含县级土壤，有标签监督样本也少于本文的PA-TFT。本文的实现以作者发布的代码为准，有几处与论文正文的描述不同：第二阶段学习率按 $\mathrm{blr}\times$有效批量$/256$ 计算（批量16时为 $1.875\times10^{-5}$，论文写的是 $3\times10^{-4}$），优化器二阶动量系数取0.95（论文为0.999），且不冻结第一阶段骨干（论文正文写冻结）；这几处均按代码设置，并在第5章全部结果中保持一致。
+PhenoYieldNet使用带气象上下文的视觉骨干、县内空间Transformer和作物感知时间解码器[20]。本研究采用面向玉米和统一数据的适配版本，其流程是在测试年之前的若干年份上作无标签表示适配，在紧邻测试年的前一年监督微调，再在测试年预测。为使预训练阶段仍有代表性，只在预训练年份不少于两年时报告结果；在以2022年为测试年的这一折上，无标签预训练使用2017—2020年、监督微调使用2021年、固定20轮后直接预测2022年，满足这一条件。其输入不含县级土壤，有标签监督样本也少于本文的PAF-Net。本文的实现以作者发布的代码为准，有几处与论文正文的描述不同：第二阶段学习率按 $\mathrm{blr}\times$有效批量$/256$ 计算（批量16时为 $1.875\times10^{-5}$，论文写的是 $3\times10^{-4}$），优化器二阶动量系数取0.95（论文为0.999），且不冻结第一阶段骨干（论文正文写冻结）；这几处均按代码设置，并在第5章全部结果中保持一致。
 
 **（3）UNet-ConvLSTM。**
 
@@ -993,32 +1028,32 @@ UNet-ConvLSTM以U-Net收缩路径提取每月每网格影像特征，用一维�
 
 | 模型 | 有标签训练数据 | RMSE | MAE | 偏差 | $R^2$ | $r$ | 异常相关 |
 |---|---|---:|---:|---:|---:|---:|---:|
-| **PA-TFT** | 2017—2021 | 21.22 | 15.78 | +4.37 | 0.739 | 0.871 | 0.299 |
+| **PAF-Net** | 2017—2021 | 21.22 | 15.78 | +4.37 | 0.739 | 0.871 | 0.299 |
 | UNet-ConvLSTM | 2017—2021 | 32.52 | 23.50 | +0.31 | 0.388 | 0.659 | 0.054 |
 | GNN-RNN | 2017—2021（2021年有标签） | 29.25 | 21.80 | +13.78 | 0.505 | 0.795 | 0.114 |
 | PhenoYieldNet | 2017—2021（2021监督微调） | 34.64 | 25.02 | +10.37 | 0.305 | 0.618 | −0.092 |
 
-**表5-2  2022年741个测试县在同一预测目标（绝对水平）下的结果。** RMSE、MAE和偏差的单位为bu/ac；偏差为平均误差（预测−观测）；异常相关为第2.6节定义的州内异常相关。PA-TFT与三个已有模型结构不同，但使用同一数据、同一划分、同一目标与同一固定轮数规则（第5.1节）。各模型各运行一次（种子0）。
+**表5-2  2022年741个测试县在同一预测目标（绝对水平）下的结果。** RMSE、MAE和偏差的单位为bu/ac；偏差为平均误差（预测−观测）；异常相关为第2.6节定义的州内异常相关。PAF-Net与三个已有模型结构不同，但使用同一数据、同一划分、同一目标与同一固定轮数规则（第5.1节）。各模型各运行一次（种子0）。
 
-**第一，在统一实现与训练预算下，PA-TFT优于三个已有的深度模型。** PA-TFT的RMSE为21.22 bu/ac，比UNet-ConvLSTM（32.52）低34.8%、比GNN-RNN（29.25）低27.5%、比PhenoYieldNet（34.64）低38.7%。PA-TFT的$R^2$为0.739，三个模型分别为0.388、0.505与0.305；州内异常相关为0.299，三个模型分别为0.054、0.114与−0.092，只有PA-TFT的县内排序能力明显为正。真正拉开差距的还有绝对水平：GNN-RNN与PhenoYieldNet的平均误差为+13.78与+10.37 bu/ac，即整体高估约一成；UNet-ConvLSTM的偏差接近0（+0.31）但$R^2$只有0.388，误差几乎全部来自县间排序。PA-TFT的偏差为+4.37 bu/ac，高于UNet-ConvLSTM，但明显低于GNN-RNN与PhenoYieldNet。在这组统一数据与训练预算的实现下，TFT骨干比三者的结构更能把天气、土壤与遥感映射到县级单产；不过这一比较同时包含输入模态、实现细节与训练预算的差异（第5.1节），差距不能单独归因于注意力算子本身。
+**第一，在统一实现与训练预算下，PAF-Net优于三个已有的深度模型。** PAF-Net的RMSE为21.22 bu/ac，比UNet-ConvLSTM（32.52）低34.8%、比GNN-RNN（29.25）低27.5%、比PhenoYieldNet（34.64）低38.7%。PAF-Net的$R^2$为0.739，三个模型分别为0.388、0.505与0.305；州内异常相关为0.299，三个模型分别为0.054、0.114与−0.092，只有PAF-Net的县内排序能力明显为正。真正拉开差距的还有绝对水平：GNN-RNN与PhenoYieldNet的平均误差为+13.78与+10.37 bu/ac，即整体高估约一成；UNet-ConvLSTM的偏差接近0（+0.31）但$R^2$只有0.388，误差几乎全部来自县间排序。PAF-Net的偏差为+4.37 bu/ac，高于UNet-ConvLSTM，但明显低于GNN-RNN与PhenoYieldNet。在这组统一数据与训练预算的实现下，PAF-Net把天气、土壤与遥感映射到县级单产的能力强于三者的结构；不过这一比较同时包含输入模态、实现细节与训练预算的差异（第5.1节），差距不能单独归因于取用的注意力算子本身。
 
-**第二，三个已有深度模型的误差来源不同。** UNet-ConvLSTM的偏差接近0（+0.31）但$R^2$只有0.388，误差几乎全部来自县间排序；GNN-RNN与PhenoYieldNet的相关系数不低（0.795与0.618），但平均误差分别为+13.78与+10.37 bu/ac，整体水平偏移主导了误差。按MSE分解，UNet-ConvLSTM的1057.6由偏差平方0.1与误差方差1057.5组成，GNN-RNN的855.4由189.9与665.5组成，PhenoYieldNet的1200.2由107.6与1092.6组成；PA-TFT的450.2由19.1与431.1组成，误差方差约为三者的41%、65%与39%。GNN-RNN的高估有其协议原因：它的损失只作用在窗口最后一年，2017—2021年的训练窗口里只有2021年（当年单产处于历史高位）有标签可用，模型因此把2021年的整体水平带到了2022年。
+**第二，三个已有深度模型的误差来源不同。** UNet-ConvLSTM的偏差接近0（+0.31）但$R^2$只有0.388，误差几乎全部来自县间排序；GNN-RNN与PhenoYieldNet的相关系数不低（0.795与0.618），但平均误差分别为+13.78与+10.37 bu/ac，整体水平偏移主导了误差。按MSE分解，UNet-ConvLSTM的1057.6由偏差平方0.1与误差方差1057.5组成，GNN-RNN的855.4由189.9与665.5组成，PhenoYieldNet的1200.2由107.6与1092.6组成；PAF-Net的450.2由19.1与431.1组成，误差方差约为三者的41%、65%与39%。GNN-RNN的高估有其协议原因：它的损失只作用在窗口最后一年，2017—2021年的训练窗口里只有2021年（当年单产处于历史高位）有标签可用，模型因此把2021年的整体水平带到了2022年。
 
 ### 5.2.2 误差结构与散点图
 
-PA-TFT在2022年这一折上的RMSE为21.22 bu/ac（MAE 15.78，偏差+4.37，$R^2=0.739$，相关系数0.871），州内异常相关为0.299。按 $\operatorname{MSE}=\overline e^{\,2}+\operatorname{Var}(e)$ 分解，PA-TFT的450.2由偏差平方19.1与误差方差431.1组成，误差方差占MSE的96%，与三个基线一样以误差方差为主，但绝对水平约为它们的42%—65%。
+PAF-Net在2022年这一折上的RMSE为21.22 bu/ac（MAE 15.78，偏差+4.37，$R^2=0.739$，相关系数0.871），州内异常相关为0.299。按 $\operatorname{MSE}=\overline e^{\,2}+\operatorname{Var}(e)$ 分解，PAF-Net的450.2由偏差平方19.1与误差方差431.1组成，误差方差占MSE的96%，与三个基线一样以误差方差为主，但绝对水平约为它们的42%—65%。
 
 ![图5-1 2022年观测与预测的散点比较](paper_figures/fig5_1_scatter.png)
 
-**图5-1  2022年741个县的观测与预测单产。** （a）PA-TFT，RMSE为21.22 bu/ac；（b）GNN-RNN，RMSE为29.25 bu/ac（三个深度基线中最好的一组）。虚线为1∶1线，每个点为一个县。
+**图5-1  2022年741个县的观测与预测单产。** （a）PAF-Net，RMSE为21.22 bu/ac；（b）GNN-RNN，RMSE为29.25 bu/ac（三个深度基线中最好的一组）。虚线为1∶1线，每个点为一个县。
 
-散点图显示，PA-TFT的预测沿1∶1线分布更紧；GNN-RNN在低产县上整体偏高，这正是它+13.78 bu/ac的平均误差所对应的水平偏移。需要强调，这一结果属于"已见县"的时间外推：测试县在2017—2021年出现过，模型可以用县际差异推断其水平。第5.5节的县分组交叉验证把县本身留出，给出另一类更困难的外推结果。
+散点图显示，PAF-Net的预测沿1∶1线分布更紧；GNN-RNN在低产县上整体偏高，这正是它+13.78 bu/ac的平均误差所对应的水平偏移。需要强调，这一结果属于"已见县"的时间外推：测试县在2017—2021年出现过，模型可以用县际差异推断其水平。第5.5节的县分组交叉验证把县本身留出，给出另一类更困难的外推结果。
 
 ## 5.3 分州结果
 
 表5-3按州给出2022年的RMSE（29个州，741个县）。
 
-| 州 | 县数 | PA-TFT | UNet-ConvLSTM | GNN-RNN | PhenoYieldNet |
+| 州 | 县数 | PAF-Net | UNet-ConvLSTM | GNN-RNN | PhenoYieldNet |
 |---|---:|---:|---:|---:|---:|
 | 爱荷华 | 68 | 11.37 | 27.48 | 18.09 | 20.09 |
 | 伊利诺伊 | 53 | 14.89 | 21.22 | 15.71 | 25.69 |
@@ -1050,39 +1085,63 @@ PA-TFT在2022年这一折上的RMSE为21.22 bu/ac（MAE 15.78，偏差+4.37，$R
 | 特拉华 | 3 | 9.24 | 17.57 | 14.34 | 16.27 |
 | 俄克拉何马 | 3 | 35.88 | 36.36 | 85.07 | 74.20 |
 
-**表5-3  2022年分州RMSE（bu/ac）。** 按县数降序排列；四个模型使用同一数据、同一划分与同一固定轮数规则。PA-TFT在22个州中最低；其余7个州的最低者分别为PhenoYieldNet（阿肯色、北达科他）、GNN-RNN（佐治亚、路易斯安那、威斯康星）与UNet-ConvLSTM（密西西比、南达科他）。
+**表5-3  2022年分州RMSE（bu/ac）。** 按县数降序排列；四个模型使用同一数据、同一划分与同一固定轮数规则。PAF-Net在22个州中最低；其余7个州的最低者分别为PhenoYieldNet（阿肯色、北达科他）、GNN-RNN（佐治亚、路易斯安那、威斯康星）与UNet-ConvLSTM（密西西比、南达科他）。
 
-图5-2把表5-3画成哑铃图，与三个深度基线中总体最好的一组（GNN-RNN）比较，按PA-TFT减GNN-RNN的差值排序。
+图5-2把表5-3画成哑铃图，与三个深度基线中总体最好的一组（GNN-RNN）比较，按PAF-Net减GNN-RNN的差值排序。
 
 ![图5-2 2022年分州RMSE哑铃图](paper_figures/fig5_2_state_rmse.png)
 
-**图5-2  2022年分州RMSE的哑铃图。** 每行为一个州，括号内为该州县数；橙点为GNN-RNN，蓝点为PA-TFT，横线连接同一州的两种结果。按PA-TFT减GNN-RNN的差值由小到大排列，越靠上改进越大。
+**图5-2  2022年分州RMSE的哑铃图。** 每行为一个州，括号内为该州县数；橙点为GNN-RNN，蓝点为PAF-Net，横线连接同一州的两种结果。按PAF-Net减GNN-RNN的差值由小到大排列，越靠上改进越大。
 
-在29个州中，PA-TFT在24个州低于GNN-RNN，这24个州的降幅中位数为4.88 bu/ac；降幅最大的是俄克拉何马（3县，−49.18 bu/ac）、田纳西（−24.17）、得克萨斯（−23.94）、内布拉斯加（−17.52）、科罗拉多（−14.77）和堪萨斯（−14.52）。俄克拉何马只有3个县，GNN-RNN在该州的RMSE为85.07 bu/ac，单县误差对州值影响很大，这一项不宜单独解读。其余州的降幅集中在3—10 bu/ac。
+在29个州中，PAF-Net在24个州低于GNN-RNN，这24个州的降幅中位数为4.88 bu/ac；降幅最大的是俄克拉何马（3县，−49.18 bu/ac）、田纳西（−24.17）、得克萨斯（−23.94）、内布拉斯加（−17.52）、科罗拉多（−14.77）和堪萨斯（−14.52）。俄克拉何马只有3个县，GNN-RNN在该州的RMSE为85.07 bu/ac，单县误差对州值影响很大，这一项不宜单独解读。其余州的降幅集中在3—10 bu/ac。
 
-PA-TFT不如GNN-RNN的5个州是阿肯色（15县，+13.31 bu/ac）、路易斯安那（+6.24）、威斯康星（+2.58）、佐治亚（+1.78）与密西西比（+0.25）。阿肯色是差距最大的一州：PA-TFT的RMSE为33.68 bu/ac，GNN-RNN为20.37，PhenoYieldNet更低至16.94；PA-TFT在该州的平均误差为−27.20 bu/ac，模型明显低估。威斯康星与佐治亚的GNN-RNN也更好（8.06对10.64、19.07对20.85），这两个州的县数不少，说明空间结构对它们有帮助。
+PAF-Net不如GNN-RNN的5个州是阿肯色（15县，+13.31 bu/ac）、路易斯安那（+6.24）、威斯康星（+2.58）、佐治亚（+1.78）与密西西比（+0.25）。阿肯色是差距最大的一州：PAF-Net的RMSE为33.68 bu/ac，GNN-RNN为20.37，PhenoYieldNet更低至16.94；PAF-Net在该州的平均误差为−27.20 bu/ac，模型明显低估。威斯康星与佐治亚的GNN-RNN也更好（8.06对10.64、19.07对20.85），这两个州的县数不少，说明空间结构对它们有帮助。
 
-绝对误差最高的州为科罗拉多（50.27 bu/ac）、南卡罗来纳（38.88）、俄克拉何马（35.88）、南达科他（34.28）、阿肯色（33.68）和北卡罗来纳（31.33）；绝对误差最低的是特拉华（9.24）、印第安纳（9.76）、爱达荷（9.92）、明尼苏达（10.40）、威斯康星（10.64）和爱荷华（11.37），基本集中在玉米带。按MSE贡献，北卡罗来纳的42个县占2022年MSE的12.4%，是最大的单一来源；内布拉斯加占8.3%，南卡罗来纳占7.7%，科罗拉多占6.1%。不计北卡罗来纳时，PA-TFT与GNN-RNN的RMSE分别为20.45与28.92；不计科罗拉多时为20.68与28.61。分州结果与第5.2节的整体表现一致：PA-TFT的平均误差为+4.37 bu/ac，误差主要是县与县之间的相对排序，而不是整体水平偏差；它在22个州中是最低的模型，但在阿肯色、南达科他等州与最好的基线差距较大，说明模型在部分州仍读错了年际信号的方向。
+绝对误差最高的州为科罗拉多（50.27 bu/ac）、南卡罗来纳（38.88）、俄克拉何马（35.88）、南达科他（34.28）、阿肯色（33.68）和北卡罗来纳（31.33）；绝对误差最低的是特拉华（9.24）、印第安纳（9.76）、爱达荷（9.92）、明尼苏达（10.40）、威斯康星（10.64）和爱荷华（11.37），基本集中在玉米带。按MSE贡献，北卡罗来纳的42个县占2022年MSE的12.4%，是最大的单一来源；内布拉斯加占8.3%，南卡罗来纳占7.7%，科罗拉多占6.1%。不计北卡罗来纳时，PAF-Net与GNN-RNN的RMSE分别为20.45与28.92；不计科罗拉多时为20.68与28.61。分州结果与第5.2节的整体表现一致：PAF-Net的平均误差为+4.37 bu/ac，误差主要是县与县之间的相对排序，而不是整体水平偏差；它在22个州中是最低的模型，但在阿肯色、南达科他等州与最好的基线差距较大，说明模型在部分州仍读错了年际信号的方向。
 
 
-## 5.4 组件消融与测试时干预
+## 5.4 组件消融、输入消融与测试时干预
 
-**消融采用结构移除，而不是把输入置零。** 在2022年这一折上，每一种配置都把相应模块连同其参数从模型中删除，其余结构与训练设置与PA-TFT完全相同，重新训练20轮并保留最后一轮。两种做法的含义不同：标准化之后把一组输入置零，等价于让它取训练集的全局均值，模型仍保留该模态的参数与变量选择通路，衡量的是"这类变量偏离均值还能带来多少精度"；删除模块则同时去掉这部分参数，回答的是"没有这个模块，模型还能不能做到同样好"。已有方法的消融也采用删除模块后重新训练的口径，例如PhenoYieldNet对CPB与CPA模块的消融，本文沿用这一做法。
+本节用两种删除式消融和一种测试时干预检验PAF-Net的设计。删除式消融把相应模块连同其参数从模型中删除，其余结构与训练设置与PAF-Net完全相同，重新训练20轮并保留最后一轮（第5.1节）。把输入置零不属于删除：标准化之后把一组输入置零，等价于让它取训练集的全局均值，模型仍保留该模态的参数与变量选择通路，衡量的是"这类变量偏离均值还能带来多少精度"；删除模块则同时去掉这部分参数，回答的是"没有这个模块，模型还能不能做到同样好"。已有方法的消融也采用删除模块后重新训练的口径，例如PhenoYieldNet对CPB与CPA模块的消融，本文沿用这一做法。下文按被删除对象的性质分成两类：第5.4.1节删除PAF-Net相对TFT补充的架构组件，第5.4.2节删除整条输入支路或一类输入变量，第5.4.3节在测试时直接干预输入。
 
-三种配置是：删除遥感支路，10个植被指数不再进入模型，对应的线性映射与变量选择一并去掉；删除土壤静态支路，7个土壤变量不再进入静态编码器；去掉4个构造气象变量，即GDD、KDD、累计降水与水分盈亏，日气象特征由15个减为11个。原始日气象变量不能整组删除：变量选择网络要求至少有一组动态输入，删掉全部气象变量后该层的归一化权重没有定义；坐标也不能删除，因为它同时是县内空间注意力的位置输入。因此气象侧只能检验构造变量的作用，坐标的作用无法用删除法单独识别。表5-4给出RMSE、与主模型的差、偏差、异常相关、预测标准差与参数量。
+### 5.4.1 组件消融
+
+PAF-Net相对TFT的差别集中在输入形态：TFT以县级月序列为输入，PAF-Net先对每个网格—日的15个动态变量做变量选择，再由县内空间注意力把网格汇总为县级序列（第4章）。另两处差别——以10个全局标准化的可见光植被指数替代图像编码器、直接以对数单产水平为训练目标——改变的是输入表示与损失，不增加网络模块，因此不在组件消融之列。组件消融有两个配置，二者的参数量都只减少约79万（2.3%），差别几乎全部在信息流而不在容量：
+
+（a）县内空间注意力替换为等权均值。保留网格—日变量选择与全部输入，县内有效网格按格点数等权平均得到县级月序列；CLS查询、Q/K/V投影与位置编码一并删除，参数由3421万降到3342万。
+
+（b）进一步把变量选择移到县—月级。先在网格与日上等权平均得到县—月序列，再沿变量维做变量选择；网格—日级选择、日→月聚合与空间注意力都不再存在，参数同样为3342万。
+
+表5-4给出结果。
 
 | 配置 | 参数量（万） | RMSE | RMSE差 | 偏差 | 异常相关 | 预测标准差 |
 |---|---:|---:|---:|---:|---:|---:|
-| **PA-TFT（主模型）** | 3421 | **21.22** | — | +4.37 | 0.299 | 32.53 |
+| **PAF-Net（主模型）** | 3421 | **21.22** | — | +4.37 | 0.299 | 32.53 |
+| 空间注意力→等权均值 | 3342 | 23.00 | +1.79 | +0.71 | 0.131 | 33.17 |
+| 网格—日级选择→县—月级选择 | 3342 | 20.77 | −0.44 | +3.71 | 0.278 | 32.62 |
+
+**表5-4  PAF-Net的组件消融（2022年这一折，bu/ac）。** 三行都是一次完整的重新训练，种子为0，固定训练20轮并保留最后一轮；RMSE差为对照配置减主模型，正值表示误差上升，负值表示误差下降。按州聚类的自助区间（5000次重采样）给出RMSE差的95%区间：空间注意力→等权均值[−1.48, +4.83]，网格—日级选择→县—月级选择[−2.97, +2.05]，两者都包含0。两个配置删除的参数量分别为78.8万与79.0万。
+
+**把县内空间注意力换成等权均值使RMSE上升1.79 bu/ac。** RMSE由21.22升到23.00，州内异常相关由0.299降到0.131，预测标准差由32.53微升到33.17。按MSE分解，主模型为450.2（偏差平方19.1、误差方差431.1），等权均值配置为529.1（0.5与528.6）：偏差由+4.37降到+0.71，水平校准反而更好，误差方差却上升了97.5。也就是说，注意力与第5.4.2节的遥感支路作用于同一方向——主要改善县年排序而非整体水平。按州聚类的95%区间[−1.48, +4.83]包含0，因此这一配置支持"注意力有用"的判断主要来自异常相关与误差方差两项，而不是区间本身；单折741个县、单次运行下，这一幅度应视为点估计。
+
+**把变量选择移到县—月级，RMSE反而略低0.44 bu/ac，但区间[−2.97, +2.05]同样包含0。** 该配置的异常相关为0.278，与主模型的0.299接近，MSE为431.5（偏差平方13.7、误差方差417.7）。把两个配置放在一起看：保留网格—日级选择、改用等权均值是三者中最差的（23.00），而删掉网格—日级选择和注意力、改为县—月级选择反而与主模型相当。这说明空间注意力是网格—日级设计能够工作的配套部件：变量选择在网格—日层面依据的是单个格点的值，若没有注意力提供县内其他网格的上下文，选出的表示无法把网格差异转化为县级信号；一旦把变量选择移到县—月级，输入已经是县内平均后的稳定序列，低容量的变量选择即可达到相近效果。由此可以提出"网格—日级选择加空间注意力"这一组合没有优于更简单的"先平均再选择"，但本文只有一个测试年份、每个配置只运行一次，这一判断需要更多年份才能确认。
+
+### 5.4.2 输入消融
+
+输入消融删除整条输入支路或一类输入变量，检验每一类输入对精度的贡献。三种配置是：删除遥感支路，10个植被指数不再进入模型，对应的线性映射与变量选择一并去掉；删除土壤静态支路，7个土壤变量不再进入静态编码器；去掉4个构造气象变量，即GDD、KDD、累计降水与水分盈亏，日气象特征由15个减为11个。原始日气象变量不能整组删除：变量选择网络要求至少有一组动态输入，删掉全部气象变量后该层的归一化权重没有定义；坐标也不能删除，因为它同时是县内空间注意力的位置输入。因此气象侧只能检验构造变量的作用，坐标的作用无法用删除法单独识别。表5-5给出RMSE、与主模型的差、偏差、异常相关、预测标准差与参数量。
+
+| 配置 | 参数量（万） | RMSE | RMSE差 | 偏差 | 异常相关 | 预测标准差 |
+|---|---:|---:|---:|---:|---:|---:|
+| **PAF-Net（主模型）** | 3421 | **21.22** | — | +4.37 | 0.299 | 32.53 |
 | 删除遥感支路 | 3420 | 24.81 | +3.59 | +3.31 | 0.175 | 31.58 |
 | 删除土壤静态支路 | 2813 | 25.87 | +4.65 | +2.78 | 0.214 | 28.83 |
 | 去掉4个构造气象变量 | 2889 | 22.92 | +1.70 | +2.84 | 0.196 | 31.49 |
 
-**表5-4  PA-TFT的组件消融（2022年这一折，bu/ac）。** 四行都是一次完整的重新训练，种子为0，固定训练20轮并保留最后一轮；RMSE差为对照配置减主模型，正值表示误差上升。按县聚类的自助区间（5000次重采样）给出RMSE差的95%区间：删除遥感支路[+0.32, +7.26]，删除土壤静态支路[+0.87, +8.66]，去掉构造气象变量[−1.22, +4.63]。遥感支路的删除使参数量减少5632（$10H+H$），土壤静态支路减少608万；去掉构造气象变量时特征数由15降到11，变量选择的输入权重随之减少531万，因此这一行同时改变了信息量与模型容量，不能单独归因于气象构造变量。
+**表5-5  PAF-Net的输入消融（2022年这一折，bu/ac）。** 四行都是一次完整的重新训练，种子为0，固定训练20轮并保留最后一轮；RMSE差为对照配置减主模型，正值表示误差上升。按县聚类的自助区间（5000次重采样）给出RMSE差的95%区间：删除遥感支路[+0.32, +7.26]，删除土壤静态支路[+0.87, +8.66]，去掉构造气象变量[−1.22, +4.63]。遥感支路的删除使参数量减少5632（$10H+H$），土壤静态支路减少608万；去掉构造气象变量时特征数由15降到11，变量选择的输入权重随之减少531万，因此这一行同时改变了信息量与模型容量，不能单独归因于气象构造变量。
 
-![图5-3 组件消融的2022年RMSE](paper_figures/fig5_3_ablation.png)
+![图5-3 消融的2022年RMSE](paper_figures/fig5_3_ablation.png)
 
-**图5-3  组件消融的2022年RMSE。** 深色条为PA-TFT主模型，浅色条为删除相应支路或变量后的重新训练。
+**图5-3  组件消融与输入消融的2022年RMSE。** 深色条为PAF-Net主模型，浅色条为删除相应组件、支路或变量后的重新训练，按RMSE排序；其中"县内空间注意力→等权均值"与"网格—日级变量选择→县—月级变量选择"为第5.4.1节的组件消融，其余三条为第5.4.2节的输入消融。
 
 **删除遥感支路使RMSE上升3.59 bu/ac。** RMSE由21.22升到24.81，异常相关由0.299降到0.175，按县聚类的95%区间[+0.32, +7.26]不含0。按MSE分解，主模型为450.2（偏差平方19.1、误差方差431.1），删除遥感后为615.3（10.9与604.4）：偏差平方反而由19.1降到10.9，误差方差却由431.1升到604.4。也就是说，遥感支路主要改善的是县年排序，而不是整体水平：去掉它以后偏差由+4.37降到+3.31，水平校准没有变差，但误差方差明显上升。这一幅度小于本节的测试时干预（+7.44 bu/ac），因为删除支路后重新训练，模型仍可从天气、土壤与坐标中恢复一部分县年信号：干预衡量已训练参数对遥感的依赖，消融衡量重新训练后还能不能补回来。
 
@@ -1090,7 +1149,9 @@ PA-TFT不如GNN-RNN的5个州是阿肯色（15县，+13.31 bu/ac）、路易斯�
 
 **去掉4个构造气象变量使RMSE上升1.70 bu/ac，但这一差异不能与本折的抽样波动分开。** 区间[−1.22, +4.63]包含0，异常相关为0.196。一种解释是4个构造变量与原始日气象变量的信息高度重叠，GDD与KDD由温度累加得到，累计降水由日降水求和得到；另一种可能是特征数由15降到11使参数量减少了15%。因此本文不宣称构造气象变量带来精度增益，它们的作用主要是可解释性：把温度与降水换算为农学意义上的热量与水分指标，便于与物候阶段对应（第3.4节）。
 
-**测试时干预。** 消融衡量的是"去掉这类输入后重新训练能否把精度补回来"，它回答不了另一个问题：已经训练好的参数在预测时是否真的读取了这类输入。两者可能不一致，因为重新训练后模型可以从其余模态中恢复部分信息。为此对PA-TFT在2022年这一折的最终检查点，保持天气、土壤与坐标不变，在同一月份内把各网格的植被指数在县之间随机置换后重新预测，重复3次取平均（表5-5）。置换保留了每个月份遥感输入的整体分布，只破坏"哪个县对应哪组植被指数"。作为对照，另做一次"置零"干预，即把全部植被指数置为0。
+### 5.4.3 测试时干预
+
+删除式消融衡量的是"去掉这类输入后重新训练能否把精度补回来"，它回答不了另一个问题：已经训练好的参数在预测时是否真的读取了这类输入。两者可能不一致，因为重新训练后模型可以从其余模态中恢复部分信息。为此对PAF-Net在2022年这一折的最终检查点，保持天气、土壤与坐标不变，在同一月份内把各网格的植被指数在县之间随机置换后重新预测，重复3次取平均（表5-6）。置换保留了每个月份遥感输入的整体分布，只破坏"哪个县对应哪组植被指数"。作为对照，另做一次"置零"干预，即把全部植被指数置为0。
 
 | 干预 | RMSE | RMSE变化 | 预测平均变化 (bu/ac) | 占单产标准差 |
 |---|---:|---:|---:|---:|
@@ -1098,56 +1159,56 @@ PA-TFT不如GNN-RNN的5个州是阿肯色（15县，+13.31 bu/ac）、路易斯�
 | 县间置换（3次置换的平均） | 28.66 | +7.44 | 11.15 | 27% |
 | 全部置零 | 36.53 | +15.31 | 22.01 | 53% |
 
-**表5-5  PA-TFT的测试时遥感干预（2022年这一折，种子0的单次运行）。** 置换后RMSE为3次置换（28.77、28.59、28.62）的平均；预测平均变化为干预前后各县预测之差的绝对值的平均，占2022年各县单产标准差（41.56 bu/ac）的比例列在最后一列。
+**表5-6  PAF-Net的测试时遥感干预（2022年这一折，种子0的单次运行）。** 置换后RMSE为3次置换（28.77、28.59、28.62）的平均；预测平均变化为干预前后各县预测之差的绝对值的平均，占2022年各县单产标准差（41.56 bu/ac）的比例列在最后一列。
 
-置换植被指数后，PA-TFT的逐县预测平均变化11.15 bu/ac，RMSE由21.22升到28.66 bu/ac（+7.44）。置零干预的影响更大：预测平均变化22.01 bu/ac，RMSE升到36.53 bu/ac（+15.31）。两类干预都造成了明显损失，说明模型在预测时确实使用了遥感中的县年信息。
+置换植被指数后，PAF-Net的逐县预测平均变化11.15 bu/ac，RMSE由21.22升到28.66 bu/ac（+7.44）。置零干预的影响更大：预测平均变化22.01 bu/ac，RMSE升到36.53 bu/ac（+15.31）。两类干预都造成了明显损失，说明模型在预测时确实使用了遥感中的县年信息。
 
 县间置换保留每月遥感输入的整体分布，只破坏"哪个县对应哪组植被指数"；它使RMSE上升7.44 bu/ac，约合单产标准差的18%（以RMSE变化计）。这一结果与本文的全局标准化口径一致：植被指数的县际差异与县内年际差异都留在输入中，模型能够把"哪个县今年的冠层状态如何"用于县年排序。置零的影响更大，是因为它同时移除了县年信号与遥感输入的整体水平；置换只移除前者。两者之差（+7.87 bu/ac）大致对应遥感输入整体水平成分的贡献，而置换造成的+7.44 bu/ac则直接度量了县年身份信息的贡献。
 
-全局标准化保留了县际和年际的遥感差异，是遥感分支能够发挥作用的前提：若按训练年份的县内均值标准化，县与县之间的全部绿度差异都会被抹去，县间置换也就无从影响预测。需要说明的是，表5-5的干预结果是单折、单次运行上的点估计，只覆盖2022年一个测试年份，幅度不能视为跨年份稳定的结论。
+全局标准化保留了县际和年际的遥感差异，是遥感分支能够发挥作用的前提：若按训练年份的县内均值标准化，县与县之间的全部绿度差异都会被抹去，县间置换也就无从影响预测。需要说明的是，表5-6的干预结果是单折、单次运行上的点估计，只覆盖2022年一个测试年份，幅度不能视为跨年份稳定的结论。
 
 ## 5.5 空间外推：县分组五折交叉验证
 
 第5.2—5.4节的预测评价都在已见县上进行：2022年的测试县在训练年份出现过，模型因此可以借助它们的历史水平。本节回答另一个问题：模型能否只凭土壤、坐标、气象与遥感，确定一个在训练中从未出现过的县的产量水平。
 
-**协议。** 按第5.1节的设计，741个县在州内分层随机分成5折，每折135—160个县。第$k$折把该折全部县2017—2022年的数据留出（810—960个县年），其余4折县的全部年份用于训练；留出县既不进入训练标签，也不进入标准化统计量，每折的全局均值与方差只在该折训练县上估计（第3.6节）。PA-TFT没有县身份的嵌入参数，县只通过土壤、坐标、气象与遥感进入模型，因此预测一个留出县不需要任何针对该县估计的参数。每折重新训练PA-TFT 20轮、保留最后一轮，种子为0，不做验证集选择，与第5.1节的固定轮数规则一致。PA-TFT不使用县际邻接图（第3.4.3节），测试时留出县的邻接列表被裁剪到留出县集合只是为满足统一数据集的校验，不参与模型计算；因此留出县与训练县之间的联系只有从训练县学到的权重。州内分层保证大州在每一折都有县；特拉华与俄克拉何马各只有3个县，只在第1—3折中出现，其在其余两折的全部县都进入训练集。5折的留出县互不重叠，拼接后覆盖全部741个县×6个年份（4446个县年），汇总指标是在全部样本上的一次留出预测。
+**协议。** 按第5.1节的设计，741个县在州内分层随机分成5折，每折135—160个县。第$k$折把该折全部县2017—2022年的数据留出（810—960个县年），其余4折县的全部年份用于训练；留出县既不进入训练标签，也不进入标准化统计量，每折的全局均值与方差只在该折训练县上估计（第3.6节）。PAF-Net没有县身份的嵌入参数，县只通过土壤、坐标、气象与遥感进入模型，因此预测一个留出县不需要任何针对该县估计的参数。每折重新训练PAF-Net 20轮、保留最后一轮，种子为0，不做验证集选择，与第5.1节的固定轮数规则一致。PAF-Net不使用县际邻接图（第3.4.3节），测试时留出县的邻接列表被裁剪到留出县集合只是为满足统一数据集的校验，不参与模型计算；因此留出县与训练县之间的联系只有从训练县学到的权重。州内分层保证大州在每一折都有县；特拉华与俄克拉何马各只有3个县，只在第1—3折中出现，其在其余两折的全部县都进入训练集。5折的留出县互不重叠，拼接后覆盖全部741个县×6个年份（4446个县年），汇总指标是在全部样本上的一次留出预测。
 
-**对比方法。** 表5-6在同一划分上重新训练了第5.1节的三个已有深度模型。四个模型共享同一份县年面板、同一折划分、同一绝对水平目标与同一固定轮数规则（PA-TFT 20轮、UNet-ConvLSTM 50轮、GNN-RNN 100轮、PhenoYieldNet无标签适配10轮加监督微调20轮，均保留最后一轮），标准化统计量也只用该折训练县估计。两处与时间外推的协议不同，都是方法本身的要求：PhenoYieldNet的阶段一不使用任何标签，用该折训练县2017—2020年的影像作无标签适配，阶段二用该折训练县的全部县年微调；GNN-RNN以年窗口组织样本，训练窗口从2017年到测试年的前一年、测试窗口以当年结尾，因此它最早能预测2019年，2017与2018两年没有足够的先行年份，表中记为"—"。
+**对比方法。** 表5-7在同一划分上重新训练了第5.1节的三个已有深度模型。四个模型共享同一份县年面板、同一折划分、同一绝对水平目标与同一固定轮数规则（PAF-Net 20轮、UNet-ConvLSTM 50轮、GNN-RNN 100轮、PhenoYieldNet无标签适配10轮加监督微调20轮，均保留最后一轮），标准化统计量也只用该折训练县估计。两处与时间外推的协议不同，都是方法本身的要求：PhenoYieldNet的阶段一不使用任何标签，用该折训练县2017—2020年的影像作无标签适配，阶段二用该折训练县的全部县年微调；GNN-RNN以年窗口组织样本，训练窗口从2017年到测试年的前一年、测试窗口以当年结尾，因此它最早能预测2019年，2017与2018两年没有足够的先行年份，表中记为"—"。
 
-**总体结果。** 在全部4446个县年上，PA-TFT的RMSE为19.81 bu/ac、MAE为14.17、$R^2$为0.682、偏差为+0.64，UNet-ConvLSTM为22.10、15.41、0.605与−2.18，PA-TFT低2.29 bu/ac（10.4%）。GNN-RNN在其可预测的2019—2022年2964个县年上为27.76、20.98、0.390与+0.04，比PA-TFT在同一批县年上的20.28高7.48 bu/ac（36.9%）。PhenoYieldNet为22.43、16.71、0.593与+2.96，PA-TFT低2.62 bu/ac（13.2%）。
+**总体结果。** 在全部4446个县年上，PAF-Net的RMSE为19.81 bu/ac、MAE为14.17、$R^2$为0.682、偏差为+0.64，UNet-ConvLSTM为22.10、15.41、0.605与−2.18，PAF-Net低2.29 bu/ac（10.4%）。GNN-RNN在其可预测的2019—2022年2964个县年上为27.76、20.98、0.390与+0.04，比PAF-Net在同一批县年上的20.28高7.48 bu/ac（36.9%）。PhenoYieldNet为22.43、16.71、0.593与+2.96，PAF-Net低2.62 bu/ac（13.2%）。
 
 | 方法 | 2017 | 2018 | 2019 | 2020 | 2021 | 2022 | 全部县年 |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| PA-TFT | 18.89 | 18.78 | 20.14 | 18.31 | 20.95 | 21.58 | 19.81 |
+| PAF-Net | 18.89 | 18.78 | 20.14 | 18.31 | 20.95 | 21.58 | 19.81 |
 | UNet-ConvLSTM | 21.81 | 21.39 | 22.43 | 22.52 | 21.20 | 23.18 | 22.10 |
 | GNN-RNN | — | — | 26.91 | 24.99 | 29.19 | 29.68 | 27.76 |
 | PhenoYieldNet | 21.33 | 22.03 | 23.36 | 21.42 | 21.87 | 24.38 | 22.43 |
 
-**表5-6  县分组五折交叉验证的逐年RMSE（bu/ac）。** 741个县按州内分层分成5折，留出县2017—2022年的全部县年都不参与训练，5折拼接后覆盖全部4446个县年；每种方法在各年份上都有741个县年。最后一列为该方法的全部县年，"全部县年"中GNN-RNN只有2019—2022年。标准化统计量在每折内部只用该折训练县估计。
+**表5-7  县分组五折交叉验证的逐年RMSE（bu/ac）。** 741个县按州内分层分成5折，留出县2017—2022年的全部县年都不参与训练，5折拼接后覆盖全部4446个县年；每种方法在各年份上都有741个县年。最后一列为该方法的全部县年，"全部县年"中GNN-RNN只有2019—2022年。标准化统计量在每折内部只用该折训练县估计。
 
-**逐年份。** PA-TFT在6个年份上的RMSE为18.31—21.58 bu/ac，在6个年份上都低于UNet-ConvLSTM（低0.25—4.21），也低于同年GNN-RNN（低6.68—8.24）与同年PhenoYieldNet（低0.92—3.25）。差距最大的是2020年（对UNet低4.21）；最小的是2021年，PA-TFT为20.95、UNet-ConvLSTM为21.20、PhenoYieldNet为21.87，与UNet只差0.25 bu/ac，而这一年的GNN-RNN也最高（29.19）。2022年PA-TFT为21.58，与时间外推的21.22接近，UNet-ConvLSTM、PhenoYieldNet与GNN-RNN分别为23.18、24.38与29.68。
+**逐年份。** PAF-Net在6个年份上的RMSE为18.31—21.58 bu/ac，在6个年份上都低于UNet-ConvLSTM（低0.25—4.21），也低于同年GNN-RNN（低6.68—8.24）与同年PhenoYieldNet（低0.92—3.25）。差距最大的是2020年（对UNet低4.21）；最小的是2021年，PAF-Net为20.95、UNet-ConvLSTM为21.20、PhenoYieldNet为21.87，与UNet只差0.25 bu/ac，而这一年的GNN-RNN也最高（29.19）。2022年PAF-Net为21.58，与时间外推的21.22接近，UNet-ConvLSTM、PhenoYieldNet与GNN-RNN分别为23.18、24.38与29.68。
 
 ![图5-4 县分组五折交叉验证的逐年RMSE](paper_figures/fig5_4_spatial.png)
 
-**图5-4  县分组五折交叉验证的逐年RMSE。** 横轴为测试年份，每年741个留出县年；四组柱依次为PA-TFT、UNet-ConvLSTM、GNN-RNN与PhenoYieldNet。GNN-RNN以年窗口组织样本，没有2017与2018年的预测。
+**图5-4  县分组五折交叉验证的逐年RMSE。** 横轴为测试年份，每年741个留出县年；四组柱依次为PAF-Net、UNet-ConvLSTM、GNN-RNN与PhenoYieldNet。GNN-RNN以年窗口组织样本，没有2017与2018年的预测。
 
-**逐折结果。** 5折的县数从160到135，PA-TFT的RMSE为17.50—21.86 bu/ac，其中4折低于同折UNet-ConvLSTM（低0.49—5.61），第1折为21.86对19.74 bu/ac，是唯一更差的一折。折间差异与各折留出县的构成有关，跨折的绝对水平不宜解读为训练稳定性的差异；每折只训练一次，折间差异中没有分离随机种子的影响。
+**逐折结果。** 5折的县数从160到135，PAF-Net的RMSE为17.50—21.86 bu/ac，其中4折低于同折UNet-ConvLSTM（低0.49—5.61），第1折为21.86对19.74 bu/ac，是唯一更差的一折。折间差异与各折留出县的构成有关，跨折的绝对水平不宜解读为训练稳定性的差异；每折只训练一次，折间差异中没有分离随机种子的影响。
 
-**异常相关。** 按第2.6节的定义，PA-TFT在全部县年上的州内异常相关为0.285，UNet-ConvLSTM为0.329，GNN-RNN为0.109，PhenoYieldNet为0.248。PA-TFT的RMSE更低而异常相关略低于UNet-ConvLSTM，说明它在空间外推上的优势主要来自县际水平的估计（$R^2$ 0.682对0.605），而不是年际偏离的排序；UNet-ConvLSTM的偏差为−2.18 bu/ac，水平误差抵消了它的一部分排序能力。这一方向与时间外推不同：2022年折上PA-TFT的异常相关（0.299）高于三个基线（0.054、0.114与−0.092）。
+**异常相关。** 按第2.6节的定义，PAF-Net在全部县年上的州内异常相关为0.285，UNet-ConvLSTM为0.329，GNN-RNN为0.109，PhenoYieldNet为0.248。PAF-Net的RMSE更低而异常相关略低于UNet-ConvLSTM，说明它在空间外推上的优势主要来自县际水平的估计（$R^2$ 0.682对0.605），而不是年际偏离的排序；UNet-ConvLSTM的偏差为−2.18 bu/ac，水平误差抵消了它的一部分排序能力。这一方向与时间外推不同：2022年折上PAF-Net的异常相关（0.299）高于三个基线（0.054、0.114与−0.092）。
 
-**与时间外推的关系。** 19.81低于第5.2节时间外推的21.22 bu/ac，但两者回答的问题不同，量级不能直接比较。空间外推的测试集覆盖6个年份，且训练集包含测试年份其他县的标签：所有模型都能借助同年其他县的水平，知道"这一年整体偏高还是偏低"。取同一个2022年比较这一差别最直接：空间外推中PA-TFT的偏差为+0.60 bu/ac，时间外推为+4.37 bu/ac，后者要外推到训练中完全没有出现过的年份水平；而排序能力并未因此提高，2022年空间外推的异常相关为0.239，时间外推为0.299。也就是说，空间外推的优势来自对年份整体水平的修正，而不是更强的县年信号提取。
+**与时间外推的关系。** 19.81低于第5.2节时间外推的21.22 bu/ac，但两者回答的问题不同，量级不能直接比较。空间外推的测试集覆盖6个年份，且训练集包含测试年份其他县的标签：所有模型都能借助同年其他县的水平，知道"这一年整体偏高还是偏低"。取同一个2022年比较这一差别最直接：空间外推中PAF-Net的偏差为+0.60 bu/ac，时间外推为+4.37 bu/ac，后者要外推到训练中完全没有出现过的年份水平；而排序能力并未因此提高，2022年空间外推的异常相关为0.239，时间外推为0.299。也就是说，空间外推的优势来自对年份整体水平的修正，而不是更强的县年信号提取。
 
 **分州差异。** 误差与偏差仍明显集中在少数州：科罗拉多（8个县）的RMSE为57.68 bu/ac，堪萨斯与得克萨斯均为32.16；阿肯色、印第安纳与威斯康星最低，分别为10.72、12.71与13.13。偏差方面，爱达荷为−18.35、北达科他为+14.30，而全国偏差仅为+0.64。科罗拉多这8个县在同一年的观测单产差距可达115—165 bu/ac（灌溉县与旱作县并存），模型仅凭土壤、坐标与气候常态无法恢复这样的县际水平。这是第3.7节所述统计限制的直接体现：模型没有专门设计从静态属性推断未见县水平的模块，州内分层的设计只评价"同州内未见县"的插值式外推，跨州与研究区外的外推没有评价。
 
 ## 5.6 本章小结
 
-本章以2017—2021年训练、各方法固定轮数、2022年测试的单折时间外推评价了PA-TFT。在同一预测目标（绝对水平）下，PA-TFT的RMSE为21.22 bu/ac，比UNet-ConvLSTM（32.52）、GNN-RNN（29.25）和PhenoYieldNet（34.64）分别低34.8%、27.5%和38.7%，州内异常相关为0.299（三者分别为0.054、0.114与−0.092）。
+本章以2017—2021年训练、各方法固定轮数、2022年测试的单折时间外推评价了PAF-Net。在同一预测目标（绝对水平）下，PAF-Net的RMSE为21.22 bu/ac，比UNet-ConvLSTM（32.52）、GNN-RNN（29.25）和PhenoYieldNet（34.64）分别低34.8%、27.5%和38.7%，州内异常相关为0.299（三者分别为0.054、0.114与−0.092）。
 
-按MSE分解，PA-TFT为450.2（偏差平方19.1、误差方差431.1），误差方差占96%，与三个基线一样以误差方差为主；三个基线的MSE为1057.6、855.4与1200.2，PA-TFT的误差方差约为它们的41%、65%与39%。分州看，PA-TFT在22个州中是四个模型里RMSE最低的一个；相对于总体最好的基线GNN-RNN，它在24个州更低、5个州更高，降幅中位数为4.88 bu/ac，改进最大的是田纳西、得克萨斯、内布拉斯加与堪萨斯，变差最大的是阿肯色、路易斯安那与威斯康星，北卡罗来纳的42个县占2022年MSE的12.4%（第5.3节）。
+按MSE分解，PAF-Net为450.2（偏差平方19.1、误差方差431.1），误差方差占96%，与三个基线一样以误差方差为主；三个基线的MSE为1057.6、855.4与1200.2，PAF-Net的误差方差约为它们的41%、65%与39%。分州看，PAF-Net在22个州中是四个模型里RMSE最低的一个；相对于总体最好的基线GNN-RNN，它在24个州更低、5个州更高，降幅中位数为4.88 bu/ac，改进最大的是田纳西、得克萨斯、内布拉斯加与堪萨斯，变差最大的是阿肯色、路易斯安那与威斯康星，北卡罗来纳的42个县占2022年MSE的12.4%（第5.3节）。
 
-组件消融中，删除遥感支路使误差上升3.59 bu/ac、删除土壤静态支路使误差上升4.65 bu/ac，去掉构造气象变量的效应落在抽样波动之内（+1.70，95%区间含0，第5.4节）。测试时干预表明，模型确实使用遥感的县年信息：县间置换使RMSE上升7.44 bu/ac、预测平均变化11.15 bu/ac，全部置零使RMSE上升15.31 bu/ac、预测平均变化22.01 bu/ac（第5.4节）。
+组件消融中，把县内空间注意力换成等权均值使误差上升1.79 bu/ac、异常相关由0.299降到0.131，而把变量选择从网格—日级移到县—月级与主模型相当（−0.44 bu/ac，95%区间含0）：注意力是网格—日级设计的配套部件，但"网格—日级选择+空间注意力"这一组合没有优于更简单的"先平均再选择"（第5.4.1节）。输入消融中，删除遥感支路使误差上升3.59 bu/ac、删除土壤静态支路使误差上升4.65 bu/ac，去掉构造气象变量的效应落在抽样波动之内（+1.70，95%区间含0，第5.4.2节）。测试时干预表明，模型确实使用遥感的县年信息：县间置换使RMSE上升7.44 bu/ac、预测平均变化11.15 bu/ac，全部置零使RMSE上升15.31 bu/ac、预测平均变化22.01 bu/ac（第5.4.3节）。
 
-在县分组五折交叉验证中，留出县在训练中完全不出现。PA-TFT在全部4446个县年上的RMSE为19.81 bu/ac，低于同一划分上重新训练的UNet-ConvLSTM（22.10）、GNN-RNN（27.76，2019—2022年）与PhenoYieldNet（22.43），且6个年份逐一比较都低于UNet-ConvLSTM与PhenoYieldNet（第5.5节）。这一结果评价的是同州内未见县的插值式外推：训练集包含测试年份其他县的标签，2022年的偏差由时间外推的+4.37降到+0.60，因此它的RMSE不能与时间外推的21.22直接比较。
+在县分组五折交叉验证中，留出县在训练中完全不出现。PAF-Net在全部4446个县年上的RMSE为19.81 bu/ac，低于同一划分上重新训练的UNet-ConvLSTM（22.10）、GNN-RNN（27.76，2019—2022年）与PhenoYieldNet（22.43），且6个年份逐一比较都低于UNet-ConvLSTM与PhenoYieldNet（第5.5节）。这一结果评价的是同州内未见县的插值式外推：训练集包含测试年份其他县的标签，2022年的偏差由时间外推的+4.37降到+0.60，因此它的RMSE不能与时间外推的21.22直接比较。
 
 这些结果限定了结论的适用范围：只有一个测试年份，每个模型只运行一次，州际差异较大；空间外推用县分组五折覆盖全部县年，但其训练集包含测试年份其他县的标签，不是时间外推。第6.2节说明不足，第6.3节提出前瞻性检验与改进的方向。
 
@@ -1157,28 +1218,28 @@ PA-TFT不如GNN-RNN的5个州是阿肯色（15县，+13.31 bu/ac）、路易斯�
 
 ## 6.1 主要结论
 
-本文以美国玉米产区29个州741个县2017—2022年的平衡面板为对象，以时间融合变换器为基础框架，针对小样本县级面板的结构提出面板感知时间融合变换器（PA-TFT）。主要结论如下。
+本文以美国玉米产区29个州741个县2017—2022年的平衡面板为对象，在取用时间融合变换器构件的基础上，针对小样本县级面板的结构提出面板感知融合网络（PAF-Net）。主要结论如下。
 
-**第一，TFT的组件与直接水平目标适合县级单产预测，并优于三个已有深度模型。** TFT的静态协变量编码、变量选择网络、LSTM与注意力，分别对应本任务对静态—动态协变量融合、变量自适应选择和生长季时间依赖的要求。在绝对水平目标、全局标准化与各自固定轮数的统一口径下，PA-TFT在2022年这一折上的RMSE为21.22 bu/ac，比UNet-ConvLSTM（32.52）、GNN-RNN（29.25）和PhenoYieldNet（34.64）分别低34.8%、27.5%和38.7%，州内异常相关为0.299，而三个模型为0.054、0.114与−0.092。这一比较同时包含输入模态、实现细节与训练预算的差异（第5.1节），不能全部归因于注意力算子；但在本文的统一实现下，PA-TFT是四个模型中县内排序能力最强的。
+**第一，取用的TFT构件与直接水平目标适合县级单产预测，并优于三个已有深度模型。** TFT的静态协变量编码、变量选择网络、LSTM与注意力，分别对应本任务对静态—动态协变量融合、变量自适应选择和生长季时间依赖的要求。在绝对水平目标、全局标准化与各自固定轮数的统一口径下，PAF-Net在2022年这一折上的RMSE为21.22 bu/ac，比UNet-ConvLSTM（32.52）、GNN-RNN（29.25）和PhenoYieldNet（34.64）分别低34.8%、27.5%和38.7%，州内异常相关为0.299，而三个模型为0.054、0.114与−0.092。这一比较同时包含输入模态、实现细节与训练预算的差异（第5.1节），不能全部归因于注意力算子；但在本文的统一实现下，PAF-Net是四个模型中县内排序能力最强的。组件消融进一步表明，在PAF-Net相对TFT增加的网格—日级选择与县内空间注意力中，注意力是必要的（换成等权均值后RMSE上升1.79 bu/ac、异常相关由0.299降到0.131），而把变量选择移到县—月级与主模型相当（−0.44 bu/ac，95%区间含0），即这一层设计的复杂度在本折没有转化为可识别的精度增益（第5.4.1节）。
 
-**第二，PA-TFT的误差以县际排序为主，绝对水平与排序都优于三个基线。** 按MSE分解，PA-TFT为450.2（偏差平方19.1、误差方差431.1），UNet-ConvLSTM、GNN-RNN与PhenoYieldNet的MSE为1057.6、855.4与1200.2，PA-TFT的误差方差约为三者的41%、65%与39%。PA-TFT的平均误差为+4.37 bu/ac，高于UNet-ConvLSTM的+0.31，但明显低于GNN-RNN与PhenoYieldNet的+13.78与+10.37；州内异常相关为0.299，三者分别为0.054、0.114与−0.092。分州看，PA-TFT在22个州中是四个模型里RMSE最低的一个，相对于总体最好的基线GNN-RNN在24个州更低、5个州更高，降幅中位数为4.88 bu/ac；改进最大的是田纳西、得克萨斯、内布拉斯加与堪萨斯，变差最大的是阿肯色、路易斯安那与威斯康星，北卡罗来纳的42个县占2022年MSE的12.4%（第5.3节）。
+**第二，PAF-Net的误差以县际排序为主，绝对水平与排序都优于三个基线。** 按MSE分解，PAF-Net为450.2（偏差平方19.1、误差方差431.1），UNet-ConvLSTM、GNN-RNN与PhenoYieldNet的MSE为1057.6、855.4与1200.2，PAF-Net的误差方差约为三者的41%、65%与39%。PAF-Net的平均误差为+4.37 bu/ac，高于UNet-ConvLSTM的+0.31，但明显低于GNN-RNN与PhenoYieldNet的+13.78与+10.37；州内异常相关为0.299，三者分别为0.054、0.114与−0.092。分州看，PAF-Net在22个州中是四个模型里RMSE最低的一个，相对于总体最好的基线GNN-RNN在24个州更低、5个州更高，降幅中位数为4.88 bu/ac；改进最大的是田纳西、得克萨斯、内布拉斯加与堪萨斯，变差最大的是阿肯色、路易斯安那与威斯康星，北卡罗来纳的42个县占2022年MSE的12.4%（第5.3节）。
 
-**第三，不把县历史均值作为偏移量，模型因此在预测年份整体偏离历史水平时仍有修正能力。** 县均值是一个零参数但高方差的水平估计：当预测年份整体偏离历史水平时，把历史均值当作预测起点会把偏差原样带入。2022年田纳西、得克萨斯、堪萨斯与内布拉斯加的单产水平明显低于2017—2021年（低约12%—30%），弗吉尼亚高约22%；PA-TFT在这些州的平均误差为+15.64、+15.36、+12.38、+11.17与−12.48 bu/ac，它没有把历史水平当作起点，而是逐县用天气与遥感修正了偏离。另一方面，直接预测水平在科罗拉多、阿肯色、北卡罗来纳与南卡罗来纳等州也引入了较大的误差：PA-TFT在这四州的RMSE为50.27、33.68、31.33与38.88 bu/ac，其中阿肯色的最低基线为PhenoYieldNet的16.94（第5.3节）。这一取舍是本文选择直接水平目标的主要依据。
+**第三，不把县历史均值作为偏移量，模型因此在预测年份整体偏离历史水平时仍有修正能力。** 县均值是一个零参数但高方差的水平估计：当预测年份整体偏离历史水平时，把历史均值当作预测起点会把偏差原样带入。2022年田纳西、得克萨斯、堪萨斯与内布拉斯加的单产水平明显低于2017—2021年（低约12%—30%），弗吉尼亚高约22%；PAF-Net在这些州的平均误差为+15.64、+15.36、+12.38、+11.17与−12.48 bu/ac，它没有把历史水平当作起点，而是逐县用天气与遥感修正了偏离。另一方面，直接预测水平在科罗拉多、阿肯色、北卡罗来纳与南卡罗来纳等州也引入了较大的误差：PAF-Net在这四州的RMSE为50.27、33.68、31.33与38.88 bu/ac，其中阿肯色的最低基线为PhenoYieldNet的16.94（第5.3节）。这一取舍是本文选择直接水平目标的主要依据。
 
 **第四，遥感分支确实被模型使用，并带来精度改进。** 删除遥感支路使误差上升3.59 bu/ac，删除土壤静态支路使误差上升4.65 bu/ac（第5.4节）。测试时干预进一步表明，在县之间置换植被指数使RMSE上升7.44 bu/ac、预测平均变化11.15 bu/ac；全部置零使误差上升15.31 bu/ac、预测平均变化22.01 bu/ac（第5.4节）。县间置换保留每月遥感输入的整体分布，只破坏"哪个县对应哪组植被指数"，它造成的大幅损失直接说明模型使用了遥感的县年信息。
 
-**第五，模型对未见县仍有预测能力，但这是同州内的插值式外推。** 在县分组五折交叉验证中，留出县2017—2022年的全部县年都不参与训练。PA-TFT在全部4446个县年上的RMSE为19.81 bu/ac、MAE为14.17，低于在同一划分上重新训练的UNet-ConvLSTM（22.10、15.41）、GNN-RNN（27.76、20.98，2019—2022年）与PhenoYieldNet（22.43、16.71），6个年份逐一比较也都低于UNet-ConvLSTM与PhenoYieldNet（第5.5节）。这一评价回答"模型能否只凭土壤、坐标、气象与遥感确定一个陌生县的产量水平"，与时间外推回答的问题不同：训练集中包含测试年份其他县的标签，2022年的偏差为+0.60 bu/ac，而时间外推为+4.37 bu/ac，两者的RMSE不能直接比较。分州看，误差仍集中在科罗拉多、堪萨斯与得克萨斯，说明模型从静态属性推断县际水平的能力有限。
+**第五，模型对未见县仍有预测能力，但这是同州内的插值式外推。** 在县分组五折交叉验证中，留出县2017—2022年的全部县年都不参与训练。PAF-Net在全部4446个县年上的RMSE为19.81 bu/ac、MAE为14.17，低于在同一划分上重新训练的UNet-ConvLSTM（22.10、15.41）、GNN-RNN（27.76、20.98，2019—2022年）与PhenoYieldNet（22.43、16.71），6个年份逐一比较也都低于UNet-ConvLSTM与PhenoYieldNet（第5.5节）。这一评价回答"模型能否只凭土壤、坐标、气象与遥感确定一个陌生县的产量水平"，与时间外推回答的问题不同：训练集中包含测试年份其他县的标签，2022年的偏差为+0.60 bu/ac，而时间外推为+4.37 bu/ac，两者的RMSE不能直接比较。分州看，误差仍集中在科罗拉多、堪萨斯与得克萨斯，说明模型从静态属性推断县际水平的能力有限。
 
 本文评价两类外推：第5.2—5.4节是"已见县、未见年份"的时间外推，测试县在训练年份出现过；第5.5节是"未见县"的空间外推，留出县在训练中完全不出现。两类设计的精度不同，不能互相替代：时间外推回答模型能否把已学到的县际水平与年际信号迁移到新年份，空间外推回答模型能否只凭土壤、坐标、气象与遥感确定一个陌生县的产量水平。
 
 ## 6.2 研究不足
 
 1. **只有一个测试年份，且2022年并非严格的留出集。** 单折结果不能说明方法在别的年份同样有效；研究过程中2022年的结果被多次查看，本文因此不把它当作从未使用过的留出集。本文的结论需要在新的年份上前瞻性地检验。
-2. **轮数规则没有经过独立验证，且没有系统调参。** 本文主结果采用"按各方法预算固定轮数、保留最后一轮参数"，这一规则是在研究过程中确定的，不是在预先注册的协议中固定的。权重衰减、dropout与网络规模仍是固定值。若要把结论推广为"PA-TFT优于基线"，需要在规则确定后于新的年份上重新验证。
-3. **统计功效仍然有限。** 单折只有741个测试县，且各模型都只运行一次：没有重复训练，就无法把模型之间较小的误差差异与训练本身的随机性分开，本文报告的模型间差异都是单次运行的点估计。此外，本文没有对梯度裁剪单独消融，也没有系统搜索网络规模。
-4. **州际差异较大，部分州的水平误差仍然突出。** PA-TFT在29个州中的22个是四个模型里RMSE最低的一个，但在阿肯色、路易斯安那、威斯康星、佐治亚与密西西比低于GNN-RNN，在阿肯色与北达科他还低于PhenoYieldNet。科罗拉多、南卡罗来纳、俄克拉何马、南达科他与阿肯色的RMSE为34—50 bu/ac，北卡罗来纳一州占2022年MSE的12.4%。这些州的2022年单产并不一定整体偏离常年水平，但模型从天气与遥感中读出的年际信号方向错了。这说明直接水平目标并不能保证在每个州都改进，州一级的误差结构仍需诊断。
+2. **轮数规则没有经过独立验证，且没有系统调参。** 本文主结果采用"按各方法预算固定轮数、保留最后一轮参数"，这一规则是在研究过程中确定的，不是在预先注册的协议中固定的。权重衰减、dropout与网络规模仍是固定值。若要把结论推广为"PAF-Net优于基线"，需要在规则确定后于新的年份上重新验证。
+3. **统计功效仍然有限。** 单折只有741个测试县，且各模型都只运行一次：没有重复训练，就无法把模型之间较小的误差差异与训练本身的随机性分开，本文报告的模型间差异都是单次运行的点估计。组件消融中"县—月级选择"的−0.44 bu/ac与主模型的差异、乃至注意力消融的+1.79 bu/ac，都在同一限制之下。此外，本文没有对梯度裁剪单独消融，也没有系统搜索网络规模。
+4. **州际差异较大，部分州的水平误差仍然突出。** PAF-Net在29个州中的22个是四个模型里RMSE最低的一个，但在阿肯色、路易斯安那、威斯康星、佐治亚与密西西比低于GNN-RNN，在阿肯色与北达科他还低于PhenoYieldNet。科罗拉多、南卡罗来纳、俄克拉何马、南达科他与阿肯色的RMSE为34—50 bu/ac，北卡罗来纳一州占2022年MSE的12.4%。这些州的2022年单产并不一定整体偏离常年水平，但模型从天气与遥感中读出的年际信号方向错了。这说明直接水平目标并不能保证在每个州都改进，州一级的误差结构仍需诊断。
 5. **遥感特征仍然粗糙。** 遥感只有RGB三个波段，植被指数在县内网格上等权平均，没有使用玉米种植面积掩码；县—月植被指数反映的是县域整体绿度，而不只是玉米冠层状态。虽然本折的干预表明模型使用了遥感的县年信息，但特征形式、时间对齐与接入方式仍有改进空间。
-6. **比较模型的检验不完整。** 三个已有深度模型各只运行一次，本文也没有检验它们的遥感分支是否同样利用了遥感的年际信息；其中GNN-RNN的输入是截至预测年的五年窗口，PhenoYieldNet需要测试年之前的无标签预训练与紧邻测试年的监督微调，二者在本文的数据年限内都只能以2022年为测试年构造。此外，本文没有在训练年份内部为每个基线做与PA-TFT同等强度的超参数搜索，表5-2的排序是"本文实现与各自默认预算"下的排序（第5.1节）。
+6. **比较模型的检验不完整。** 三个已有深度模型各只运行一次，本文也没有检验它们的遥感分支是否同样利用了遥感的年际信息；其中GNN-RNN的输入是截至预测年的五年窗口，PhenoYieldNet需要测试年之前的无标签预训练与紧邻测试年的监督微调，二者在本文的数据年限内都只能以2022年为测试年构造。此外，本文没有在训练年份内部为每个基线做与PAF-Net同等强度的超参数搜索，表5-2的排序是"本文实现与各自默认预算"下的排序（第5.1节）。
 7. **没有给出预测区间。** 本文只报告点预测及其误差。
 8. **空间外推的评价仍是初步的。** 第5.5节的县分组五折交叉验证在每个留出县上覆盖2017—2022年，且训练集包含测试年份其他县的标签，因此它评价的是"未见过县"的插值式外推，而不是未来年份的预测；分折按州内随机划分，各州在训练中都有代表，对研究区外、气候条件不同的地区本文没有评价。
 
@@ -1186,19 +1247,21 @@ PA-TFT不如GNN-RNN的5个州是阿肯色（15县，+13.31 bu/ac）、路易斯�
 
 第一，进行前瞻性检验：在2023年及以后的新年份上，按本文事先确定的模型和流程进行预测。
 
-第二，为PA-TFT引入数据驱动的训练预算：在训练年份内用滚动窗口同时监控多个留出年份，据此检查固定轮数在不同年份是否都合理，并在多个留出年份上确定权重衰减与轮数，而不是由研究者一次性设定。
+第二，为PAF-Net引入数据驱动的训练预算：在训练年份内用滚动窗口同时监控多个留出年份，据此检查固定轮数在不同年份是否都合理，并在多个留出年份上确定权重衰减与轮数，而不是由研究者一次性设定。
 
 第三，改进遥感特征：引入种植面积掩码，只在玉米像元上计算植被指数；在有近红外波段的数据源上使用NDVI、EVI等指数；尝试绿度峰值时间、衰老速度等更贴近物候的特征。
 
 第四，在相同协议下复核已有深度模型：对三个已有深度模型重复训练并报告随机种子造成的波动，同时检验它们的遥感分支是否同样利用了植被指数的年际信息。
 
-第五，诊断州际差异：按州分析PA-TFT的水平误差与天气、遥感输入的关系，识别哪些州的年际信号被模型读反，并据此改进输入或引入州级校准。
+第五，诊断州际差异：按州分析PAF-Net的水平误差与天气、遥感输入的关系，识别哪些州的年际信号被模型读反，并据此改进输入或引入州级校准。
 
-第六，建立玉米期货期权的经济价值评价：将县级预测按收获面积聚合为区域产量的预测分布，估计产量意外与期货收益、实现波动率及隐含波动率变化之间的关系，然后在严格样本外条件下回测保护性看跌、看涨价差或动态Delta套保策略，报告扣除交易成本后的收益、夏普比率、最大回撤和套保有效性。
+第六，复核县内融合顺序：组件消融显示"先平均再选择"与"网格—日级选择加空间注意力"在本折精度相当，后续应在多个年份上比较两种结构，判断更简单的县—月级选择能否在保持精度的同时减少参数与计算。
+
+第七，建立玉米期货期权的经济价值评价：将县级预测按收获面积聚合为区域产量的预测分布，估计产量意外与期货收益、实现波动率及隐含波动率变化之间的关系，然后在严格样本外条件下回测保护性看跌、看涨价差或动态Delta套保策略，报告扣除交易成本后的收益、夏普比率、最大回撤和套保有效性。
 
 ## 6.4 本章小结
 
-本文以时间融合变换器为基础框架，提出了面向小样本县级面板的PA-TFT模型。针对样本量小、县际差异占主导的结构，PA-TFT以直接预测对数单产水平、全局标准化的多模态输入和与样本规模相称的优化设置为核心设计。在2017—2021年训练、固定轮数、2022年测试的协议下，PA-TFT的RMSE为21.22 bu/ac，低于三个已有深度模型（29.25—34.64）。组件消融与测试时干预表明，删除遥感支路使误差上升3.59 bu/ac、删除土壤静态支路使误差上升4.65 bu/ac；县间置换使RMSE上升7.44 bu/ac，全部置零使误差上升15.31 bu/ac。县分组五折交叉验证进一步表明，在留出县完全不参与训练时，PA-TFT在全部4446个县年上的RMSE为19.81 bu/ac，低于同一划分上重新训练的UNet-ConvLSTM（22.10）、GNN-RNN（27.76）与PhenoYieldNet（22.43）；由于训练集包含测试年份其他县的标签，这一结果评价的是同州内未见县的插值式外推，不能与时间外推的21.22直接比较。州际差异仍然较大：PA-TFT在22个州中是四个模型里最好的，但在阿肯色、路易斯安那与威斯康星等州不如GNN-RNN，这是本文最需要继续诊断的问题。后续研究需要在新的年份上前瞻性地检验这些结论，并改进遥感特征、州级校准与训练预算。
+本文取用了时间融合变换器的静态条件化、变量选择、门控残差与因果时间注意力，提出了面向小样本县级面板的PAF-Net模型。针对样本量小、县际差异占主导的结构，PAF-Net以直接预测对数单产水平、全局标准化的多模态输入和与样本规模相称的优化设置为核心设计。在2017—2021年训练、固定轮数、2022年测试的协议下，PAF-Net的RMSE为21.22 bu/ac，低于三个已有深度模型（29.25—34.64）。组件消融与输入消融表明，把县内空间注意力换成等权均值使误差上升1.79 bu/ac，删除遥感支路使误差上升3.59 bu/ac、删除土壤静态支路使误差上升4.65 bu/ac，而把变量选择移到县—月级与主模型相当；测试时干预表明，县间置换使RMSE上升7.44 bu/ac，全部置零使误差上升15.31 bu/ac。县分组五折交叉验证进一步表明，在留出县完全不参与训练时，PAF-Net在全部4446个县年上的RMSE为19.81 bu/ac，低于同一划分上重新训练的UNet-ConvLSTM（22.10）、GNN-RNN（27.76）与PhenoYieldNet（22.43）；由于训练集包含测试年份其他县的标签，这一结果评价的是同州内未见县的插值式外推，不能与时间外推的21.22直接比较。州际差异仍然较大：PAF-Net在22个州中是四个模型里最好的，但在阿肯色、路易斯安那与威斯康星等州不如GNN-RNN，这是本文最需要继续诊断的问题。后续研究需要在新的年份上前瞻性地检验这些结论，并改进遥感特征、州级校准与训练预算。
 
 ---
 
