@@ -146,8 +146,11 @@ def evaluate_final_checkpoint(
     stats = adapter.stats_from_json(checkpoint["stats"])
     use_constructed = checkpoint.get("use_constructed", True)
     rs_store = adapter.load_rs_store(checkpoint["model_config"])
+    need_images = rs_store is None and not (
+        inference_config.get("no_rs_branch") and inference_config.get("seq_level") == "day"
+    )
     dataset = adapter.build_dataset(eval_jsonl or dataset_jsonl, data_root, test_years,
-                                    load_images=rs_store is None)
+                                    load_images=need_images)
     loader = adapter.build_loader(
         dataset, stats, batch_size, False,
         use_constructed=use_constructed,

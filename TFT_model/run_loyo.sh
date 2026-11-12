@@ -36,6 +36,16 @@ declare -A CFG=(
   [main]="--rs-features $RS --grad-clip 1.0 --lr 1e-4 --no-rs-within-norm --no-weather-within-norm"
   # 消融：遥感输入全部置零（模型结构不变，遥感分支只剩常数偏置，不含任何影像信息）
   [nors]="--rs-features $RS_ZERO --grad-clip 1.0 --lr 1e-4 --no-rs-within-norm --no-weather-within-norm"
+  # 组件消融：县内空间注意力换成等权均值，查询/键/值投影、CLS 查询与位置编码一并删除
+  [spatialmean]="--rs-features $RS --grad-clip 1.0 --lr 1e-4 --no-rs-within-norm --no-weather-within-norm --spatial-pool mean"
+  # 组件消融：先在网格与日上取均值，再做县—月级变量选择；网格—日级选择与空间注意力都不存在
+  [countymonth]="--rs-features $RS --grad-clip 1.0 --lr 1e-4 --no-rs-within-norm --no-weather-within-norm --selection-level county_month"
+  # 逐级改造链（日粒度、不做日→月聚合）：A 县内网格平均后的单序列 + 土壤；B 逐网格 VSN 后等权平均；
+  # C 逐网格 VSN 后县内空间注意力；D 在 C 上加入按月遥感条件上下文（= 日粒度主模型）
+  [stepA]="--input-mode county_mean --seq-level day --no-rs-branch --grad-clip 1.0 --lr 1e-4 --no-rs-within-norm --no-weather-within-norm"
+  [stepB]="--seq-level day --no-rs-branch --spatial-pool mean --grad-clip 1.0 --lr 1e-4 --no-rs-within-norm --no-weather-within-norm"
+  [stepC]="--seq-level day --no-rs-branch --grad-clip 1.0 --lr 1e-4 --no-rs-within-norm --no-weather-within-norm"
+  [stepD]="--seq-level day --rs-features $RS --grad-clip 1.0 --lr 1e-4 --no-rs-within-norm --no-weather-within-norm"
 )
 
 jobs=()

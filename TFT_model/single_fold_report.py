@@ -29,6 +29,18 @@ REMOVAL_CONFIGS = {
     "nosoilbranch": "删除土壤静态支路",
     "noconstructed": "去掉4个构造气象变量",
 }
+# 组件消融：删除 PA-TFT 在原始 TFT 之上增加的组件（县内空间注意力、网格—日级变量选择）
+COMPONENT_CONFIGS = {
+    "spatialmean": "县内空间注意力→等权均值",
+    "countymonth": "网格—日级变量选择→县—月级变量选择",
+}
+# 逐级改造链：日粒度、不做日→月聚合，每一步只加入一项改动，运行名见 run_loyo.sh 的 stepA—stepD。
+CHAIN_CONFIGS = {
+    "stepA": "A 县内网格平均后的县—日级单序列（无遥感）",
+    "stepB": "B 逐网格 VSN 后县内等权平均（无遥感）",
+    "stepC": "C 逐网格 VSN 后县内空间注意力（无遥感）",
+    "stepD": "D 空间注意力 + 按月遥感条件上下文",
+}
 
 
 def load_labels():
@@ -122,9 +134,37 @@ def main():
         print(f"{label:28s} rmse {rmse:6.2f}  delta {row['delta']:+.2f}  anom {row['anom_corr']:.3f}")
 
     # 移除式消融：整条支路从结构中删除后重新训练（2022 折、种子 0）
-    out["removal_ablation"] = {}
-    for key, label in REMOVAL_CONFIGS.items():
-        run_id = f"ablate-{key}-y{YEAR}-s0"
+    for group, configs in (("removal_ablation", REMOVAL_CONFIGS),
+                           ("component_ablation", COMPONENT_CONFIGS)):
+        out[group] = {}
+        for key, label in configs.items():
+            run_id = f"ablate-{key}-y{YEAR}-s0"
+            loaded = load_pred(run_id)
+            if loaded is None:
+                print(f"跳过 {label}：缺少 {run_id}")
+                continue
+            pred_map = loaded[0]
+            ens = np.array([pred_map[f] for f in fips])
+            e = ens - truth
+            rmse = float(np.sqrt((e ** 2).mean()))
+            row = {"label": label, "run_id": run_id, "rmse": rmse,
+                   "delta": rmse - out["main"]["rmse"],
+                   "bias": float(e.mean()),
+                   "anom_corr": anomaly_corr(ens, truth, base_log, fips, states),
+                   "pred_sd": float(ens.std()),
+                   "params": param_count(run_id)}
+            row["state_ci"], row["state_share"] = cluster_bootstrap(e_main, e, states)
+            out[group][key] = row
+            print(f"{label:34s} rmse {rmse:6.2f}  delta {row['delta']:+.2f}  anom {row['anom_corr']:.3f}  "
+                  f"params {row['params']:,}  CI [{row['state_ci'][0]:+.2f},{row['state_ci'][1]:+.2f}]")
+
+    out["main"]["params"] = param_count(f"{TAG}{MAIN}-y{YEAR}-s0")
+
+    # 逐级改造链：每一步与上一步的同州聚类区间，回答"这一项改动是否值得采纳"
+    out["chain"] = {}
+    prev_e, prev_row = None, None
+    for key, label in CHAIN_CONFIGS.items():
+        run_id = f"chain-{key}-y{YEAR}-s0"
         loaded = load_pred(run_id)
         if loaded is None:
             print(f"跳过 {label}：缺少 {run_id}")
@@ -139,12 +179,15 @@ def main():
                "anom_corr": anomaly_corr(ens, truth, base_log, fips, states),
                "pred_sd": float(ens.std()),
                "params": param_count(run_id)}
-        row["state_ci"], row["state_share"] = cluster_bootstrap(e_main, e, states)
-        out["removal_ablation"][key] = row
-        print(f"{label:28s} rmse {rmse:6.2f}  delta {row['delta']:+.2f}  anom {row['anom_corr']:.3f}  "
-              f"params {row['params']:,}  CI [{row['state_ci'][0]:+.2f},{row['state_ci'][1]:+.2f}]")
+        if prev_e is not None:
+            row["delta_prev"] = rmse - prev_row["rmse"]
+            row["state_ci_prev"], row["state_share_prev"] = cluster_bootstrap(e, prev_e, states)
+        out["chain"][key] = row
+        print(f"{label:40s} rmse {rmse:6.2f}  Δ主 {row['delta']:+.2f}"
+              + (f"  Δ上步 {row['delta_prev']:+.2f}  CI [{row['state_ci_prev'][0]:+.2f},{row['state_ci_prev'][1]:+.2f}]"
+                 if "delta_prev" in row else ""))
+        prev_e, prev_row = e, row
 
-    out["main"]["params"] = param_count(f"{TAG}{MAIN}-y{YEAR}-s0")
     (OUT / "single_fold_2022.json").write_text(json.dumps(out, ensure_ascii=False, indent=1), encoding="utf-8")
 
 

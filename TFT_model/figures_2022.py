@@ -1,7 +1,7 @@
 """第5章图：2022 折（2017—2021 训练、固定轮数、2022 测试）。
 
-图5-1  2022年观测—预测散点（PA-TFT 与 GNN-RNN，后者是三个深度基线中最好的一组）
-图5-2  分州RMSE哑铃图（PA-TFT 对 GNN-RNN，按差值排序）
+图5-1  2022年观测—预测散点（PAF-Net 与 GNN-RNN，后者是三个深度基线中最好的一组）
+图5-2  分州RMSE哑铃图（PAF-Net 对 GNN-RNN，按差值排序）
 图5-3  组件消融的RMSE
 
 预测来自 `/data/raid0/hqx/TFT_out/tft/paper-main-y2022-s0`（环境变量 `LOYO_RUN`
@@ -58,7 +58,7 @@ def style(ax):
 def fig_scatter(plt, fips, pred, truth, base):
     fig, axes = plt.subplots(1, 2, figsize=(9.6, 4.7), constrained_layout=True)
     lim = (0.0, 260.0)
-    panels = (("（a）PA-TFT", pred, BLUE), (f"（b）{BASELINE_LABEL}", base, ORANGE))
+    panels = (("（a）PAF-Net", pred, BLUE), (f"（b）{BASELINE_LABEL}", base, ORANGE))
     for ax, (title, p, color) in zip(axes, panels):
         m = metrics(truth, p)
         ax.plot(lim, lim, ls="--", lw=1, color=MUTED, zorder=1)
@@ -91,7 +91,7 @@ def fig_state_dumbbell(plt, fips, pred, truth, base):
     for y, r in zip(ys, reversed(rows)):
         ax.plot([r["base"], r["tft"]], [y, y], color=CONNECTOR, lw=1.6, zorder=1, solid_capstyle="round")
     ax.scatter([r["base"] for r in reversed(rows)], ys, s=30, color=ORANGE, zorder=3, label=BASELINE_LABEL)
-    ax.scatter([r["tft"] for r in reversed(rows)], ys, s=30, color=BLUE, zorder=3, label="PA-TFT")
+    ax.scatter([r["tft"] for r in reversed(rows)], ys, s=30, color=BLUE, zorder=3, label="PAF-Net")
     ax.set_yticks(ys)
     ax.set_yticklabels([f"{r['name']}（{r['n']}）" for r in reversed(rows)], fontsize=8.5, color=INK)
     ax.set_xlabel("2022年分州RMSE（bu/ac）", fontsize=10, color=INK)
@@ -113,12 +113,13 @@ def fig_state_dumbbell(plt, fips, pred, truth, base):
 
 def fig_ablation(plt, main_rmse):
     report = json.loads((OUT / "single_fold_2022.json").read_text(encoding="utf-8"))
-    rows = [("PA-TFT（主模型）", report["main"]["rmse"])]
+    rows = [("PAF-Net（主模型）", report["main"]["rmse"])]
+    rows += [(row["label"], row["rmse"]) for row in report.get("component_ablation", {}).values()]
     rows += [(row["label"], row["rmse"]) for row in report.get("removal_ablation", {}).values()]
     rows.sort(key=lambda r: r[1])
     fig, ax = plt.subplots(figsize=(7.0, 3.1), constrained_layout=True)
     ys = np.arange(len(rows))
-    colors = [BLUE_DARK if label == "PA-TFT（主模型）" else BLUE for label, _ in rows]
+    colors = [BLUE_DARK if label == "PAF-Net（主模型）" else BLUE for label, _ in rows]
     ax.barh(ys, [v for _, v in rows], height=0.62, color=colors, zorder=3)
     for y, (label, v) in zip(ys, rows):
         ax.text(v + 0.25, y, f"{v:.2f}", va="center", fontsize=8.5, color=INK,
@@ -152,7 +153,7 @@ def main():
 
     scores = fig_scatter(plt, fips, pred, truth, base)
     states = fig_state_dumbbell(plt, fips, pred, truth, base)
-    ablation = fig_ablation(plt, scores["（a）PA-TFT"]["rmse"])
+    ablation = fig_ablation(plt, scores["（a）PAF-Net"]["rmse"])
 
     for name, m in scores.items():
         print(f"{name}: RMSE {m['rmse']:.2f} MAE {m['mae']:.2f} R2 {m['r2']:.3f} r {m['corr']:.3f}")
@@ -160,7 +161,7 @@ def main():
     print(f"states: {int(sum(g > 0 for g in gains))}/{len(gains)} better, "
           f"median gain {np.median([g for g in gains if g > 0]):.2f}")
     for label, v in ablation:
-        print(f"{label}: {v:.2f} ({v - scores['（a）PA-TFT']['rmse']:+.2f})")
+        print(f"{label}: {v:.2f} ({v - scores['（a）PAF-Net']['rmse']:+.2f})")
     print("wrote fig5_1_scatter.png, fig5_2_state_rmse.png, fig5_3_ablation.png")
 
 

@@ -833,9 +833,25 @@ class TFTEncoderForYieldPrediction(nn.Module):
         rs_aux: bool = False,
         rs_feature_dim: int = 0,
         no_rs_branch: bool = False,
+        spatial_pool: str = "attention",
+        selection_level: str = "grid_day",
+        seq_level: str = "month",
+        input_mode: str = "grid",
     ):
         super().__init__()
         self.hidden_size = hidden_size
+        if spatial_pool not in ("attention", "mean"):
+            raise ValueError(f"unknown spatial_pool {spatial_pool!r}")
+        if selection_level not in ("grid_day", "county_month"):
+            raise ValueError(f"unknown selection_level {selection_level!r}")
+        if seq_level not in ("month", "day"):
+            raise ValueError(f"unknown seq_level {seq_level!r}")
+        if input_mode not in ("grid", "county_mean"):
+            raise ValueError(f"unknown input_mode {input_mode!r}")
+        self.spatial_pool = spatial_pool
+        self.selection_level = selection_level
+        self.seq_level = seq_level
+        self.input_mode = input_mode
         self.num_heads = num_heads
         self.dynamic_feature_names = list(dynamic_feature_names)
         if rs_as_variable and RS_VARIABLE_NAME in self.dynamic_feature_names:
@@ -851,6 +867,12 @@ class TFTEncoderForYieldPrediction(nn.Module):
         self.no_rs_branch = bool(no_rs_branch)
         if self.no_rs_branch and (self.rs_feature_dim or remote_constant or rs_aux):
             raise ValueError("no_rs_branch excludes rs_feature_dim / remote_constant / rs_aux")
+        if self.input_mode == "county_mean":
+            # 步骤 A/B/C 的县—日级单序列没有遥感条件上下文。
+            if self.seq_level != "day":
+                raise ValueError("input_mode='county_mean' requires seq_level='day'")
+            if not self.no_rs_branch:
+                raise ValueError("input_mode='county_mean' requires no_rs_branch=True")
 
         # 1. 静态：县级连续土壤(Linear 映射,不分桶)+ 上下文 GRN
         self.soil_static_encoder = SoilStaticEncoder(
@@ -908,7 +930,19 @@ class TFTEncoderForYieldPrediction(nn.Module):
             dropout=dropout,
         )
 
-        self.spatial_agg = SpatialAttentionAggregator(hidden_size, dropout)
+        # 组件消融：把县内空间注意力换成等权均值时，查询/键/值投影与位置编码
+        # 一并去掉，只保留一个 LayerNorm 使尺度与主模型可比。
+        if self.selection_level == "county_month" or self.input_mode == "county_mean":
+            # 县—月级变量选择已经把网格聚合掉，县内空间注意力不再存在；
+            # 县—日级单序列输入同样没有县内网格维度。
+            self.spatial_agg = None
+            self.mean_norm = None
+        elif self.spatial_pool == "attention":
+            self.spatial_agg = SpatialAttentionAggregator(hidden_size, dropout)
+            self.mean_norm = None
+        else:
+            self.spatial_agg = None
+            self.mean_norm = nn.LayerNorm(hidden_size)
 
         # 6. 产量预测头
         self.pred_grn = GatedResidualNetwork(
@@ -1005,12 +1039,12 @@ class TFTEncoderForYieldPrediction(nn.Module):
             rs_encoded = grid_feats.new_zeros(
                 (B, G, len(AG_DATE_PAIRS), self.hidden_size)
             )
-            rs_by_time, _ = _broadcast_rs_forward(
+            rs_by_time, rs_mask = _broadcast_rs_forward(
                 rs_encoded, month_ids, day_ids, ag_mask,
             )  # (B, G, T, H)
         elif self.rs_feature_dim:
             rs_encoded = self._encode_rs_features(rs_features, grid_mask, ag_grid_mask, device)
-            rs_by_time, _ = _broadcast_rs_forward(
+            rs_by_time, rs_mask = _broadcast_rs_forward(
                 rs_encoded, month_ids, day_ids, ag_mask,
             )  # (B, G, T, H)
         elif self.use_remote_constant:
@@ -1028,7 +1062,7 @@ class TFTEncoderForYieldPrediction(nn.Module):
                     device=device, dtype=torch.bool
                 ).transpose(1, 2)
             rs_encoded = rs_encoded * rs_valid[:, :, :, None].to(rs_encoded.dtype)
-            rs_by_time, _ = _broadcast_rs_forward(
+            rs_by_time, rs_mask = _broadcast_rs_forward(
                 rs_encoded, month_ids, day_ids, ag_mask,
             )  # (B, G, T, H)
         else:
@@ -1037,7 +1071,7 @@ class TFTEncoderForYieldPrediction(nn.Module):
             rs_encoded = self._forward_remote_sensing(
                 ag_images, grid_coords, grid_mask, device, ag_grid_mask,
             )  # (B, G, N_rs, H)
-            rs_by_time, _ = _broadcast_rs_forward(
+            rs_by_time, rs_mask = _broadcast_rs_forward(
                 rs_encoded, month_ids, day_ids, ag_mask,
             )  # (B, G, T, H)
 
@@ -1050,28 +1084,16 @@ class TFTEncoderForYieldPrediction(nn.Module):
         if self.rs_as_variable:
             grid_inputs[RS_VARIABLE_NAME] = rs_by_time.reshape(B * G, T, self.hidden_size)
 
-        grid_seq_lens = seq_lens.repeat_interleave(G)
-        grid_context = static_context.reshape(B * G, T, self.hidden_size)
-        grid_token, grid_vsn_weights = self.grid_vsn(
-            grid_inputs, grid_seq_lens, context=grid_context
-        )
-        grid_token = grid_token.reshape(B, G, T, self.hidden_size)
-        grid_token = grid_token * grid_mask[:, :, None, None].to(grid_token.dtype)
-
         Te = len(AG_DATE_PAIRS)
         if month_ids is None or day_ids is None:
             raise ValueError("必须传入 month_ids 和 day_ids")
-        month_valid = torch.zeros(B, Te, device=device, dtype=torch.bool)
-        monthly_feat = torch.zeros(B, G, Te, self.hidden_size, device=device)
-        weather_valid = torch.arange(T, device=device).unsqueeze(0) < seq_lens[:, None]
         month_ids_dev = month_ids.to(device=device).long()
+        weather_valid = torch.arange(T, device=device).unsqueeze(0) < seq_lens[:, None]
+        month_valid = torch.zeros(B, Te, device=device, dtype=torch.bool)
+        month_day_masks = []
         for m_idx in range(Te):
-            target_month = AG_DATE_PAIRS[m_idx][0]
-            is_month = (month_ids_dev == target_month) & weather_valid
-            month_mask = is_month.float()
-            month_count = month_mask.sum(dim=1, keepdim=True).clamp_min(1.0)
-            month_sum = (grid_token * month_mask[:, None, :, None]).sum(dim=2)
-            monthly_feat[:, :, m_idx] = month_sum / month_count[:, :, None]
+            is_month = (month_ids_dev == AG_DATE_PAIRS[m_idx][0]) & weather_valid
+            month_day_masks.append(is_month)
             month_valid[:, m_idx] = is_month.any(dim=1)
 
         month_valid = month_valid & ag_mask.to(device=device, dtype=torch.bool)
@@ -1083,26 +1105,155 @@ class TFTEncoderForYieldPrediction(nn.Module):
         month_seq_lens = month_valid.sum(dim=1).clamp_max(Te)
         pad_mask = month_valid
 
-        time_indices = torch.arange(Te, device=device, dtype=torch.long).expand(B, -1)
-        spatial_grid_mask = (
-            ag_grid_mask.to(device=device, dtype=torch.bool)
-            if ag_grid_mask is not None
-            else grid_mask[:, None, :].expand(B, Te, G)
-        )
-        spatial_token_mask = month_valid[:, :, None] & spatial_grid_mask
-        temporal_feat, spatial_weights = self.spatial_agg.forward_weights(
-            monthly_feat.transpose(1, 2),
-            grid_coords,
-            grid_mask,
-            token_mask=spatial_token_mask,
-            time_indices=time_indices,
-        )
+        grid_vsn_weights = None
+        spatial_weights = None
+        if self.input_mode == "county_mean":
+            # 步骤 A：县内网格先等权平均，得到县—日级单序列，没有县内空间建模。
+            g_w = grid_mask[:, :, None].to(grid_feats.dtype)  # (B,G,1)
+            g_denom = g_w.sum(dim=1).clamp_min(1.0)  # (B,1)
+            county = (grid_feats * g_w[:, :, None, :]).sum(dim=1) / g_denom[:, :, None]
+            county_inputs = {
+                name: self.per_feature_linear[name](county[..., j:j + 1])
+                for j, name in enumerate(self.dynamic_feature_names)
+            }
+            # 与网格路径无遥感时使用同一上下文函数形式（零遥感 + 土壤上下文），
+            # 使 A 与 B 的差异只来自"聚合发生在变量选择之前还是之后"。
+            county_context = self.static_context_grn(
+                county.new_zeros(B, T, self.hidden_size),
+                context=c_s[:, None, :].expand(B, T, self.hidden_size),
+            )
+            temporal_feat, grid_vsn_weights = self.grid_vsn(
+                county_inputs, seq_lens, context=county_context,
+            )
+            valid_t = weather_valid
+            seq_len_t = seq_lens
+            pad_mask = valid_t
+            n_tokens = T
+        elif self.selection_level == "county_month":
+            # 组件消融：先在网格与日两个维度上等权平均，再做县—月级变量选择；
+            # 县内空间注意力与网格—日级选择都不再存在。
+            valid_gt = grid_mask[:, :, None] & weather_valid[:, None, :]  # (B,G,T)
+            county_month = torch.zeros(
+                B, Te, grid_feats.shape[-1], device=device, dtype=grid_feats.dtype
+            )
+            rs_county_month = torch.zeros(B, Te, self.hidden_size, device=device, dtype=rs_by_time.dtype)
+            for m_idx, is_month in enumerate(month_day_masks):
+                valid_gt_month = valid_gt & is_month[:, None, :]  # (B,G,T)
+                w = valid_gt_month.to(grid_feats.dtype)
+                denom = w.sum(dim=(1, 2)).clamp_min(1.0)
+                county_month[:, m_idx] = (grid_feats * w[..., None]).sum(dim=(1, 2)) / denom[:, None]
+                if ag_grid_mask is not None:
+                    # 与注意力路径的 token_mask 语义一致：缺少遥感的网格不参与该月均值。
+                    valid_gt_month = valid_gt_month & ag_grid_mask.to(
+                        device=device, dtype=torch.bool
+                    )[:, m_idx, :, None]
+                w_rs = valid_gt_month[..., None].to(rs_by_time.dtype)
+                rs_county_month[:, m_idx] = (rs_by_time * w_rs).sum(dim=(1, 2)) / w_rs.sum(dim=(1, 2)).clamp_min(1.0)
+            cm_inputs = {
+                name: self.per_feature_linear[name](county_month[..., j:j + 1])
+                for j, name in enumerate(self.dynamic_feature_names)
+            }
+            cm_context = self.static_context_grn(
+                rs_county_month,
+                context=c_s[:, None, :].expand(B, Te, self.hidden_size),
+            )
+            temporal_feat, grid_vsn_weights = self.grid_vsn(
+                cm_inputs, month_seq_lens, context=cm_context,
+            )
+            temporal_feat = temporal_feat * month_valid[..., None].to(temporal_feat.dtype)
+            valid_t, seq_len_t, n_tokens = month_valid, month_seq_lens, Te
+        else:
+            grid_seq_lens = seq_lens.repeat_interleave(G)
+            grid_context = static_context.reshape(B * G, T, self.hidden_size)
+            grid_token, grid_vsn_weights = self.grid_vsn(
+                grid_inputs, grid_seq_lens, context=grid_context
+            )
+            grid_token = grid_token.reshape(B, G, T, self.hidden_size)
+            grid_token = grid_token * grid_mask[:, :, None, None].to(grid_token.dtype)
+
+            if self.seq_level == "day":
+                # 步骤 B/C/D：不做日→月聚合，直接在日粒度上做县内聚合。
+                token_mask = (
+                    grid_mask[:, :, None] & weather_valid[:, None, :]
+                ).transpose(1, 2)  # (B,T,G)
+                if not self.no_rs_branch:
+                    token_mask = token_mask & rs_mask.to(device=device, dtype=torch.bool)
+                    rs_grid_day = None
+                    if ag_grid_mask is not None:
+                        # 与月路径 token_mask 语义一致：该月缺遥感的网格不参与该月各日的聚合。
+                        ag_gm = ag_grid_mask.to(device=device, dtype=torch.bool)
+                        md = torch.stack(month_day_masks, dim=1)
+                        rs_grid_day = torch.einsum(
+                            "bmt,bmg->btg", md.to(grid_feats.dtype), ag_gm.to(grid_feats.dtype)
+                        ) > 0
+                        token_mask = token_mask & rs_grid_day
+                time_indices = torch.arange(
+                    T, device=device, dtype=torch.long
+                ).expand(B, -1)
+                if self.spatial_pool == "attention":
+                    temporal_feat, spatial_weights = self.spatial_agg.forward_weights(
+                        grid_token.transpose(1, 2),
+                        grid_coords,
+                        grid_mask,
+                        token_mask=token_mask,
+                        time_indices=time_indices,
+                    )
+                else:
+                    # 步骤 B：等权均值替代县内空间注意力。
+                    w = token_mask.transpose(1, 2).to(grid_token.dtype)[..., None]
+                    denom = w.sum(dim=1).clamp_min(1.0)
+                    pooled = (grid_token * w).sum(dim=1) / denom
+                    temporal_feat = self.mean_norm(pooled)
+                if self.no_rs_branch:
+                    valid_t = weather_valid
+                else:
+                    # 某日全部网格都没有可用遥感时，该日不进入时序。
+                    day_rs_ok = rs_mask.to(device=device, dtype=torch.bool).any(dim=2)
+                    if rs_grid_day is not None:
+                        day_rs_ok = day_rs_ok & rs_grid_day.any(dim=2)
+                    valid_t = weather_valid & day_rs_ok
+                temporal_feat = temporal_feat * valid_t[..., None].to(temporal_feat.dtype)
+                seq_len_t = valid_t.sum(dim=1).clamp_max(T)
+                pad_mask = valid_t
+                n_tokens = T
+            else:
+                monthly_feat = torch.zeros(B, G, Te, self.hidden_size, device=device)
+                for m_idx, is_month in enumerate(month_day_masks):
+                    month_mask = is_month.float()
+                    month_count = month_mask.sum(dim=1, keepdim=True).clamp_min(1.0)
+                    month_sum = (grid_token * month_mask[:, None, :, None]).sum(dim=2)
+                    monthly_feat[:, :, m_idx] = month_sum / month_count[:, :, None]
+
+                time_indices = torch.arange(
+                    Te, device=device, dtype=torch.long
+                ).expand(B, -1)
+                spatial_grid_mask = (
+                    ag_grid_mask.to(device=device, dtype=torch.bool)
+                    if ag_grid_mask is not None
+                    else grid_mask[:, None, :].expand(B, Te, G)
+                )
+                spatial_token_mask = month_valid[:, :, None] & spatial_grid_mask
+                if self.spatial_pool == "attention":
+                    temporal_feat, spatial_weights = self.spatial_agg.forward_weights(
+                        monthly_feat.transpose(1, 2),
+                        grid_coords,
+                        grid_mask,
+                        token_mask=spatial_token_mask,
+                        time_indices=time_indices,
+                    )
+                else:
+                    # 组件消融：等权均值替代县内空间注意力（不再使用网格坐标）。
+                    w = spatial_token_mask.transpose(1, 2).to(monthly_feat.dtype)[..., None]
+                    denom = w.sum(dim=1).clamp_min(1.0)
+                    pooled = (monthly_feat * w).sum(dim=1) / denom
+                    temporal_feat = self.mean_norm(pooled) * month_valid[..., None].to(pooled.dtype)
+                valid_t, seq_len_t, n_tokens = month_valid, month_seq_lens, Te
 
         lstm_feat_raw, _, _, _ = self.lstm_encoder(
-            temporal_feat, seq_lens=month_seq_lens, c_c=c_c, c_h=c_h,
-            valid_mask=month_valid,
+            temporal_feat, seq_lens=seq_len_t, c_c=c_c, c_h=c_h,
+            valid_mask=valid_t,
         )
-        temporal_context = c_e[:, None, :].expand(B, Te, self.hidden_size)
+        temporal_context = c_e[:, None, :].expand(B, n_tokens, self.hidden_size)
         temporal_feat = self.cat_attn_prep_grn(
             lstm_feat_raw, context=temporal_context
         )
@@ -1113,14 +1264,24 @@ class TFTEncoderForYieldPrediction(nn.Module):
         )
         pred_features = self.pred_grn(attn_feat)
         pred_dist_all = self.mean_head(pred_features)
-        pred_dist_all = pred_dist_all * month_valid.unsqueeze(-1).to(pred_dist_all.dtype)
-        last_token_idx = (month_valid.long().cumsum(dim=1).argmax(dim=1))
+        pred_dist_all = pred_dist_all * valid_t.unsqueeze(-1).to(pred_dist_all.dtype)
+        last_token_idx = (valid_t.long().cumsum(dim=1).argmax(dim=1))
         batch_idx = torch.arange(B, device=device)
         last_token = attn_feat[batch_idx, last_token_idx]
 
         pred_all = pred_dist_all[batch_idx, last_token_idx]
-        sample_valid = month_valid.any(dim=1)
+        sample_valid = valid_t.any(dim=1)
         pred_all = pred_all * sample_valid.unsqueeze(-1).to(pred_all.dtype)
+
+        if self.seq_level == "day" or self.input_mode == "county_mean":
+            remote_valid_t = (
+                rs_mask.to(device=device, dtype=torch.bool).any(dim=2)
+                if not self.no_rs_branch else valid_t
+            )
+            time_ids_out = day_ids.to(device=device).long()
+        else:
+            remote_valid_t = month_remote_valid
+            time_ids_out = torch.arange(4, 10, device=device).expand(B, Te)
 
         grad_tensors = {
             "static_feat": c_s,
@@ -1132,10 +1293,10 @@ class TFTEncoderForYieldPrediction(nn.Module):
             "last_token": last_token,
             "pred_features": pred_features,
             "pred_dist_all": pred_dist_all,
-            "temporal_seq_lens": month_seq_lens,
-            "month_valid": month_valid,
-            "monthly_month_ids": torch.arange(4, 10, device=device).expand(B, Te),
-            "month_remote_valid": month_remote_valid,
+            "temporal_seq_lens": seq_len_t,
+            "month_valid": valid_t,
+            "monthly_month_ids": time_ids_out,
+            "month_remote_valid": remote_valid_t,
             "sample_valid": sample_valid,
             "pred_all": pred_all,
         }
@@ -1161,10 +1322,10 @@ class TFTEncoderForYieldPrediction(nn.Module):
             "grid_vsn_weights": grid_vsn_weights,
             "county_vsn_weights": None,
             "spatial_weights": spatial_weights,
-            "temporal_seq_lens": month_seq_lens,
-            "month_valid": month_valid,
-            "monthly_month_ids": torch.arange(4, 10, device=device).expand(B, Te),
-            "month_remote_valid": month_remote_valid,
+            "temporal_seq_lens": seq_len_t,
+            "month_valid": valid_t,
+            "monthly_month_ids": time_ids_out,
+            "month_remote_valid": remote_valid_t,
             "sample_valid": sample_valid,
             "temporal_feat": temporal_feat,
             "rs_aux_pred": rs_aux_pred,

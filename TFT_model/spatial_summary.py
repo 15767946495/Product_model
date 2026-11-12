@@ -230,7 +230,7 @@ def plot(report):
 
     _configure_chinese_font()
     colors = {"PA-TFT": BLUE_DARK, "UNet-ConvLSTM": BLUE, "GNN-RNN": ORANGE, "PhenoYieldNet": MUTED}
-    names = {"PA-TFT": "PA-TFT", "UNet-ConvLSTM": "UNet-ConvLSTM",
+    names = {"PA-TFT": "PAF-Net", "UNet-ConvLSTM": "UNet-ConvLSTM",
              "GNN-RNN": "GNN-RNN", "PhenoYieldNet": "PhenoYieldNet"}
     years = [str(y) for y in YEARS]
     fig, ax = plt.subplots(figsize=(6.8, 3.5), constrained_layout=True)

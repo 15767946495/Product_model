@@ -20,4 +20,8 @@ def build_model(model_config: dict) -> TFTEncoderForYieldPrediction:
         rs_aux=model_config.get("rs_aux", False),
         rs_feature_dim=model_config.get("rs_feature_dim", 0),
         no_rs_branch=model_config.get("no_rs_branch", False),
+        spatial_pool=model_config.get("spatial_pool", "attention"),
+        selection_level=model_config.get("selection_level", "grid_day"),
+        seq_level=model_config.get("seq_level", "month"),
+        input_mode=model_config.get("input_mode", "grid"),
     )

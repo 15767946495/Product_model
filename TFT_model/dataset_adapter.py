@@ -585,8 +585,14 @@ def _tft_collate(items, stats: TFTStats, use_constructed: bool,
     day = torch.tensor([int(date[8:10]) for date in dates], dtype=torch.long)
     rs_features = None
     if rs_store is None:
-        ag_grid_mask = raw["image_mask"]
-        ag_images = raw["images"]
+        if raw.get("image_mask") is not None:
+            ag_grid_mask = raw["image_mask"]
+            ag_images = raw["images"]
+        else:
+            # 无遥感支路的日粒度运行不读影像：没有影像掩码时，月份—网格掩码取全有效
+            # （与该函数 rs_store 分支的口径一致），影像张量不构造。
+            ag_grid_mask = raw["grid_mask"][:, None, :].expand(batch_size, 6, max_grids).clone()
+            ag_images = None
     else:
         if stats.rs_mean is None and stats.rs_within is None:
             raise ValueError("stats lack remote-sensing statistics; fit_stats needs the feature store")

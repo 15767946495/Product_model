@@ -145,6 +145,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="消融：整条土壤静态上下文支路不建立任何参数（soil_dim=0），四个上下文恒为零向量。",
     )
     parser.add_argument(
+        "--spatial-pool", choices=("attention", "mean"), default="attention",
+        help="组件消融：mean 用县内等权均值替代空间注意力，查询/键/值投影与位置编码一并删除。",
+    )
+    parser.add_argument(
+        "--selection-level", choices=("grid_day", "county_month"), default="grid_day",
+        help="组件消融：county_month 先在网格与日上取均值，再做县—月级变量选择，"
+             "不再有网格—日级选择与县内空间注意力。",
+    )
+    parser.add_argument(
+        "--seq-level", choices=("month", "day"), default="month",
+        help="时序粒度：month 为日→月聚合后的 6 步序列；day 为 168 日原始序列，不聚合。",
+    )
+    parser.add_argument(
+        "--input-mode", choices=("grid", "county_mean"), default="grid",
+        help="输入组织：grid 保留县内网格；county_mean 先对网格等权平均成县—日级单序列。",
+    )
+    parser.add_argument(
         "--rs-as-variable", action="store_true", default=False,
         help="feed remote-sensing tokens to the grid VSN as an extra variable (content path)",
     )
@@ -444,8 +461,11 @@ def main(args) -> Path:
     epoch = -1
     try:
         rs_store = adapter.RSFeatureStore(args.rs_features) if args.rs_features else None
+        # 日粒度 + 无遥感支路时模型完全不读影像（连有效掩码都不用），无需从 HDF5 取像素；
+        # 否则每个样本要读 6×G 张 224² 影像并搬到 GPU，纯属浪费。
+        need_images = rs_store is None and not (args.no_rs_branch and args.seq_level == "day")
         dataset = adapter.build_dataset(
-            args.dataset_jsonl, args.data_root, train_years, load_images=rs_store is None,
+            args.dataset_jsonl, args.data_root, train_years, load_images=need_images,
         )
         offset_dataset = None
         if args.offset_jsonl:
@@ -461,7 +481,7 @@ def main(args) -> Path:
                 raise ValueError(f"--norm-mode {args.norm_mode} is defined for the single-fold protocol only")
             # 只用测试年份的特征（不含标签）；遥感缓存不落盘影像，按需读取
             extra_dataset = adapter.build_dataset(
-                args.dataset_jsonl, args.data_root, test_years, load_images=rs_store is None,
+                args.dataset_jsonl, args.data_root, test_years, load_images=need_images,
             )
         stats = adapter.fit_stats(
             dataset, use_constructed=args.use_constructed, rs_store=rs_store, train_years=train_years,
@@ -482,7 +502,7 @@ def main(args) -> Path:
         valid_loader = None
         if valid_years is not None:
             valid_dataset = adapter.build_dataset(
-                args.dataset_jsonl, args.data_root, valid_years, load_images=rs_store is None,
+                args.dataset_jsonl, args.data_root, valid_years, load_images=need_images,
             )
             if not len(valid_dataset):
                 raise ValueError(f"validation year {valid_years} has no samples")
@@ -517,6 +537,10 @@ def main(args) -> Path:
             "test_year": int(args.test_year),
             "no_rs_branch": bool(args.no_rs_branch),
             "no_soil_branch": bool(args.no_soil_branch),
+            "spatial_pool": args.spatial_pool,
+            "selection_level": args.selection_level,
+            "seq_level": args.seq_level,
+            "input_mode": args.input_mode,
         }
         if args.no_soil_branch:
             model_config["soil_dim"] = 0
