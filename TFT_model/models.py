@@ -417,6 +417,9 @@ class SoilStaticEncoder(nn.Module):
         super().__init__()
         self.hidden_size = hidden_size
         self.soil_dim = int(soil_dim)
+        if self.soil_dim == 0:
+            # 模态消融（真移除）：不建立静态支路的任何参数，四个上下文恒为零向量。
+            return
         self.variable_grns = nn.ModuleList([
             nn.Linear(1, hidden_size) for _ in range(self.soil_dim)
         ])
@@ -444,6 +447,11 @@ class SoilStaticEncoder(nn.Module):
         self, soil_feats: torch.Tensor, return_weights: bool = False
     ) -> Tuple[torch.Tensor, ...]:
         # soil_feats: (B, soil_dim) 已 z-score 标准化
+        if self.soil_dim == 0:
+            z = soil_feats.new_zeros(soil_feats.shape[0], self.hidden_size)
+            if return_weights:
+                return z, z, z, z, soil_feats.new_zeros(soil_feats.shape[0], 0)
+            return z, z, z, z
         if soil_feats.shape[-1] != self.soil_dim:
             raise ValueError(
                 f"soil_feats must have last dimension {self.soil_dim}"
@@ -640,8 +648,10 @@ class SpatialAttentionAggregator(nn.Module):
             t = t_idx.view(1, 1, -1, 1)
         else:
             t = t_idx[:, None, :, None]
-        lat = (coords[..., 0:1] * (math.pi / 180.0))[:, :, None, :]
-        lon = (coords[..., 1:2] * (math.pi / 180.0))[:, :, None, :]
+        # coords 已在 dataset_adapter 中按固定比例缩放（经度、纬度均除以 180），
+        # 这里直接作为位置编码的相位输入，不再做角度到弧度的转换。
+        lat = coords[..., 0:1][:, :, None, :]
+        lon = coords[..., 1:2][:, :, None, :]
         pe = torch.zeros(
             coords.shape[0], coords.shape[1], t_idx.shape[-1], d,
             device=coords.device, dtype=coords.dtype,
@@ -822,6 +832,7 @@ class TFTEncoderForYieldPrediction(nn.Module):
         rs_as_variable: bool = False,
         rs_aux: bool = False,
         rs_feature_dim: int = 0,
+        no_rs_branch: bool = False,
     ):
         super().__init__()
         self.hidden_size = hidden_size
@@ -835,6 +846,11 @@ class TFTEncoderForYieldPrediction(nn.Module):
             raise ValueError("rs_feature_dim and remote_constant are mutually exclusive")
         self.rs_feature_dim = int(rs_feature_dim)
         self.rs_as_variable = rs_as_variable
+        # 模态消融（真移除）：整条遥感支路不建立任何参数，输入恒为零向量。
+        # 与"把遥测特征置零"不同，这里连 10→H 的线性层也不存在。
+        self.no_rs_branch = bool(no_rs_branch)
+        if self.no_rs_branch and (self.rs_feature_dim or remote_constant or rs_aux):
+            raise ValueError("no_rs_branch excludes rs_feature_dim / remote_constant / rs_aux")
 
         # 1. 静态：县级连续土壤(Linear 映射,不分桶)+ 上下文 GRN
         self.soil_static_encoder = SoilStaticEncoder(
@@ -910,7 +926,11 @@ class TFTEncoderForYieldPrediction(nn.Module):
 
         # 遥感模块是当前模型的必需输入分支。数值特征模式下用逐特征线性映射代替 PVT 图像编码
         # （与天气变量的 per_feature_linear 同构，无预训练骨干，也就没有骨干坍缩问题）。
-        if self.rs_feature_dim:
+        if self.no_rs_branch:
+            # 移除式消融：遥感支路不存在，不建立任何参数。
+            self.vit_encoder = None
+            self.rs_feature_linear = None
+        elif self.rs_feature_dim:
             self.vit_encoder = None
             self.rs_feature_linear = nn.Linear(self.rs_feature_dim, hidden_size)
         else:
@@ -979,9 +999,16 @@ class TFTEncoderForYieldPrediction(nn.Module):
             for name, tensor in projected.items()
         }
 
-        if ag_mask is None or (ag_images is None and not self.rs_feature_dim):
-            raise ValueError("当前模型必须传入 ag_images 和 ag_mask")
-        if self.rs_feature_dim:
+        if ag_mask is None:
+            raise ValueError("当前模型必须传入 ag_mask")
+        if self.no_rs_branch:
+            rs_encoded = grid_feats.new_zeros(
+                (B, G, len(AG_DATE_PAIRS), self.hidden_size)
+            )
+            rs_by_time, _ = _broadcast_rs_forward(
+                rs_encoded, month_ids, day_ids, ag_mask,
+            )  # (B, G, T, H)
+        elif self.rs_feature_dim:
             rs_encoded = self._encode_rs_features(rs_features, grid_mask, ag_grid_mask, device)
             rs_by_time, _ = _broadcast_rs_forward(
                 rs_encoded, month_ids, day_ids, ag_mask,
@@ -1005,6 +1032,8 @@ class TFTEncoderForYieldPrediction(nn.Module):
                 rs_encoded, month_ids, day_ids, ag_mask,
             )  # (B, G, T, H)
         else:
+            if ag_images is None:
+                raise ValueError("PVT 支路需要 ag_images")
             rs_encoded = self._forward_remote_sensing(
                 ag_images, grid_coords, grid_mask, device, ag_grid_mask,
             )  # (B, G, N_rs, H)

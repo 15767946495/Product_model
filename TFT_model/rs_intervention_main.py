@@ -1,11 +1,11 @@
 """PA-TFT的测试时遥感干预：模型在预测时是否真正使用了植被指数中的县年信息？
 
-对指定年份的检查点（默认 2022 折、种子 0），先正常预测一次，再在保持天气、土壤、
-坐标与县均值偏移不变的前提下替换遥感输入：
+对指定年份的检查点（默认 2022 折、种子 0），先正常预测一次，再在保持天气、土壤与
+坐标不变的前提下替换遥感输入：
   - shuffle：同一测试年份、同一月份内，跨县随机置换各网格的（已去均值、已标准化）植被指数，重复3次；
   - zero   ：全部置零，即"每个网格都与本县往年一样"。
 置换保留了每个月份遥感输入的整体分布，只破坏"哪个县对应哪组指数"。若模型利用了县年信息，置换后误差应变大。
-写入 paper_figures/rs_intervention_improved.json。
+写入 paper_figures/rs_intervention.json。
 """
 
 from __future__ import annotations
@@ -25,11 +25,12 @@ from TFT_model.model_adapter import build_model  # noqa: E402
 from train_dataset.dataset import DATA_ROOT  # noqa: E402
 
 RUNS = Path(os.environ.get("LOYO_RUNS", "/data/raid0/hqx/TFT_out/tft"))
-TAG = os.environ.get("LOYO_TAG", "loyo31-")
+TAG = os.environ.get("LOYO_TAG", "paper-")
+MAIN = os.environ.get("LOYO_MAIN", "main")
 JSONL = ROOT / "train_dataset" / "dataset.jsonl"
 YEARS = tuple(int(y) for y in os.environ.get("LOYO_YEARS", "2022").split())
 # 种子列表可用 LOYO_SEEDS 覆盖（单种子复核时 LOYO_SEEDS=0）
-SEEDS = tuple(int(s) for s in os.environ.get("LOYO_SEEDS", "42 1 2").split())
+SEEDS = tuple(int(s) for s in os.environ.get("LOYO_SEEDS", "0").split())
 N_SHUFFLE = 3
 
 
@@ -54,7 +55,9 @@ def predict_variants(run_dir, device, rng_seed=0):
         for b, f in zip(batches, features):
             inputs = adapter.model_inputs(b, device)
             inputs["rs_features"] = f.to(device)
-            pred = model(**inputs)[0][:, 0].cpu() + b["county_offset"].float()
+            pred = model(**inputs)[0][:, 0].cpu()
+            if b.get("county_offset") is not None:
+                pred = pred + b["county_offset"].float()
             out.extend(torch.exp(pred).tolist())
         return np.array(out)
 
@@ -89,7 +92,7 @@ def main():
     for year in YEARS:
         per_seed, fips0, truth0 = {}, None, None
         for seed in SEEDS:
-            fips, truth, v = predict_variants(RUNS / f"{TAG}improved-y{year}-s{seed}", device)
+            fips, truth, v = predict_variants(RUNS / f"{TAG}{MAIN}-y{year}-s{seed}", device)
             if fips0 is None:
                 fips0, truth0 = fips, truth
             assert fips == fips0 and np.allclose(truth, truth0)
@@ -115,7 +118,7 @@ def main():
         out["summary"].update({"t_p_shuffle": float(stats.ttest_1samp(ds, 0).pvalue),
                                "t_p_zero": float(stats.ttest_1samp(dz, 0).pvalue)})
     print(json.dumps(out["summary"]))
-    (ROOT / "paper_figures" / "rs_intervention_improved.json").write_text(json.dumps(out, indent=1))
+    (ROOT / "paper_figures" / "rs_intervention.json").write_text(json.dumps(out, indent=1))
 
 
 if __name__ == "__main__":

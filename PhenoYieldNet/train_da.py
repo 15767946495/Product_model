@@ -99,6 +99,11 @@ def checkpoint_payload(model, optimizer, epoch, args) -> dict:
 
 def main(args) -> Path:
     ro.seed_everything(args.seed)
+    # A100 上 fp32 矩阵乘默认不用 TF32，200 轮适配约需 65 小时。TF32 只影响
+    # 尾数精度（10 位），是 A100 训练的常规设置，把单轮从 40 分钟压到 ~13 分钟。
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    torch.set_float32_matmul_precision("high")
     device = torch.device(args.device)
     run_dir = ro.make_run_dir(args.output_root, cfg.STAGE1_NAME, args.run_id)
     args.run_id = run_dir.name

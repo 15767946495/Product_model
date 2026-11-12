@@ -38,6 +38,19 @@ def protocol_windows(valid_year: int, test_year: int, length: int = 4) -> dict:
     }
 
 
+def target_windows(target_year: int, start: int = GNN_WINDOWS["train"][0]) -> dict:
+    """空间 CV：训练窗口 (start..target-1)，测试窗口取同样长度的最后几年、末年为目标年。
+
+    target_year=2022 时与默认 GNN_WINDOWS（训练 2017--2021、测试 2018--2022）完全一致；
+    更早的目标年依次缩短，2019 年起训练/测试窗口都至少两年。
+    """
+    train = tuple(range(int(start), int(target_year)))
+    if len(train) < 2:
+        raise ValueError(f"target year {target_year} leaves a {len(train)}-year training window")
+    test = tuple(range(int(target_year) - len(train) + 1, int(target_year) + 1))
+    return {"train": train, "test": test}
+
+
 def load_vi_table(path) -> dict:
     """(fips, year) -> 60 维县—月植被指数（6 个月 × 10 个指数，顺序同 TFT 特征）。"""
     data = np.load(path)

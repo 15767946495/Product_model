@@ -19,4 +19,5 @@ def build_model(model_config: dict) -> TFTEncoderForYieldPrediction:
         rs_as_variable=model_config.get("rs_as_variable", False),
         rs_aux=model_config.get("rs_aux", False),
         rs_feature_dim=model_config.get("rs_feature_dim", 0),
+        no_rs_branch=model_config.get("no_rs_branch", False),
     )

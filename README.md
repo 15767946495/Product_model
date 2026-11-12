@@ -4,14 +4,14 @@
 
 - **研究对象**：美国 29 个州 741 个玉米主产县，2017—2022 年平衡面板（4446 个县年）
 - **数据**：CropNet 的 Sentinel-2、WRF-HRRR 与 USDA Corn 数据，外加 7 维县级土壤属性
-- **方法**：县均值偏移 + 县内去均值植被指数 + 按样本规模设定的训练协议，TFT 作为时序后端
+- **方法**：直接预测对数单产水平 + 全局标准化 + 县内空间注意力，TFT 作为时序后端
 - **配套论文**：`paper.md`
 
 ## 目录结构
 
 ```
 cropnet_model/
-├── TFT_model/            # 主模型 PA-TFT 与对照配置 PVT-TFT（训练、推理、消融、干预与论文数值脚本）
+├── TFT_model/            # 主模型 PA-TFT（训练、推理、消融、干预与论文数值脚本）
 ├── UNet-ConvLSTM/        # 比较模型
 ├── GNN-RNN/              # 比较模型
 ├── PhenoYieldNet/        # 比较模型
@@ -114,54 +114,35 @@ TFT 默认只从本地 `/data/raid0/hqx/pretrained/pvt_tiny.pth` 读取 PVT-Tiny
 
 ## 论文数值复现
 
-`paper.md` 只报告一折：2017—2021 年训练、2022 年测试，每个配置只跑一次、种子固定为 0（第5.1节）。唯一的例外是对照配置 PVT-TFT，它以三个种子重复训练以确认退化不是偶然。完整流程如下。
+`paper.md` 的时间外推只报告一折：2017—2021 年训练、2022 年测试，每个配置只跑一次、种子固定为 0（第5.1节）；空间外推另做县分组五折交叉验证（第5.8节）。完整流程如下。
 
 ```bash
 P=/root/miniconda3/envs/product/bin/python
 export OUTPUT_ROOT=/data/raid0/hqx/TFT_out      # 训练输出务必外置，不要写进仓库
 
-# 1) 训练：PA-TFT 与三个组件消融（2022 折、种子 0），以及 PVT-TFT 的三个种子
-bash TFT_model/run_loyo.sh                                  # improved / noffset / nodemean / nors
-CONFIGS=original SEEDS="42 1 2" bash TFT_model/run_loyo.sh  # PVT-TFT
+# 0) 空间五折划分（州内分层、种子 0；已生成可跳过）
+$P -I train_dataset/make_spatial_folds.py
 
-# 2) 面板基线：仅县固定效应与线性面板估计器（第5.2、5.7节，写出 panel.json）
+# 1) 训练：PA-TFT 主模型与遥感消融（2022 折、种子 0）
+bash TFT_model/run_loyo.sh                                  # main / nors
+bash TFT_model/run_spatial.sh                               # 县分组五折空间交叉验证（第5.8节）
+
+# 2) 面板基线：仅县固定效应与线性面板估计器（第5.2、5.6—5.7节，写出 panel.json）
 $P -I TFT_model/panel_report.py
 
-# 3) 汇总：依次写 paper_figures/{loyo_summary,single_fold_2022,tft_main}.json
-LOYO_SEEDS=0 $P -I TFT_model/loyo_summary.py
+# 3) 汇总：写 paper_figures/{single_fold_2022,tft_main,spatial_cv}.json
 LOYO_SEEDS=0 $P -I TFT_model/paper_report_tft.py
 LOYO_SEEDS=0 $P -I TFT_model/single_fold_report.py
+$P -I TFT_model/spatial_summary.py
+$P -I TFT_model/figures_2022.py   # 图5-1、5-2、5-3
 
-# 4) 测试时遥感干预（第5.6节）
-$P -I TFT_model/rs_intervention_improved.py
+# 4) 测试时遥感干预（第5.5节）
+$P -I TFT_model/rs_intervention_main.py
 ```
 
 论文只报告点估计，不再给出任何区间：自助法与聚类自助法已从第2.4节、第5.2节和第5章小结中删除。
 
-### 空间外推（按县五折交叉验证，第5.2.2节）
-
-把 741 个县按州分层分成 5 折，每折留出 1 折县作测试、其余 4 折县的全部年份作训练；留出县在训练中完全不出现，只用它自己 2017—2021 年的平均单产构成县均值偏移与仅县固定效应基线。只报告 2022 年：偏移量必须只用目标年之前的单产，2017—2021 年若要同样处理需要 2017 年以前的历史。分折脚本、训练脚本与汇总脚本如下。
-
-```bash
-# 1) 划分：写 folds.json 与 fold{0..4}/{train,test}.jsonl
-$P -I train_dataset/make_spatial_folds.py --output /data/raid0/hqx/train_dataset/spatial_folds
-
-# 2) 训练与测试：PA-TFT + UNet-ConvLSTM + GNN-RNN + PhenoYieldNet，5 折按 GPU 排队
-KINDS="unet pheno patft patft_noffset gnn" GPU_IDS="0 1 2 3 4 5 6 7" bash TFT_model/run_spatial.sh
-#    其中 patft_noffset = 去掉县均值偏移的 PA-TFT（消融中的 noffset），用于冷启动复核：
-#    留出县既不给标签也不给历史单产，模型只能由特征预测绝对水平。
-
-# 3) 汇总：5 折预测拼接后与仅县固定效应、同州同年训练县均值比较，写 paper_figures/spatial_cv.json
-$P -I TFT_model/spatial_report.py
-```
-
-`run_spatial.sh` 可用 `FOLDS`、`KINDS`、`GPU_IDS`、`THREADS` 覆盖默认值，并依据 `test_metrics.json` 是否已存在跳过已完成的折，可断点续跑。多卡并行时务必保留 `THREADS` 限制（默认 4）：不限制时每个进程会按核数开线程，整机进入超订状态，数据加载反而变慢。
-
-UNet-ConvLSTM 与 PA-TFT 可评价 2017—2022 全部 6 年，但空间表只报告 2022 年（偏移量必须只用目标年之前的单产）；GNN-RNN 受五年窗口限制、PhenoYieldNet 的适配协议以单个测试年为前提，两者本来就只覆盖 2022 年。因此第5.2.2节表5-2的 5 行都在同一批 741 个县年上可比。
-
-第5.2.3节另给冷启动口径（表5-3）：`patft_noffset` 即去掉县均值偏移的 PA-TFT，留出县既无标签也无历史单产，只能由特征预测绝对水平；基线改用"同州同年训练县均值"（`spatial_report.py` 里的 `同州同年训练县均值` 一行）。三个已有深度模型本就不使用县历史，在表5-3中是同一组数字。汇总命令不变。
-
-全样本置换检验（第5.8节）另用两步：`TFT_model/rs_signal_extract.py --output <npz>` 提取植被指数特征，`TFT_model/rs_signal_test.py --features <npz> --output <json>` 给出置换结果，`TFT_model/rs_info_test.py` 把结果整理成 `paper_figures/rs_info_test.json`。
+全样本置换检验（第5.7节）另用两步：`TFT_model/rs_signal_extract.py --output <npz>` 提取植被指数特征，`TFT_model/rs_signal_test.py --features <npz> --output <json>` 给出置换结果，`TFT_model/rs_info_test.py` 把结果整理成 `paper_figures/rs_info_test.json`。
 
 ## 引用
 

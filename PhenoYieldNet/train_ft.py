@@ -17,6 +17,8 @@ import math
 import sys
 from pathlib import Path
 
+import numpy as np
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
@@ -38,8 +40,8 @@ def build_parser():
     parser = argparse.ArgumentParser("PhenoYieldNet-unified Stage 2 (finetune 2021 / final test 2022)")
     add_args(parser, cfg.STAGE2)
     parser.add_argument("--pretrain_model", default="", help="Stage 1 checkpoint-final.pth")
-    parser.add_argument("--frozen_fm", action="store_true",
-                        help="freeze the backbone (paper description); upstream run_finetune.sh does not")
+    parser.add_argument("--frozen_fm", action=argparse.BooleanOptionalAction, default=True,
+                        help="冻结 Stage 1 骨干，只训解码器与回归头（论文 4.1.4；上游脚本不传，故默认按论文）")
     parser.add_argument("--grad_checkpointing", action="store_true")
     parser.add_argument("--eval_checkpoint", default="", help="only run the final 2022 test on this checkpoint-final.pth")
     parser.add_argument("--eval_jsonl", default="",
@@ -50,6 +52,12 @@ def build_parser():
                         help="stop after N epochs without validation improvement (default 3); -1 disables early stopping")
     parser.add_argument("--checkpoint-policy", choices=("best", "final"), default="best",
                         help="best: restore the lowest-validation epoch; final: keep the last epoch (fixed budget, no selection)")
+    parser.add_argument("--stage1-own-years", action="store_true",
+                        help="validate the Stage 1 checkpoint against the years recorded inside it "
+                             "(spatial CV trains on all 2017-2022, which differs from cfg.PRETRAIN_YEARS)")
+    parser.add_argument("--valid-county-frac", type=float, default=0.0,
+                        help="按县划分验证集的比例，用于复现原论文的早停（0 = 不用；与 --valid-year 互斥）。"
+                             "划分只取微调年内的县，不涉及测试年，也不涉及测试县。")
     return parser
 
 
@@ -63,6 +71,12 @@ def _split(args):
         train_years = tuple(y for y in (*cfg.PRETRAIN_YEARS, *cfg.FINETUNE_YEARS) if y < valid_year)
         return (train_years[-1],), (valid_year,), (test_year,)
     return tuple(cfg.FINETUNE_YEARS), None, tuple(cfg.TEST_YEARS)
+
+
+def _stage1_years(path):
+    """Stage 1 checkpoint 自带 train/test years；空间 CV 微调年份与它不同时按自身记录校验。"""
+    checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+    return tuple(checkpoint["train_years"]), tuple(checkpoint["test_years"])
 
 
 def model_config(args) -> dict:
@@ -208,13 +222,16 @@ def main(args) -> Path:
 
     if not args.pretrain_model:
         raise ValueError("--pretrain_model requires Stage 1 checkpoint-final.pth")
+    stage1_train_years, stage1_test_years = (
+        _stage1_years(args.pretrain_model) if args.stage1_own_years
+        else (cfg.PRETRAIN_YEARS, cfg.TEST_YEARS))
     stage1_checkpoint = ro.validate_final_checkpoint(
         args.pretrain_model,
         model_name=STAGE1_MODEL_NAME,
         adaptation=STAGE1_ADAPTATION,
         dataset_jsonl=args.dataset_jsonl,
-        train_years=cfg.PRETRAIN_YEARS,
-        test_years=cfg.TEST_YEARS,
+        train_years=stage1_train_years,
+        test_years=stage1_test_years,
     )
 
     ro.seed_everything(args.seed)
@@ -233,19 +250,38 @@ def main(args) -> Path:
 
     finetune_years, valid_years, test_years = _split(args)
     dataset = build_dataset(args.dataset_jsonl, args.data_root, finetune_years)
-    loader = build_loader(dataset, True, num_workers=args.num_workers,
+    train_set, valid_set, valid_counties = dataset, None, None
+    if args.valid_county_frac:
+        if valid_years is not None:
+            raise ValueError("--valid-county-frac 与 --valid-year 互斥")
+        if not 0 < args.valid_county_frac < 1:
+            raise ValueError("--valid-county-frac must be in (0, 1)")
+        from torch.utils.data import Subset
+        fips = sorted({s["fips"] for s in dataset.samples})
+        order = np.random.default_rng(args.seed).permutation(len(fips))
+        n_valid = max(1, int(round(len(fips) * args.valid_county_frac)))
+        valid_counties = sorted(fips[i] for i in order[:n_valid])
+        held = set(valid_counties)
+        mask = np.array([s["fips"] in held for s in dataset.samples])
+        train_set = Subset(dataset, np.flatnonzero(~mask).tolist())
+        valid_set = Subset(dataset, np.flatnonzero(mask).tolist())
+    loader = build_loader(train_set, True, num_workers=args.num_workers,
                           generator=torch.Generator().manual_seed(args.seed))
     valid_loader = None
     if valid_years is not None:
-        valid_dataset = build_dataset(args.dataset_jsonl, args.data_root, valid_years)
-        if not len(valid_dataset):
+        valid_set = build_dataset(args.dataset_jsonl, args.data_root, valid_years)
+        if not len(valid_set):
             raise ValueError(f"validation years {valid_years} have no samples")
-        valid_loader = build_loader(valid_dataset, False, num_workers=args.num_workers)
+    if valid_set is not None:
+        valid_loader = build_loader(valid_set, False, num_workers=args.num_workers)
     optimizer = torch.optim.AdamW(param_groups(model, args.weight_decay), lr=args.lr, betas=(0.9, 0.95))
+    n_counties = len({s["fips"] for s in dataset.samples})
+    n_valid_counties = len(valid_counties) if valid_counties else 0
     ro.write_json(run_dir / "run_metadata.json", ro.base_metadata(
         model=cfg.MODEL_NAME, adaptation=cfg.ADAPTATION, run_id=args.run_id, dataset_jsonl=args.dataset_jsonl,
         seed=args.seed, train_years=finetune_years, test_years=test_years,
-        counties=len({s["fips"] for s in dataset.samples}), inputs=cfg.INPUTS, train_samples=len(dataset),
+        counties=n_counties, train_counties=n_counties - n_valid_counties,
+        inputs=cfg.INPUTS, train_samples=len(train_set),
         pretrain_years=list(cfg.PRETRAIN_YEARS), stage1_checkpoint=args.pretrain_model or None,
         epochs=args.epochs, optimizer="AdamW(0.9,0.95)", lr=args.lr, blr=args.blr, weight_decay=args.weight_decay,
         frozen_backbone=args.frozen_fm, crop="corn", target="log(yield_bu_ac)",
@@ -254,7 +290,8 @@ def main(args) -> Path:
                            else ("best validation epoch, early stopping" if valid_loader is not None
                                  else "final epoch only, no validation selection")),
         valid_years=list(valid_years) if valid_years is not None else None,
-        valid_samples=len(valid_dataset) if valid_loader is not None else None,
+        valid_samples=len(valid_set) if valid_set is not None else None,
+        valid_counties=list(valid_counties) if valid_counties else None,
         early_stop_patience=args.early_stop_patience if valid_loader is not None else None,
     ))
 

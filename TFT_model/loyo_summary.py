@@ -1,9 +1,9 @@
-"""运行结果汇总：PA-TFT、PVT-TFT 与组件消融，与县均值基线对照。
+"""运行结果汇总：PA-TFT 主模型与三个对照，与仅县固定效应基线对照。
 
 论文只保留 2022 折、每个配置只保留种子 0 的单次运行；未跑满 SEEDS 的折不再作集成。
 州内异常相关以训练折县均值为基准、去除州均值后计算。写入 paper_figures/loyo_summary.json。
 
-运行编号为 {TAG}{配置}-y{年份}-s{种子}，默认 TAG=loyo31-（31 州新面板，输出在 /data/raid0/hqx/TFT_out）；
+运行编号为 {TAG}{配置}-y{年份}-s{种子}，默认 TAG=paper-（29 州面板，输出在 /data/raid0/hqx/TFT_out）；
 用环境变量 LOYO_RUNS、LOYO_TAG 指向别的批次，LOYO_SEEDS 指定种子（默认 "42 1 2"，单折口径用 "0"）。
 """
 
@@ -19,17 +19,13 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNS = Path(os.environ.get("LOYO_RUNS", "/data/raid0/hqx/TFT_out/tft"))
-TAG = os.environ.get("LOYO_TAG", "loyo31-")
+TAG = os.environ.get("LOYO_TAG", "paper-")
 YEARS = range(2017, 2023)
 # 种子列表可用环境变量 LOYO_SEEDS 覆盖（例如单种子复核时 LOYO_SEEDS=0）
-SEEDS = tuple(int(s) for s in os.environ.get("LOYO_SEEDS", "42 1 2").split())
-CONFIGS = {# PA-TFT：县均值偏移 + 植被指数县内去均值 + 梯度裁剪，植被指数走数值特征
-           "improved": f"{TAG}improved-y{{y}}-s{{s}}",
-           # 基线 TFT：第4章的直接适配配置（PVT 图像编码器端到端训练）
-           "original": f"{TAG}original-y{{y}}-s{{s}}",
-           # 组件消融：去掉县均值偏移 / 去掉植被指数的县内去均值
-           "noffset": f"{TAG}noffset-y{{y}}-s{{s}}", "nodemean": f"{TAG}nodemean-y{{y}}-s{{s}}",
-           # 去掉遥感：植被指数全部置零（同一模型结构），检验遥感的增量贡献
+SEEDS = tuple(int(s) for s in os.environ.get("LOYO_SEEDS", "0").split())
+CONFIGS = {# 主模型：水平目标 + 训练年份全局标准化 + 遥感输入
+           "main": f"{TAG}main-y{{y}}-s{{s}}",
+           # 消融：遥感输入全部置零（同一模型结构），检验遥感的增量贡献
            "nors": f"{TAG}nors-y{{y}}-s{{s}}"}
 
 
@@ -93,30 +89,6 @@ def main():
             per_year[year] = entry
         out["configs"][name] = per_year
     (ROOT / "paper_figures" / "loyo_summary.json").write_text(json.dumps(out, indent=1))
-    ablation = {}
-    for key, name in (("improved", "improved"), ("noffset", "noffset"), ("nodemean", "nodemean"), ("nors", "nors")):
-        rows = out["configs"][name]
-        if all(y in rows and "ensemble" in rows[y] for y in YEARS):
-            ablation[key] = {
-                "ensemble_by_year": {str(y): rows[y]["ensemble"]["rmse"] for y in YEARS},
-                "ensemble_mean": float(np.mean([rows[y]["ensemble"]["rmse"] for y in YEARS])),
-                "single_mean": float(np.mean([rows[y]["single_rmse_mean"] for y in YEARS])),
-                "anom_corr_mean": float(np.mean([rows[y]["ensemble"]["anom_corr"] for y in YEARS])),
-            }
-    if all(k in ablation for k in ("improved", "noffset", "nodemean")):
-        from scipy import stats
-        full = np.array([ablation["improved"]["ensemble_by_year"][str(y)] for y in YEARS])
-        ablation["tests_vs_improved"] = {}
-        for key in [k for k in ("noffset", "nodemean", "nors") if k in ablation]:
-            e = np.array([ablation[key]["ensemble_by_year"][str(y)] for y in YEARS])
-            ablation["tests_vs_improved"][key] = {
-                "diff": float((e - full).mean()), "worse_years": int((e > full).sum()),
-                "t_p": float(stats.ttest_rel(e, full).pvalue), "w_p": float(stats.wilcoxon(e, full).pvalue)}
-        ablation["seed_sd_mean"] = {key: float(np.mean([out["configs"][name][y]["single_rmse_sd"] for y in YEARS]))
-                                    for key, name in (("improved", "improved"), ("noffset", "noffset"), ("nodemean", "nodemean"), ("nors", "nors"))
-                                    if key in ablation}
-        (ROOT / "paper_figures" / "loyo_ablation.json").write_text(json.dumps(ablation, indent=1))
-
     fe, pan = panel["county_fe_only"]["per_year_rmse"], panel["weather+veg"]["per_year_rmse"]
     print(f"{'year':4s} | {'FE':>6s} {'panel':>6s} | " + " | ".join(f"{n:>21s}" for n in CONFIGS))
     print(f"{'':4s} | {'':6s} {'':6s} | " + " | ".join(f"{'single mean±sd  ens':>21s}" for _ in CONFIGS))

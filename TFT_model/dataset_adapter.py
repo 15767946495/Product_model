@@ -44,9 +44,16 @@ def split_years(test_year: int) -> tuple[tuple[int, ...], tuple[int, ...]]:
     return train_years, (int(test_year),)
 
 
-def dynamic_feature_names(use_constructed: bool) -> tuple[str, ...]:
-    constructed = CONSTRUCTED_FEATURES if use_constructed else ("CumGDD",)
-    return tuple(WEATHER_FEATURES) + tuple(constructed)
+def constructed_names(use_constructed) -> tuple[str, ...]:
+    """``use_constructed`` 的三种取值：True 全部四个构造变量；False 只保留 CumGDD（旧协议）；
+    字符串 ``"none"`` 一个都不加——用于'去掉构造气象变量'的消融。"""
+    if use_constructed == "none":
+        return ()
+    return CONSTRUCTED_FEATURES if use_constructed else ("CumGDD",)
+
+
+def dynamic_feature_names(use_constructed) -> tuple[str, ...]:
+    return tuple(WEATHER_FEATURES) + tuple(constructed_names(use_constructed))
 
 
 @dataclass(frozen=True)
@@ -76,6 +83,10 @@ class TFTStats:
     # [1] 为同一范围的标准差。遥感输入按 (x - 本县均值)/本县标准差 计算，不再使用全局
     # rs_mean/rs_std；与 rs_center（demean_rs 的逐网格中心）互斥。
     rs_within: dict | None = None
+    # 气象县内标准化（第3.6节）：fips -> (2, D)，[0]/[1] 为本县该动态变量在训练年份、
+    # 全部月份（日）与全部网格上合并的均值/标准差。每个县年的气象先按本县参数标准化，
+    # 再进入网络；此时不再使用全局 dynamic_mean/dynamic_std。
+    weather_within: dict | None = None
 
 
 class RSFeatureStore:
@@ -104,17 +115,22 @@ class RSFeatureStore:
 
 
 def load_rs_store(model_config: dict) -> RSFeatureStore | None:
-    """按 checkpoint 的 model_config 打开特征缓存并核对 SHA-256；未使用数值特征时返回 None。"""
-    if not model_config.get("rs_feature_dim"):
+    """按 checkpoint 的 model_config 打开特征缓存并核对 SHA-256；未使用特征缓存时返回 None。
+
+    ``no_rs_branch`` 的消融运行不把特征送入模型，但仍用缓存确定月份—网格有效掩码，
+    因此只要 checkpoint 记录了缓存路径就打开它，``rs_feature_dim=0`` 时跳过维度校验。
+    """
+    path = model_config.get("rs_features_path")
+    if not path:
         return None
     from train_dataset import run_output as ro
 
-    path = model_config["rs_features_path"]
     expected = model_config.get("rs_features_sha256")
     if expected and ro.sha256_file(path) != expected:
         raise ValueError(f"remote-sensing feature cache {path} changed since training (SHA-256 mismatch)")
     store = RSFeatureStore(path)
-    if len(store.names) != int(model_config["rs_feature_dim"]):
+    dim = int(model_config.get("rs_feature_dim") or 0)
+    if dim and len(store.names) != dim:
         raise ValueError("remote-sensing feature cache dimension differs from checkpoint")
     return store
 
@@ -173,8 +189,7 @@ def construct_weather(weather: torch.Tensor, coords: torch.Tensor,
     if missing:
         raise ValueError(f"missing weather feature {missing[0]}")
     ordered = weather[..., [index[name] for name in WEATHER_FEATURES]]
-    names = CONSTRUCTED_FEATURES if use_constructed else ("CumGDD",)
-    return append_constructed_features(ordered, coords=coords, names=names)
+    return append_constructed_features(ordered, coords=coords, names=constructed_names(use_constructed))
 
 
 def build_dataset(path: Path, data_root: Path, years,
@@ -200,8 +215,13 @@ def _weather_month_index(year: int) -> np.ndarray:
 
 def _accumulate_features(samples, *, dynamic_size: int, use_constructed: bool,
                          rs_store: RSFeatureStore | None, rs_center: dict | None,
-                         weather_center: dict | None = None, month_index: np.ndarray | None = None):
-    """把一批县年样本的天气、土壤与遥感特征累加成 (sum, sumsq, count)。"""
+                         weather_center: dict | None = None, month_index: np.ndarray | None = None,
+                         weather_within: bool = False):
+    """把一批县年样本的天气、土壤与遥感特征累加成 (sum, sumsq, count)。
+
+    ``weather_within=True`` 时同时按县累加动态特征，返回每县训练年份全月份、
+    全网格合并的均值/标准差；与全局 dynamic 统计量在同一次遍历中完成。
+    """
     dynamic_sum = torch.zeros(dynamic_size, dtype=torch.float64)
     dynamic_sumsq = torch.zeros(dynamic_size, dtype=torch.float64)
     soil_sum = torch.zeros(len(SOIL_FEATURES), dtype=torch.float64)
@@ -210,6 +230,7 @@ def _accumulate_features(samples, *, dynamic_size: int, use_constructed: bool,
     soil_count = 0
     rs_sum = rs_sumsq = None
     rs_count = 0
+    weather_accumulators: dict[str, list] = {}
     for sample in samples:
         if rs_store is not None:
             values = torch.from_numpy(rs_store.get(sample["sample_id"], len(sample["grid_ids"])).astype(np.float64))
@@ -238,6 +259,17 @@ def _accumulate_features(samples, *, dynamic_size: int, use_constructed: bool,
         dynamic_sum += features.sum(dim=0)
         dynamic_sumsq += (features * features).sum(dim=0)
         dynamic_count += features.shape[0]
+        if weather_within:
+            state = weather_accumulators.get(sample["fips"])
+            if state is None:
+                state = weather_accumulators[sample["fips"]] = [
+                    torch.zeros(dynamic_size, dtype=torch.float64),
+                    torch.zeros(dynamic_size, dtype=torch.float64),
+                    0,
+                ]
+            state[0] += features.sum(dim=0)
+            state[1] += (features * features).sum(dim=0)
+            state[2] += features.shape[0]
 
         soil = torch.from_numpy(sample["soil"]).to(dtype=torch.float64)
         soil_sum += soil
@@ -248,15 +280,23 @@ def _accumulate_features(samples, *, dynamic_size: int, use_constructed: bool,
     rs_mean = rs_std = None
     if rs_sum is not None:
         rs_mean, rs_std = _stats_from_accumulators(rs_sum, rs_sumsq, rs_count)
+    per_county_weather = None
+    if weather_within:
+        per_county_weather = {}
+        for fips, (total, squares, count) in weather_accumulators.items():
+            mean, std = _stats_from_accumulators(total, squares, count)
+            per_county_weather[fips] = np.stack([mean.numpy(), std.numpy()])
     return {"dynamic_mean": dynamic_mean, "dynamic_std": dynamic_std,
             "soil_mean": soil_mean, "soil_std": soil_std,
-            "rs_mean": rs_mean, "rs_std": rs_std}
+            "rs_mean": rs_mean, "rs_std": rs_std,
+            "weather_within": per_county_weather}
 
 
 def fit_stats(dataset: CropNetDataset, *, use_constructed: bool,
               rs_store: RSFeatureStore | None = None, train_years=TRAIN_YEARS,
               county_offset: bool = False, demean_rs: bool = False,
               rs_within_norm: bool = False, rs_within_scope: str = "month", demean_weather: bool = False,
+              weather_within_norm: bool = True,
               offset_dataset: CropNetDataset | None = None,
               leave_one_out_offset: bool = True,
               norm_mode: str = "train",
@@ -274,6 +314,11 @@ def fit_stats(dataset: CropNetDataset, *, use_constructed: bool,
     """
     if norm_mode not in ("train", "none", "per-year", "all-years"):
         raise ValueError(f"unknown norm_mode: {norm_mode}")
+    if demean_weather and weather_within_norm:
+        raise ValueError("demean_weather and weather_within_norm are mutually exclusive")
+    if norm_mode != "train":
+        # 按年/合并年份的标准化口径是全局统计量的消融；县内标准化只在默认口径下启用。
+        weather_within_norm = False
     actual_years = {int(sample["year"]) for sample in dataset.samples}
     unexpected = sorted(actual_years - set(train_years))
     if unexpected:
@@ -334,6 +379,7 @@ def fit_stats(dataset: CropNetDataset, *, use_constructed: bool,
                 rs_within[fips] = np.stack([mean, np.sqrt(np.maximum(var, 1e-12))])
         else:
             rs_center = {fips: np.mean(np.stack(values), axis=0) for fips, values in grouped.items()}
+    weather_within = None
     offset = None
     offset_by_sample = None
     if county_offset:
@@ -359,7 +405,7 @@ def fit_stats(dataset: CropNetDataset, *, use_constructed: bool,
                 for fips, per_year in single.items():
                     for year in per_year:
                         offset_by_sample[f"{fips}_{year}"] = fallback
-    dynamic_size = len(WEATHER_FEATURES) + (len(CONSTRUCTED_FEATURES) if use_constructed else 1)
+    dynamic_size = len(WEATHER_FEATURES) + len(constructed_names(use_constructed))
     if norm_mode == "none":
         dynamic_mean = torch.zeros(dynamic_size)
         dynamic_std = torch.ones(dynamic_size)
@@ -373,12 +419,14 @@ def fit_stats(dataset: CropNetDataset, *, use_constructed: bool,
                         offset_by_sample, norm_mode=norm_mode, weather_center=weather_center)
     accumulate = dict(dynamic_size=dynamic_size, use_constructed=use_constructed,
                       rs_store=rs_store, rs_center=rs_center,
-                      weather_center=weather_center, month_index=month_index)
+                      weather_center=weather_center, month_index=month_index,
+                      weather_within=weather_within_norm)
     if norm_mode == "all-years":
         # 测试年份只贡献特征（无标签），用于检验"不用训练集统计量"的替代口径。
         stats = _accumulate_features(list(dataset.samples) + list(extra_dataset.samples), **accumulate)
     else:
         stats = _accumulate_features(dataset.samples, **accumulate)
+    weather_within = stats["weather_within"]
     per_year = None
     if norm_mode == "per-year":
         by_year: dict[int, list] = {}
@@ -388,7 +436,7 @@ def fit_stats(dataset: CropNetDataset, *, use_constructed: bool,
     return TFTStats(stats["dynamic_mean"], stats["dynamic_std"], stats["soil_mean"], stats["soil_std"],
                     stats["rs_mean"], stats["rs_std"], offset, rs_center, offset_by_sample,
                     norm_mode=norm_mode, per_year=per_year, weather_center=weather_center,
-                    rs_within=rs_within)
+                    rs_within=rs_within, weather_within=weather_within)
 
 
 def stats_to_json(stats: TFTStats) -> dict:
@@ -409,6 +457,8 @@ def stats_to_json(stats: TFTStats) -> dict:
         payload["weather_center"] = {fips: value.tolist() for fips, value in stats.weather_center.items()}
     if stats.rs_within is not None:
         payload["rs_within"] = {fips: value.tolist() for fips, value in stats.rs_within.items()}
+    if stats.weather_within is not None:
+        payload["weather_within"] = {fips: value.tolist() for fips, value in stats.weather_within.items()}
     if stats.offset_by_sample is not None:
         payload["offset_by_sample"] = dict(stats.offset_by_sample)
     payload["norm_mode"] = stats.norm_mode
@@ -434,6 +484,8 @@ def stats_from_json(payload: dict) -> TFTStats:
                if "weather_center" in payload else None)
     within = ({k: np.asarray(v, dtype=np.float64) for k, v in payload["rs_within"].items()}
               if "rs_within" in payload else None)
+    weather_within = ({k: np.asarray(v, dtype=np.float64) for k, v in payload["weather_within"].items()}
+                      if "weather_within" in payload else None)
     per_year = None
     if "per_year" in payload:
         per_year = {
@@ -443,7 +495,8 @@ def stats_from_json(payload: dict) -> TFTStats:
         }
     return TFTStats(**tensors, county_offset=offset, rs_center=center, offset_by_sample=by_sample,
                     norm_mode=payload.get("norm_mode", "train"), per_year=per_year,
-                    weather_center=weather, rs_within=within)
+                    weather_center=weather, rs_within=within,
+                    weather_within=weather_within)
 
 
 def _standardize(value: torch.Tensor, mean: torch.Tensor, std: torch.Tensor) -> torch.Tensor:
@@ -459,8 +512,25 @@ def _lookup(table: dict, fips: str, what: str):
         raise KeyError(f"{fips}: no {what} from training years (county unseen in training)") from None
 
 
+ZERO_CHOICES = ("weather", "soil", "coords")
+
+
+def parse_zero_modalities(values) -> frozenset:
+    """把 ``--zero-modality`` 的取值规范化：static 是 soil+coords 的简写，其余原样。"""
+    out = set()
+    for value in values or ():
+        value = str(value).strip().lower()
+        if value == "static":
+            out.update(("soil", "coords"))
+        elif value in ZERO_CHOICES:
+            out.add(value)
+        elif value:
+            raise ValueError(f"unknown zero-modality {value!r}; expected {ZERO_CHOICES} or 'static'")
+    return frozenset(out)
+
+
 def _tft_collate(items, stats: TFTStats, use_constructed: bool,
-                 rs_store: RSFeatureStore | None = None) -> dict:
+                 rs_store: RSFeatureStore | None = None, zero: frozenset = frozenset()) -> dict:
     raw = collate_county_year(items)
     features = [
         construct_weather(item["weather"], item["coords"], WEATHER_FEATURES, use_constructed)
@@ -482,7 +552,16 @@ def _tft_collate(items, stats: TFTStats, use_constructed: bool,
                     f"{item['fips']}: weather centre has {center.shape[1]} grids, sample has {grids}")
             centered = np.transpose(center[month_index], (1, 0, 2))
             grid_feats[index, :grids] -= torch.from_numpy(centered).to(grid_feats.dtype)
-    if stats.per_year is None:
+    if stats.weather_within is not None:
+        # 气象县内标准化（默认，第3.6节）：每个县用本县训练年份、全部月份与网格合并的
+        # 一对均值/标准差，不再使用全局 dynamic_mean/dynamic_std。
+        for index, item in enumerate(items):
+            mean, sd = _lookup(stats.weather_within, item["fips"], "weather within-county stats")
+            grids = features[index].shape[0]
+            grid_feats[index, :grids] = (
+                grid_feats[index, :grids] - torch.from_numpy(mean).to(grid_feats.dtype)
+            ) / torch.from_numpy(sd).clamp_min(1e-6).to(grid_feats.dtype)
+    elif stats.per_year is None:
         grid_feats = _standardize(grid_feats, stats.dynamic_mean, stats.dynamic_std)
     else:
         # 按年标准化的消融：每行样本用自己年份的统计量（第3.6节）。
@@ -491,6 +570,10 @@ def _tft_collate(items, stats: TFTStats, use_constructed: bool,
         dynamic_std = torch.stack([stats.per_year[year]["dynamic_std"] for year in years]).clamp_min(1e-6)
         grid_feats = (grid_feats - dynamic_mean.view(batch_size, 1, 1, -1)) / dynamic_std.view(batch_size, 1, 1, -1)
     grid_feats = torch.where(raw["grid_mask"].unsqueeze(-1).unsqueeze(-1), grid_feats, torch.zeros_like(grid_feats))
+    # 坐标固定缩放（第3.6节）：经度、纬度都除以 180，压缩到约 [-1, 1]，保留绝对地理位置。
+    # 位置编码直接使用缩放后的坐标；潜在蒸散仍在标准化之前用原始纬度计算。
+    coords = raw["coords"] / 180.0
+    coords = torch.where(raw["grid_mask"].unsqueeze(-1), coords, torch.zeros_like(coords))
     if stats.per_year is None:
         soil_feats = _standardize(raw["soil"], stats.soil_mean, stats.soil_std)
     else:
@@ -547,10 +630,19 @@ def _tft_collate(items, stats: TFTStats, use_constructed: bool,
     elif stats.county_offset is not None:
         offset = torch.tensor([_lookup(stats.county_offset, item["fips"], "county offset") for item in items],
                               dtype=torch.float32)
+    # 模态消融（--zero-modality）：把某一类输入整体置零，模型结构与训练预算不变。
+    # 标准化之后置零等于"只保留训练年份的气候态/均值"，县年之间的差异被抹掉，
+    # 因此衡量的正是该模态携带的县年信息，而不是它的存在与否。
+    if "weather" in zero:
+        grid_feats = torch.zeros_like(grid_feats)
+    if "soil" in zero:
+        soil_feats = torch.zeros_like(soil_feats)
+    if "coords" in zero:
+        coords = torch.zeros_like(coords)
     return {
         "county_offset": offset,
         "grid_feats": grid_feats,
-        "grid_coords": raw["coords"],
+        "grid_coords": coords,
         "grid_mask": raw["grid_mask"],
         "soil_feats": soil_feats,
         "seq_lens": torch.full((batch_size,), grid_feats.shape[2], dtype=torch.long),
@@ -627,20 +719,23 @@ def model_inputs(batch: dict, device) -> dict[str, torch.Tensor]:
 
 
 class _TFTCollate:
-    def __init__(self, stats: TFTStats, use_constructed: bool, rs_store: RSFeatureStore | None = None):
+    def __init__(self, stats: TFTStats, use_constructed: bool, rs_store: RSFeatureStore | None = None,
+                 zero: frozenset = frozenset()):
         self.stats = stats
         self.use_constructed = use_constructed
         self.rs_store = rs_store
+        self.zero = zero
 
     def __call__(self, items):
-        return _tft_collate(items, self.stats, self.use_constructed, self.rs_store)
+        return _tft_collate(items, self.stats, self.use_constructed, self.rs_store, self.zero)
 
 
 def build_loader(dataset, stats: TFTStats, batch_size: int, shuffle: bool, *,
                  use_constructed: bool, num_workers: int, generator=None,
-                 rs_store: RSFeatureStore | None = None) -> DataLoader:
+                 rs_store: RSFeatureStore | None = None,
+                 zero: frozenset = frozenset()) -> DataLoader:
     return DataLoader(
         dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers,
-        generator=generator, collate_fn=_TFTCollate(stats, use_constructed, rs_store),
+        generator=generator, collate_fn=_TFTCollate(stats, use_constructed, rs_store, zero),
         persistent_workers=num_workers > 0,
     )

@@ -9,6 +9,10 @@ from pathlib import Path
 
 import torch
 
+# 预处理阶段逐样本构造气象特征，都是小张量；torch 默认多线程会让多个训练进程互相抢核，
+# 反而把统计量计算拖到几十分钟。单线程在这里更快，GPU 训练不受影响。
+torch.set_num_threads(1)
+
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
@@ -106,6 +110,11 @@ def build_parser() -> argparse.ArgumentParser:
              "before standardising (same within-county treatment as --demean-rs)",
     )
     parser.add_argument(
+        "--weather-within-norm", action=argparse.BooleanOptionalAction, default=True,
+        help="默认开启：气象动态变量按县标准化，每个县用本县训练年份、全部月份与网格合并的"
+             "一对均值/标准差；--no-weather-within-norm 退回训练年份全局统计量",
+    )
+    parser.add_argument(
         "--norm-mode", dest="norm_mode", choices=("train", "none", "per-year", "all-years"),
         default="train",
         help="standardisation ablation (Section 3.6): train = training-year statistics only (default); "
@@ -120,6 +129,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--rs-features", default="",
         help="path to rs_features.py npz; replaces the PVT image encoder with a per-feature linear map "
              "over numeric grid-month vegetation indices (no images are loaded)",
+    )
+    parser.add_argument(
+        "--no-constructed-weather", action="store_true", default=False,
+        help="消融：不加入任何农学构造气象变量（GDD/KDD/累计降水/水分盈亏），只保留原始日气象变量。"
+             "这是对第3.3节构造变量的移除式消融；原始气象变量本身仍是模型的动态输入（变量选择网络的输入集不能为空）。",
+    )
+    parser.add_argument(
+        "--no-rs-branch", action="store_true", default=False,
+        help="消融：整条遥感支路不建立任何参数（连 10->H 的线性层也不存在），输入恒为零向量。"
+             "这是'去掉遥感'的移除式消融；与把特征置零的掩码式消融不同。",
+    )
+    parser.add_argument(
+        "--no-soil-branch", action="store_true", default=False,
+        help="消融：整条土壤静态上下文支路不建立任何参数（soil_dim=0），四个上下文恒为零向量。",
     )
     parser.add_argument(
         "--rs-as-variable", action="store_true", default=False,
@@ -354,12 +377,16 @@ def _checkpoint_payload(model, optimizer, epoch, args, stats, model_config) -> d
         "optimizer": optimizer.state_dict(),
         "stats": adapter.stats_to_json(stats),
         "epoch": epoch,
-        "use_constructed": bool(args.use_constructed),
+        "use_constructed": args.use_constructed,
     }
 
 
 def main(args) -> Path:
     from TFT_model.infer import evaluate_final_checkpoint
+
+    if args.no_constructed_weather:
+        # 三态：True=四个构造变量，False=CumGDD（旧协议），"none"=一个都不加。
+        args.use_constructed = "none"
 
     if args.eval_checkpoint:
         run_dir = Path(args.eval_checkpoint).resolve().parent
@@ -439,7 +466,9 @@ def main(args) -> Path:
         stats = adapter.fit_stats(
             dataset, use_constructed=args.use_constructed, rs_store=rs_store, train_years=train_years,
             county_offset=args.county_offset, demean_rs=args.demean_rs,
-            rs_within_norm=bool(args.rs_within_norm and args.rs_features), rs_within_scope=args.rs_within_scope, demean_weather=args.demean_weather, offset_dataset=offset_dataset,
+            rs_within_norm=bool(args.rs_within_norm and args.rs_features), rs_within_scope=args.rs_within_scope, demean_weather=args.demean_weather,
+            weather_within_norm=args.weather_within_norm,
+            offset_dataset=offset_dataset,
             leave_one_out_offset=bool(args.all_years),
             norm_mode=args.norm_mode, extra_dataset=extra_dataset,
         )
@@ -462,7 +491,7 @@ def main(args) -> Path:
                 use_constructed=args.use_constructed,
                 num_workers=args.num_workers,
                 rs_store=rs_store,
-            )
+                )
             ro.update_json(run_dir / "run_metadata.json", valid_samples=len(valid_dataset))
         model_config = {
             "hidden_size": args.hidden_size,
@@ -482,17 +511,24 @@ def main(args) -> Path:
             "rs_within_norm": bool(args.rs_within_norm and args.rs_features),
             "rs_within_scope": args.rs_within_scope,
             "demean_weather": bool(args.demean_weather),
+            "weather_within_norm": bool(args.weather_within_norm),
+            "coords_scale": 180.0,
             "norm_mode": args.norm_mode,
             "test_year": int(args.test_year),
+            "no_rs_branch": bool(args.no_rs_branch),
+            "no_soil_branch": bool(args.no_soil_branch),
         }
+        if args.no_soil_branch:
+            model_config["soil_dim"] = 0
         if rs_store is not None:
             model_config.update(
-                rs_feature_dim=len(rs_store.names),
                 rs_feature_names=list(rs_store.names),
                 rs_features_path=str(rs_store.path.resolve()),
                 rs_features_sha256=ro.sha256_file(rs_store.path),
                 vit_pretrained=False,
             )
+            if not args.no_rs_branch:
+                model_config["rs_feature_dim"] = len(rs_store.names)
         model = build_model(model_config).to(device)
         if args.remote_constant_init == "pvt_mean":
             init = _pvt_mean_token(model, dataset, stats, device, args)

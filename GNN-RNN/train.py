@@ -19,7 +19,7 @@ import torch
 import config as cfg
 from dataset_adapter import (
     TARGET_TEST_YEAR, TARGET_TRAIN_YEAR, TEST_YEARS, TRAIN_YEARS, fit_stats, load_windows, model_inputs,
-    protocol_windows, stats_from_json, stats_to_json,
+    protocol_windows, stats_from_json, stats_to_json, target_windows,
 )
 from model import GNNRNN
 from train_dataset import run_output as ro
@@ -57,6 +57,9 @@ def build_parser():
                              "enables the GNN-RNN+VI input-parity configuration")
     parser.add_argument("--valid-year", type=int, default=None,
                         help="hold-out validation year for early stopping (e.g. 2021); training window then ends before it")
+    parser.add_argument("--target-year", type=int, default=None,
+                        help="spatial CV: train window 2017..year-1, test window ends at this year "
+                             "(2022 reproduces the default GNN_WINDOWS)")
     parser.add_argument("--early-stop-patience", type=int, default=10,
                         help="stop after N epochs without validation improvement (default 3); -1 disables early stopping")
     parser.add_argument("--checkpoint-policy", choices=("best", "final"), default="best",
@@ -66,6 +69,8 @@ def build_parser():
 
 def _run_windows(run_config: dict) -> dict:
     """按运行配置恢复窗口；未使用 --valid-year 的旧运行退回 GNN_WINDOWS。"""
+    if run_config.get("target_year") is not None:
+        return target_windows(int(run_config["target_year"]))
     if run_config.get("valid_year") is not None:
         return protocol_windows(int(run_config["valid_year"]), int(run_config.get("test_year", YEARS[-1])))
     return GNN_WINDOWS

@@ -144,7 +144,7 @@ def evaluate_final_checkpoint(
     model.load_state_dict(checkpoint["model"])
     model.eval()
     stats = adapter.stats_from_json(checkpoint["stats"])
-    use_constructed = bool(checkpoint.get("use_constructed", True))
+    use_constructed = checkpoint.get("use_constructed", True)
     rs_store = adapter.load_rs_store(checkpoint["model_config"])
     dataset = adapter.build_dataset(eval_jsonl or dataset_jsonl, data_root, test_years,
                                     load_images=rs_store is None)
@@ -153,6 +153,7 @@ def evaluate_final_checkpoint(
         use_constructed=use_constructed,
         num_workers=num_workers,
         rs_store=rs_store,
+        zero=adapter.parse_zero_modalities(inference_config.get("zero_modalities")),
     )
     cutoff_list = parse_cutoffs(cutoffs) if isinstance(cutoffs, str) else list(cutoffs)
     cutoff_values = {cutoff: ([], []) for cutoff in cutoff_list}

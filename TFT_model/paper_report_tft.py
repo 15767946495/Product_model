@@ -1,10 +1,10 @@
 """PA-TFT 在新面板（29 州 741 县，2017—2022）上的论文数值：2022 折的模型比较。
 
 数据来源：
-- 运行目录 `/data/raid0/hqx/TFT_out/tft`（环境变量 LOYO_RUNS 可覆盖），编号 `loyo31-{配置}-y{年}-s{种子}`
+- 运行目录 `/data/raid0/hqx/TFT_out/tft`（环境变量 LOYO_RUNS 可覆盖），编号 `paper-{配置}-y{年}-s{种子}`
 - 比较模型的运行目录见 BASELINES（缺测的自动跳过）
 
-主模型 = PA-TFT（improved 配置，学习率 1e-4，种子 0，单次运行）。其他模型同样只报告一次运行。
+主模型 = PA-TFT（main 配置：水平目标、全局标准化、学习率 1e-4，种子 0，单次运行）。其他模型同样只报告一次运行。
 岭回归面板模型不在本脚本里：它只作为第5.8节置换检验的估计器，不使用测试折作预测比较。
 写入 `paper_figures/tft_main.json`。
 """
@@ -29,14 +29,14 @@ RUNS = Path(os.environ.get("LOYO_RUNS", "/data/raid0/hqx/TFT_out/tft"))
 FEATURES = "/data/raid0/hqx/train_dataset/rs_signal_features_31states.npz"
 # 种子列表可用环境变量 LOYO_SEEDS 覆盖（例如单种子复核时 LOYO_SEEDS=0）
 SEEDS = tuple(int(s) for s in os.environ.get("LOYO_SEEDS", "0").split())
-TAG = os.environ.get("LOYO_TAG", "loyo31")
+TAG = os.environ.get("LOYO_TAG", "paper")
 # 统一协议：训练 2017--2021，各方法固定 20 轮（不使用验证集），2022 测试。县均值基准与固定效应用训练年份。
 TRAIN_LAST_YEAR = 2021
 
 # 比较模型的 2022 折运行目录（新面板重跑后填写；不存在的自动跳过）
 BASELINES = {
-    "UNet-ConvLSTM": Path("/data/raid0/hqx/baselines/unet_convlstm/loyo31-unet-e20"),
-    "GNN-RNN": Path("/data/raid0/hqx/baselines/gnn_rnn/loyo31-gnn-vi-e20"),
+    "UNet-ConvLSTM": Path("/data/raid0/hqx/baselines/unet_convlstm/loyo31-unet"),
+    "GNN-RNN": Path("/data/raid0/hqx/baselines/gnn_rnn/diag-gnn-vi-e100"),
     "PhenoYieldNet": Path("/data/raid0/hqx/baselines/phenoyieldnet/loyo31-pheno-e20"),
 }
 
@@ -70,17 +70,17 @@ def ensemble_runs(pattern, seeds=None):
 def main():
     # 单折协议：只报告 2022 折，不再生成逐年留一汇总
 
-    # ---- 2022 折：县均值基准（训练年份 2017—2020） ----
+    # ---- 2022 折：仅县固定效应基准（训练年份 2017—2021 的县均值） ----
     data = load_features(FEATURES)
     train = data["year"] <= TRAIN_LAST_YEAR
     county_mean = {c: data["z"][train & (data["fips"] == c)].mean() for c in np.unique(data["fips"])}
 
-    fips, truth, preds = ensemble_runs(f"{TAG}-improved-y2022-s{{s}}")
+    fips, truth, preds = ensemble_runs(f"{TAG}-main-y2022-s{{s}}")
     base_log = np.array([county_mean[c] for c in fips])
 
     singles = {}
     for seed, p in zip(SEEDS[:len(preds)], preds):
-        singles[f"improved-s{seed}"] = {**metrics(truth, p), "anom_corr": anomaly_corr(p, truth, base_log, fips)}
+        singles[f"main-s{seed}"] = {**metrics(truth, p), "anom_corr": anomaly_corr(p, truth, base_log, fips)}
     ens = np.mean(preds, axis=0)
     main_2022 = {"single_runs": singles, "n": int(len(fips)),
                  "single_rmse_mean": float(np.mean([v["rmse"] for v in singles.values()])),
@@ -96,8 +96,6 @@ def main():
             f, p, t = load(path)
             assert (f == fips).all() and np.allclose(t, truth), name
             others[name] = p
-    # 仅县固定效应：PA-TFT 在 g≡0 时的特例
-    others["仅县固定效应"] = np.exp(base_log)
     # 岭回归面板模型不进模型比较：它只在第5.8节的置换检验中作为估计器（全样本、按年份CV）
 
     rows, rng = {}, np.random.default_rng(0)
@@ -112,11 +110,14 @@ def main():
 
     out = {"main_2022": main_2022, "compare_2022": rows,
            "state_rmse_2022": {
-               STATE_NAMES[s]: {"n": int((states == s).sum()),
-                                "tft": float(np.sqrt(((ens - truth)[states == s] ** 2).mean())),
-                                "fe": float(np.sqrt(((np.exp(base_log) - truth)[states == s] ** 2).mean()))}
+               STATE_NAMES[s]: {
+                   "n": int((states == s).sum()),
+                   "PA-TFT": float(np.sqrt(((ens - truth)[states == s] ** 2).mean())),
+                   **{name: float(np.sqrt(((pred - truth)[states == s] ** 2).mean()))
+                      for name, pred in others.items()},
+               }
                for s in np.unique(states)},
-           "runs": {"improved": f"{TAG}-improved"}}
+           "runs": {"main": f"{TAG}-main"}}
     (F / "tft_main.json").write_text(json.dumps(out, ensure_ascii=False, indent=1), encoding="utf-8")
 
     m = main_2022

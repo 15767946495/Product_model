@@ -20,11 +20,13 @@
 - 数据入口全部替换为 `dataset_adapter.py`，读取 `train_dataset/dataset.jsonl`。上游的 `dataset/*_loader.py`、`configs/build_config_multicrop.py` 和 `configs/multicrop/*.json` 都没有引入。
 - 训练入口 `train_da.py`、`train_ft.py` 重写，但保留上游训练逻辑：
   - Stage 1：按 0.2 概率丢帧；每个 (网格, 月) 单图独立做两次 SimCLR 增强（RandomResizedCrop 128、翻转、旋转、高斯模糊 3）；配 9 维天气上下文；ContrastiveLoss；AdamW(0.9, 0.95)，`blr=1e-3`；200 epochs，warmup 40。
-  - Stage 2：骨干 `num_classes=2` 后加载 Stage 1 权重；端到端训练，上游 `run_finetune.sh` 没有传 `--frozen_fm`，所以公开代码实际**不冻结**编码器，论文里写的是冻结，这里提供 `--frozen_fm` 开关、默认不冻结；MSE 作用于 log(yield)，即 `--yield_only_loss` 的语义；`blr=3e-4`；epochs 固定为 40，取 `run_finetune.sh` 的值，README 写的是 60；warmup 5。
-  - 去掉验证集、`best_metrics` 和按验证指标保存 checkpoint 的逻辑。最终测试只评估 `checkpoint-final.pth`，只用 2022。
+  - Stage 1 的逐图增强改由 torchvision **v2 批张量接口**完成（`common.per_image`）：v2 在 (B,C,H,W) 上逐样本采样参数，与上游 Python 逐图循环同分布；336 张 224→128 实测 1.26 s → 0.18 s，便于跑满 200 轮。
+  - Stage 2：骨干 `num_classes=2` 后加载 Stage 1 权重；上游 `run_finetune.sh` 没有传 `--frozen_fm`，公开代码实际**不冻结**编码器，论文 4.1.4 写的是冻结——本实现以论文为准，`--frozen_fm` 默认为开，用 `--no-frozen_fm` 关闭；MSE 作用于 log(yield)，即 `--yield_only_loss` 的语义；学习率按论文 3e-4（`--lr`），`blr=3e-4` 仅作后备；warmup 5。
+  - 早停：论文写 100 epochs + early stopping。本实现用 `--valid-county-frac` 在**微调年内按县**划出验证集（不碰测试年、不碰空间 CV 的留出县），`--early-stop-patience` 控制耐心，`--checkpoint-policy best` 恢复验证损失最低的一轮；不需要早停时仍可固定轮数取最后一轮。
+  - `--valid-year`（按年份验证）保留给旧的 2020 微调 / 2021 早停口径，与 `--valid-county-frac` 互斥。
 - 只实现 PhenoYieldNet-SC（corn）：始终使用 corn 的 crop query 和回归头（索引 1）。四作物参数形状保留，便于对照上游。
 - 像素尺度：上游直接把 uint8 转成 float（0–255，不除以 255）。统一 Dataset 输出 [0,1]，adapter 乘回 255。
-- `num_grid` 从 64 改为 80：统一数据单县最多 78 个网格，加 1 个 cls token。上游模型没有网格 mask，所以每步固定一个县年，与上游 `batch_size=1` 的县级 DataLoader 一致，不产生 padding。
+- `num_grid` 从上游默认 64 改为 322：统一数据单县最多 321 个网格，加 1 个 cls token。上游模型没有网格 mask，所以每步固定一个县年，与上游 `batch_size=1` 的县级 DataLoader 一致，不产生 padding。
 - 不使用长期气象；`crop_balanced_loss`、`head_lr_balance` 只对多作物有意义，没有引入。
 
 ## SpectralGPT+ 权重
