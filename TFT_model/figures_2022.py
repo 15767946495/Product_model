@@ -2,7 +2,7 @@
 
 图5-1  2022年观测—预测散点（PAF-Net 与 GNN-RNN，后者是三个深度基线中最好的一组）
 图5-2  分州RMSE哑铃图（PAF-Net 对 GNN-RNN，按差值排序）
-图5-3  组件消融的RMSE
+图5-3  输入消融的RMSE
 
 预测来自 `/data/raid0/hqx/TFT_out/tft/paper-main-y2022-s0`（环境变量 `LOYO_RUN`
 可覆盖）；比较模型取 `paper_report_tft.py` 中 BASELINES 的同一运行目录。
@@ -114,7 +114,6 @@ def fig_state_dumbbell(plt, fips, pred, truth, base):
 def fig_ablation(plt, main_rmse):
     report = json.loads((OUT / "single_fold_2022.json").read_text(encoding="utf-8"))
     rows = [("PAF-Net（主模型）", report["main"]["rmse"])]
-    rows += [(row["label"], row["rmse"]) for row in report.get("component_ablation", {}).values()]
     rows += [(row["label"], row["rmse"]) for row in report.get("removal_ablation", {}).values()]
     rows.sort(key=lambda r: r[1])
     fig, ax = plt.subplots(figsize=(7.0, 3.1), constrained_layout=True)
