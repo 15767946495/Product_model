@@ -1,6 +1,6 @@
 # CropNet Model — 县级玉米单产预测
 
-基于**面板感知时间融合变换器（PA-TFT）**的县级玉米单产预测研究。
+基于**面板感知融合网络（PAF-Net）**的县级玉米单产预测研究。
 
 - **研究对象**：美国 29 个州 741 个玉米主产县，2017—2022 年平衡面板（4446 个县年）
 - **数据**：CropNet 的 Sentinel-2、WRF-HRRR 与 USDA Corn 数据，外加 7 维县级土壤属性
@@ -11,7 +11,7 @@
 
 ```
 cropnet_model/
-├── TFT_model/            # 主模型 PA-TFT（训练、推理、消融、干预与论文数值脚本）
+├── TFT_model/            # 主模型 PAF-Net（训练、推理、消融与论文数值脚本）
 ├── UNet-ConvLSTM/        # 比较模型
 ├── GNN-RNN/              # 比较模型
 ├── PhenoYieldNet/        # 比较模型
@@ -114,7 +114,7 @@ TFT 默认只从本地 `/data/raid0/hqx/pretrained/pvt_tiny.pth` 读取 PVT-Tiny
 
 ## 论文数值复现
 
-`paper.md` 的时间外推只报告一折：2017—2021 年训练、2022 年测试，每个配置只跑一次、种子固定为 0（第5.1节）；空间外推另做县分组五折交叉验证（第5.8节）。完整流程如下。
+`paper.md` 的时间外推只报告一折：2017—2021 年训练、2022 年测试，每个配置只跑一次、种子固定为 0（第5.1节）；空间外推另做县分组五折交叉验证（第5.6节）。完整流程如下。
 
 ```bash
 P=/root/miniconda3/envs/product/bin/python
@@ -123,26 +123,21 @@ export OUTPUT_ROOT=/data/raid0/hqx/TFT_out      # 训练输出务必外置，不
 # 0) 空间五折划分（州内分层、种子 0；已生成可跳过）
 $P -I train_dataset/make_spatial_folds.py
 
-# 1) 训练：PA-TFT 主模型与遥感消融（2022 折、种子 0）
+# 1) 训练：PAF-Net 主模型、删除式消融与空间五折（2022 折、种子 0）
 bash TFT_model/run_loyo.sh                                  # main / nors
-bash TFT_model/run_spatial.sh                               # 县分组五折空间交叉验证（第5.8节）
+bash TFT_model/run_removal_ablation.sh                      # 删除支路 / 去掉 CumGDD / 空间注意力→均值（第5.4节）
+bash TFT_model/run_spatial.sh                               # 县分组五折空间交叉验证（第5.6节）
 
-# 2) 面板基线：仅县固定效应与线性面板估计器（第5.2、5.6—5.7节，写出 panel.json）
-$P -I TFT_model/panel_report.py
-
-# 3) 汇总：写 paper_figures/{single_fold_2022,tft_main,spatial_cv}.json
+# 2) 汇总：写 paper_figures/{single_fold_2022,tft_main,spatial_cv,inseason_2022}.json
 LOYO_SEEDS=0 $P -I TFT_model/paper_report_tft.py
 LOYO_SEEDS=0 $P -I TFT_model/single_fold_report.py
-$P -I TFT_model/spatial_summary.py
-$P -I TFT_model/figures_2022.py   # 图5-1、5-2、5-3
-
-# 4) 测试时遥感干预（第5.5节）
-$P -I TFT_model/rs_intervention_main.py
+SPATIAL_TAG=vsplit12 LOYO_SEEDS=0 $P -I TFT_model/spatial_summary.py   # 图5-5
+LOYO_SEEDS=0 $P -I TFT_model/inseason_report.py             # 生长季内截断（第5.5节）
+$P -I TFT_model/figures_2022.py                             # 图5-1、5-2、5-3
+$P -I TFT_model/inseason_figure.py                          # 图5-4
 ```
 
 论文只报告点估计，不再给出任何区间：自助法与聚类自助法已从第2.4节、第5.2节和第5章小结中删除。
-
-全样本置换检验（第5.7节）另用两步：`TFT_model/rs_signal_extract.py --output <npz>` 提取植被指数特征，`TFT_model/rs_signal_test.py --features <npz> --output <json>` 给出置换结果，`TFT_model/rs_info_test.py` 把结果整理成 `paper_figures/rs_info_test.json`。
 
 ## 引用
 

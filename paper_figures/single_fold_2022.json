@@ -3,22 +3,22 @@
  "n": 741,
  "main": {
   "single_rmse": [
-   21.216658213925346
+   22.626903125550335
   ],
-  "rmse": 21.216658213925346,
-  "params": 34208553
+  "rmse": 22.626903125550335,
+  "params": 30220917
  },
  "configs": {
   "main": {
-   "label": "PA-TFT（主模型）",
+   "label": "PAF-Net（主模型）",
    "n_seeds": 1,
-   "rmse": 21.216658213925346,
+   "rmse": 22.626903125550335,
    "single_rmse": [
-    21.216658213925346
+    22.626903125550335
    ],
-   "bias": 4.366817379126504,
-   "anom_corr": 0.2994079984293586,
-   "pred_sd": 32.530926417016346,
+   "bias": 0.5021670389111065,
+   "anom_corr": 0.3524832091783338,
+   "pred_sd": 32.86470102461319,
    "delta": 0.0
   }
  },
@@ -26,139 +26,1232 @@
   "norsbranch": {
    "label": "删除遥感支路",
    "run_id": "ablate-norsbranch-y2022-s0",
-   "rmse": 24.80596603214722,
-   "delta": 3.589307818221876,
-   "bias": 3.3079875915156687,
-   "anom_corr": 0.17509644188546739,
-   "pred_sd": 31.580379930056615,
-   "params": 34202921,
-   "state_ci": [
-    -7.260664169748978,
-    -0.31951676590572436
-   ],
-   "state_share": 0.9854
+   "rmse": 27.259677904834916,
+   "delta": 4.632774779284581,
+   "bias": -1.3874773110455347,
+   "anom_corr": 0.03754408648197487,
+   "pred_sd": 26.515834790917342,
+   "params": 30215285,
+   "state_compare": {
+    "n_states": 29,
+    "n_worse": 24,
+    "n_better": 5,
+    "n_tie": 0,
+    "median_delta": 4.55,
+    "q25": 1.85,
+    "q75": 9.12,
+    "min": -12.95,
+    "max": 20.07,
+    "worst": [
+     {
+      "state": "20",
+      "name": "堪萨斯",
+      "n": 24,
+      "rmse_main": 21.34,
+      "rmse_cfg": 41.41,
+      "delta": 20.07
+     },
+     {
+      "state": "42",
+      "name": "宾夕法尼亚",
+      "n": 27,
+      "rmse_main": 17.87,
+      "rmse_cfg": 32.28,
+      "delta": 14.41
+     },
+     {
+      "state": "19",
+      "name": "爱荷华",
+      "n": 68,
+      "rmse_main": 14.96,
+      "rmse_cfg": 29.1,
+      "delta": 14.14
+     }
+    ],
+    "best": [
+     {
+      "state": "37",
+      "name": "北卡罗来纳",
+      "n": 42,
+      "rmse_main": 31.91,
+      "rmse_cfg": 18.96,
+      "delta": -12.95
+     },
+     {
+      "state": "40",
+      "name": "俄克拉何马",
+      "n": 3,
+      "rmse_main": 49.73,
+      "rmse_cfg": 37.77,
+      "delta": -11.96
+     },
+     {
+      "state": "46",
+      "name": "南达科他",
+      "n": 13,
+      "rmse_main": 36.13,
+      "rmse_cfg": 27.49,
+      "delta": -8.64
+     }
+    ],
+    "by_state": [
+     {
+      "state": "20",
+      "name": "堪萨斯",
+      "n": 24,
+      "rmse_main": 21.34,
+      "rmse_cfg": 41.41,
+      "delta": 20.07
+     },
+     {
+      "state": "42",
+      "name": "宾夕法尼亚",
+      "n": 27,
+      "rmse_main": 17.87,
+      "rmse_cfg": 32.28,
+      "delta": 14.41
+     },
+     {
+      "state": "19",
+      "name": "爱荷华",
+      "n": 68,
+      "rmse_main": 14.96,
+      "rmse_cfg": 29.1,
+      "delta": 14.14
+     },
+     {
+      "state": "45",
+      "name": "南卡罗来纳",
+      "n": 17,
+      "rmse_main": 36.49,
+      "rmse_cfg": 49.14,
+      "delta": 12.65
+     },
+     {
+      "state": "39",
+      "name": "俄亥俄",
+      "n": 47,
+      "rmse_main": 9.65,
+      "rmse_cfg": 20.64,
+      "delta": 10.99
+     },
+     {
+      "state": "27",
+      "name": "明尼苏达",
+      "n": 39,
+      "rmse_main": 16.79,
+      "rmse_cfg": 26.54,
+      "delta": 9.75
+     },
+     {
+      "state": "16",
+      "name": "爱达荷",
+      "n": 6,
+      "rmse_main": 19.09,
+      "rmse_cfg": 28.5,
+      "delta": 9.41
+     },
+     {
+      "state": "05",
+      "name": "阿肯色",
+      "n": 15,
+      "rmse_main": 18.22,
+      "rmse_cfg": 27.34,
+      "delta": 9.12
+     },
+     {
+      "state": "47",
+      "name": "田纳西",
+      "n": 30,
+      "rmse_main": 21.96,
+      "rmse_cfg": 30.99,
+      "delta": 9.04
+     },
+     {
+      "state": "10",
+      "name": "特拉华",
+      "n": 3,
+      "rmse_main": 7.11,
+      "rmse_cfg": 15.34,
+      "delta": 8.23
+     },
+     {
+      "state": "08",
+      "name": "科罗拉多",
+      "n": 8,
+      "rmse_main": 81.71,
+      "rmse_cfg": 89.28,
+      "delta": 7.57
+     },
+     {
+      "state": "21",
+      "name": "肯塔基",
+      "n": 34,
+      "rmse_main": 18.99,
+      "rmse_cfg": 26.52,
+      "delta": 7.53
+     },
+     {
+      "state": "55",
+      "name": "威斯康星",
+      "n": 44,
+      "rmse_main": 10.02,
+      "rmse_cfg": 17.32,
+      "delta": 7.3
+     },
+     {
+      "state": "29",
+      "name": "密苏里",
+      "n": 17,
+      "rmse_main": 19.86,
+      "rmse_cfg": 24.92,
+      "delta": 5.05
+     },
+     {
+      "state": "51",
+      "name": "弗吉尼亚",
+      "n": 22,
+      "rmse_main": 18.24,
+      "rmse_cfg": 22.79,
+      "delta": 4.55
+     },
+     {
+      "state": "48",
+      "name": "得克萨斯",
+      "n": 26,
+      "rmse_main": 23.02,
+      "rmse_cfg": 27.43,
+      "delta": 4.41
+     },
+     {
+      "state": "38",
+      "name": "北达科他",
+      "n": 7,
+      "rmse_main": 14.04,
+      "rmse_cfg": 18.01,
+      "delta": 3.97
+     },
+     {
+      "state": "22",
+      "name": "路易斯安那",
+      "n": 13,
+      "rmse_main": 16.06,
+      "rmse_cfg": 18.77,
+      "delta": 2.7
+     },
+     {
+      "state": "28",
+      "name": "密西西比",
+      "n": 20,
+      "rmse_main": 28.44,
+      "rmse_cfg": 30.56,
+      "delta": 2.13
+     },
+     {
+      "state": "36",
+      "name": "纽约",
+      "n": 16,
+      "rmse_main": 20.13,
+      "rmse_cfg": 22.24,
+      "delta": 2.1
+     },
+     {
+      "state": "24",
+      "name": "马里兰",
+      "n": 12,
+      "rmse_main": 15.13,
+      "rmse_cfg": 17.17,
+      "delta": 2.04
+     },
+     {
+      "state": "26",
+      "name": "密歇根",
+      "n": 34,
+      "rmse_main": 13.54,
+      "rmse_cfg": 15.39,
+      "delta": 1.85
+     },
+     {
+      "state": "18",
+      "name": "印第安纳",
+      "n": 48,
+      "rmse_main": 14.41,
+      "rmse_cfg": 16.07,
+      "delta": 1.66
+     },
+     {
+      "state": "17",
+      "name": "伊利诺伊",
+      "n": 53,
+      "rmse_main": 23.41,
+      "rmse_cfg": 24.3,
+      "delta": 0.89
+     },
+     {
+      "state": "13",
+      "name": "佐治亚",
+      "n": 18,
+      "rmse_main": 19.79,
+      "rmse_cfg": 19.76,
+      "delta": -0.03
+     },
+     {
+      "state": "31",
+      "name": "内布拉斯加",
+      "n": 35,
+      "rmse_main": 32.66,
+      "rmse_cfg": 25.22,
+      "delta": -7.44
+     },
+     {
+      "state": "46",
+      "name": "南达科他",
+      "n": 13,
+      "rmse_main": 36.13,
+      "rmse_cfg": 27.49,
+      "delta": -8.64
+     },
+     {
+      "state": "40",
+      "name": "俄克拉何马",
+      "n": 3,
+      "rmse_main": 49.73,
+      "rmse_cfg": 37.77,
+      "delta": -11.96
+     },
+     {
+      "state": "37",
+      "name": "北卡罗来纳",
+      "n": 42,
+      "rmse_main": 31.91,
+      "rmse_cfg": 18.96,
+      "delta": -12.95
+     }
+    ]
+   }
   },
   "nosoilbranch": {
    "label": "删除土壤静态支路",
    "run_id": "ablate-nosoilbranch-y2022-s0",
-   "rmse": 25.870239919583543,
-   "delta": 4.653581705658198,
-   "bias": 2.7784161303850965,
-   "anom_corr": 0.2135993998676944,
-   "pred_sd": 28.830623664095224,
-   "params": 28130461,
-   "state_ci": [
-    -8.655068853744067,
-    -0.8693061309109501
-   ],
-   "state_share": 0.9912
+   "rmse": 26.34842336379262,
+   "delta": 3.7215202382422845,
+   "bias": 4.779558953968619,
+   "anom_corr": 0.1832927782005176,
+   "pred_sd": 28.104693199738133,
+   "params": 24142825,
+   "state_compare": {
+    "n_states": 29,
+    "n_worse": 22,
+    "n_better": 7,
+    "n_tie": 0,
+    "median_delta": 5.16,
+    "q25": 0.49,
+    "q75": 9.93,
+    "min": -35.18,
+    "max": 17.98,
+    "worst": [
+     {
+      "state": "38",
+      "name": "北达科他",
+      "n": 7,
+      "rmse_main": 14.04,
+      "rmse_cfg": 32.02,
+      "delta": 17.98
+     },
+     {
+      "state": "42",
+      "name": "宾夕法尼亚",
+      "n": 27,
+      "rmse_main": 17.87,
+      "rmse_cfg": 35.14,
+      "delta": 17.27
+     },
+     {
+      "state": "20",
+      "name": "堪萨斯",
+      "n": 24,
+      "rmse_main": 21.34,
+      "rmse_cfg": 36.94,
+      "delta": 15.6
+     }
+    ],
+    "best": [
+     {
+      "state": "08",
+      "name": "科罗拉多",
+      "n": 8,
+      "rmse_main": 81.71,
+      "rmse_cfg": 46.53,
+      "delta": -35.18
+     },
+     {
+      "state": "31",
+      "name": "内布拉斯加",
+      "n": 35,
+      "rmse_main": 32.66,
+      "rmse_cfg": 29.53,
+      "delta": -3.13
+     },
+     {
+      "state": "18",
+      "name": "印第安纳",
+      "n": 48,
+      "rmse_main": 14.41,
+      "rmse_cfg": 12.09,
+      "delta": -2.31
+     }
+    ],
+    "by_state": [
+     {
+      "state": "38",
+      "name": "北达科他",
+      "n": 7,
+      "rmse_main": 14.04,
+      "rmse_cfg": 32.02,
+      "delta": 17.98
+     },
+     {
+      "state": "42",
+      "name": "宾夕法尼亚",
+      "n": 27,
+      "rmse_main": 17.87,
+      "rmse_cfg": 35.14,
+      "delta": 17.27
+     },
+     {
+      "state": "20",
+      "name": "堪萨斯",
+      "n": 24,
+      "rmse_main": 21.34,
+      "rmse_cfg": 36.94,
+      "delta": 15.6
+     },
+     {
+      "state": "47",
+      "name": "田纳西",
+      "n": 30,
+      "rmse_main": 21.96,
+      "rmse_cfg": 35.99,
+      "delta": 14.04
+     },
+     {
+      "state": "16",
+      "name": "爱达荷",
+      "n": 6,
+      "rmse_main": 19.09,
+      "rmse_cfg": 32.35,
+      "delta": 13.27
+     },
+     {
+      "state": "45",
+      "name": "南卡罗来纳",
+      "n": 17,
+      "rmse_main": 36.49,
+      "rmse_cfg": 49.54,
+      "delta": 13.05
+     },
+     {
+      "state": "46",
+      "name": "南达科他",
+      "n": 13,
+      "rmse_main": 36.13,
+      "rmse_cfg": 47.7,
+      "delta": 11.58
+     },
+     {
+      "state": "10",
+      "name": "特拉华",
+      "n": 3,
+      "rmse_main": 7.11,
+      "rmse_cfg": 17.04,
+      "delta": 9.93
+     },
+     {
+      "state": "37",
+      "name": "北卡罗来纳",
+      "n": 42,
+      "rmse_main": 31.91,
+      "rmse_cfg": 39.77,
+      "delta": 7.86
+     },
+     {
+      "state": "24",
+      "name": "马里兰",
+      "n": 12,
+      "rmse_main": 15.13,
+      "rmse_cfg": 22.83,
+      "delta": 7.7
+     },
+     {
+      "state": "55",
+      "name": "威斯康星",
+      "n": 44,
+      "rmse_main": 10.02,
+      "rmse_cfg": 17.4,
+      "delta": 7.38
+     },
+     {
+      "state": "05",
+      "name": "阿肯色",
+      "n": 15,
+      "rmse_main": 18.22,
+      "rmse_cfg": 24.4,
+      "delta": 6.18
+     },
+     {
+      "state": "48",
+      "name": "得克萨斯",
+      "n": 26,
+      "rmse_main": 23.02,
+      "rmse_cfg": 29.14,
+      "delta": 6.12
+     },
+     {
+      "state": "28",
+      "name": "密西西比",
+      "n": 20,
+      "rmse_main": 28.44,
+      "rmse_cfg": 33.93,
+      "delta": 5.5
+     },
+     {
+      "state": "22",
+      "name": "路易斯安那",
+      "n": 13,
+      "rmse_main": 16.06,
+      "rmse_cfg": 21.22,
+      "delta": 5.16
+     },
+     {
+      "state": "29",
+      "name": "密苏里",
+      "n": 17,
+      "rmse_main": 19.86,
+      "rmse_cfg": 23.83,
+      "delta": 3.97
+     },
+     {
+      "state": "36",
+      "name": "纽约",
+      "n": 16,
+      "rmse_main": 20.13,
+      "rmse_cfg": 24.04,
+      "delta": 3.91
+     },
+     {
+      "state": "13",
+      "name": "佐治亚",
+      "n": 18,
+      "rmse_main": 19.79,
+      "rmse_cfg": 22.75,
+      "delta": 2.96
+     },
+     {
+      "state": "39",
+      "name": "俄亥俄",
+      "n": 47,
+      "rmse_main": 9.65,
+      "rmse_cfg": 12.29,
+      "delta": 2.63
+     },
+     {
+      "state": "27",
+      "name": "明尼苏达",
+      "n": 39,
+      "rmse_main": 16.79,
+      "rmse_cfg": 18.72,
+      "delta": 1.93
+     },
+     {
+      "state": "21",
+      "name": "肯塔基",
+      "n": 34,
+      "rmse_main": 18.99,
+      "rmse_cfg": 20.85,
+      "delta": 1.86
+     },
+     {
+      "state": "40",
+      "name": "俄克拉何马",
+      "n": 3,
+      "rmse_main": 49.73,
+      "rmse_cfg": 50.22,
+      "delta": 0.49
+     },
+     {
+      "state": "26",
+      "name": "密歇根",
+      "n": 34,
+      "rmse_main": 13.54,
+      "rmse_cfg": 13.44,
+      "delta": -0.1
+     },
+     {
+      "state": "19",
+      "name": "爱荷华",
+      "n": 68,
+      "rmse_main": 14.96,
+      "rmse_cfg": 14.46,
+      "delta": -0.5
+     },
+     {
+      "state": "17",
+      "name": "伊利诺伊",
+      "n": 53,
+      "rmse_main": 23.41,
+      "rmse_cfg": 22.01,
+      "delta": -1.4
+     },
+     {
+      "state": "51",
+      "name": "弗吉尼亚",
+      "n": 22,
+      "rmse_main": 18.24,
+      "rmse_cfg": 16.13,
+      "delta": -2.11
+     },
+     {
+      "state": "18",
+      "name": "印第安纳",
+      "n": 48,
+      "rmse_main": 14.41,
+      "rmse_cfg": 12.09,
+      "delta": -2.31
+     },
+     {
+      "state": "31",
+      "name": "内布拉斯加",
+      "n": 35,
+      "rmse_main": 32.66,
+      "rmse_cfg": 29.53,
+      "delta": -3.13
+     },
+     {
+      "state": "08",
+      "name": "科罗拉多",
+      "n": 8,
+      "rmse_main": 81.71,
+      "rmse_cfg": 46.53,
+      "delta": -35.18
+     }
+    ]
+   }
   },
-  "noconstructed": {
-   "label": "去掉4个构造气象变量",
-   "run_id": "ablate-noconstructed-y2022-s0",
-   "rmse": 22.920500788962798,
-   "delta": 1.7038425750374522,
-   "bias": 2.8434618668034974,
-   "anom_corr": 0.19564625197855814,
-   "pred_sd": 31.485819929133974,
+  "nocumgdd": {
+   "label": "去掉累积生长度日",
+   "run_id": "ablate-nocumgdd-y2022-s0",
+   "rmse": 29.485500282251557,
+   "delta": 6.858597156701222,
+   "bias": 12.249100403264466,
+   "anom_corr": 0.09540305460633182,
+   "pred_sd": 25.219912986418727,
    "params": 28893761,
-   "state_ci": [
-    -4.62920510579697,
-    1.2212246003584113
-   ],
-   "state_share": 0.8762
+   "state_compare": {
+    "n_states": 29,
+    "n_worse": 20,
+    "n_better": 9,
+    "n_tie": 0,
+    "median_delta": 3.43,
+    "q25": -0.37,
+    "q75": 12.03,
+    "min": -7.97,
+    "max": 39.61,
+    "worst": [
+     {
+      "state": "16",
+      "name": "爱达荷",
+      "n": 6,
+      "rmse_main": 19.09,
+      "rmse_cfg": 58.7,
+      "delta": 39.61
+     },
+     {
+      "state": "45",
+      "name": "南卡罗来纳",
+      "n": 17,
+      "rmse_main": 36.49,
+      "rmse_cfg": 67.26,
+      "delta": 30.77
+     },
+     {
+      "state": "20",
+      "name": "堪萨斯",
+      "n": 24,
+      "rmse_main": 21.34,
+      "rmse_cfg": 43.76,
+      "delta": 22.42
+     }
+    ],
+    "best": [
+     {
+      "state": "08",
+      "name": "科罗拉多",
+      "n": 8,
+      "rmse_main": 81.71,
+      "rmse_cfg": 73.74,
+      "delta": -7.97
+     },
+     {
+      "state": "27",
+      "name": "明尼苏达",
+      "n": 39,
+      "rmse_main": 16.79,
+      "rmse_cfg": 10.61,
+      "delta": -6.17
+     },
+     {
+      "state": "17",
+      "name": "伊利诺伊",
+      "n": 53,
+      "rmse_main": 23.41,
+      "rmse_cfg": 17.29,
+      "delta": -6.12
+     }
+    ],
+    "by_state": [
+     {
+      "state": "16",
+      "name": "爱达荷",
+      "n": 6,
+      "rmse_main": 19.09,
+      "rmse_cfg": 58.7,
+      "delta": 39.61
+     },
+     {
+      "state": "45",
+      "name": "南卡罗来纳",
+      "n": 17,
+      "rmse_main": 36.49,
+      "rmse_cfg": 67.26,
+      "delta": 30.77
+     },
+     {
+      "state": "20",
+      "name": "堪萨斯",
+      "n": 24,
+      "rmse_main": 21.34,
+      "rmse_cfg": 43.76,
+      "delta": 22.42
+     },
+     {
+      "state": "46",
+      "name": "南达科他",
+      "n": 13,
+      "rmse_main": 36.13,
+      "rmse_cfg": 58.16,
+      "delta": 22.04
+     },
+     {
+      "state": "38",
+      "name": "北达科他",
+      "n": 7,
+      "rmse_main": 14.04,
+      "rmse_cfg": 34.76,
+      "delta": 20.72
+     },
+     {
+      "state": "48",
+      "name": "得克萨斯",
+      "n": 26,
+      "rmse_main": 23.02,
+      "rmse_cfg": 42.3,
+      "delta": 19.27
+     },
+     {
+      "state": "47",
+      "name": "田纳西",
+      "n": 30,
+      "rmse_main": 21.96,
+      "rmse_cfg": 40.05,
+      "delta": 18.09
+     },
+     {
+      "state": "42",
+      "name": "宾夕法尼亚",
+      "n": 27,
+      "rmse_main": 17.87,
+      "rmse_cfg": 29.89,
+      "delta": 12.03
+     },
+     {
+      "state": "21",
+      "name": "肯塔基",
+      "n": 34,
+      "rmse_main": 18.99,
+      "rmse_cfg": 30.31,
+      "delta": 11.32
+     },
+     {
+      "state": "40",
+      "name": "俄克拉何马",
+      "n": 3,
+      "rmse_main": 49.73,
+      "rmse_cfg": 60.45,
+      "delta": 10.72
+     },
+     {
+      "state": "37",
+      "name": "北卡罗来纳",
+      "n": 42,
+      "rmse_main": 31.91,
+      "rmse_cfg": 41.81,
+      "delta": 9.89
+     },
+     {
+      "state": "22",
+      "name": "路易斯安那",
+      "n": 13,
+      "rmse_main": 16.06,
+      "rmse_cfg": 22.49,
+      "delta": 6.43
+     },
+     {
+      "state": "39",
+      "name": "俄亥俄",
+      "n": 47,
+      "rmse_main": 9.65,
+      "rmse_cfg": 16.03,
+      "delta": 6.38
+     },
+     {
+      "state": "36",
+      "name": "纽约",
+      "n": 16,
+      "rmse_main": 20.13,
+      "rmse_cfg": 24.22,
+      "delta": 4.09
+     },
+     {
+      "state": "51",
+      "name": "弗吉尼亚",
+      "n": 22,
+      "rmse_main": 18.24,
+      "rmse_cfg": 21.67,
+      "delta": 3.43
+     },
+     {
+      "state": "28",
+      "name": "密西西比",
+      "n": 20,
+      "rmse_main": 28.44,
+      "rmse_cfg": 31.5,
+      "delta": 3.06
+     },
+     {
+      "state": "10",
+      "name": "特拉华",
+      "n": 3,
+      "rmse_main": 7.11,
+      "rmse_cfg": 8.96,
+      "delta": 1.85
+     },
+     {
+      "state": "31",
+      "name": "内布拉斯加",
+      "n": 35,
+      "rmse_main": 32.66,
+      "rmse_cfg": 34.41,
+      "delta": 1.75
+     },
+     {
+      "state": "29",
+      "name": "密苏里",
+      "n": 17,
+      "rmse_main": 19.86,
+      "rmse_cfg": 21.07,
+      "delta": 1.21
+     },
+     {
+      "state": "19",
+      "name": "爱荷华",
+      "n": 68,
+      "rmse_main": 14.96,
+      "rmse_cfg": 14.97,
+      "delta": 0.01
+     },
+     {
+      "state": "55",
+      "name": "威斯康星",
+      "n": 44,
+      "rmse_main": 10.02,
+      "rmse_cfg": 9.94,
+      "delta": -0.08
+     },
+     {
+      "state": "26",
+      "name": "密歇根",
+      "n": 34,
+      "rmse_main": 13.54,
+      "rmse_cfg": 13.17,
+      "delta": -0.37
+     },
+     {
+      "state": "24",
+      "name": "马里兰",
+      "n": 12,
+      "rmse_main": 15.13,
+      "rmse_cfg": 13.82,
+      "delta": -1.3
+     },
+     {
+      "state": "13",
+      "name": "佐治亚",
+      "n": 18,
+      "rmse_main": 19.79,
+      "rmse_cfg": 17.98,
+      "delta": -1.81
+     },
+     {
+      "state": "18",
+      "name": "印第安纳",
+      "n": 48,
+      "rmse_main": 14.41,
+      "rmse_cfg": 11.49,
+      "delta": -2.92
+     },
+     {
+      "state": "05",
+      "name": "阿肯色",
+      "n": 15,
+      "rmse_main": 18.22,
+      "rmse_cfg": 13.64,
+      "delta": -4.58
+     },
+     {
+      "state": "17",
+      "name": "伊利诺伊",
+      "n": 53,
+      "rmse_main": 23.41,
+      "rmse_cfg": 17.29,
+      "delta": -6.12
+     },
+     {
+      "state": "27",
+      "name": "明尼苏达",
+      "n": 39,
+      "rmse_main": 16.79,
+      "rmse_cfg": 10.61,
+      "delta": -6.17
+     },
+     {
+      "state": "08",
+      "name": "科罗拉多",
+      "n": 8,
+      "rmse_main": 81.71,
+      "rmse_cfg": 73.74,
+      "delta": -7.97
+     }
+    ]
+   }
   }
  },
  "component_ablation": {
   "spatialmean": {
    "label": "县内空间注意力→等权均值",
    "run_id": "ablate-spatialmean-y2022-s0",
-   "rmse": 23.00280603906467,
-   "delta": 1.7861478251393237,
-   "bias": 0.7075024526289762,
-   "anom_corr": 0.13140588128636513,
-   "pred_sd": 33.169656823396934,
-   "params": 33420073,
-   "state_ci": [
-    -4.828066804188778,
-    1.48378074164771
-   ],
-   "state_share": 0.867
-  },
-  "countymonth": {
-   "label": "网格—日级变量选择→县—月级变量选择",
-   "run_id": "ablate-countymonth-y2022-s0",
-   "rmse": 20.772001029584526,
-   "delta": -0.44465718434081936,
-   "bias": 3.7054966014084707,
-   "anom_corr": 0.27772470362072077,
-   "pred_sd": 32.617378613546116,
-   "params": 33419049,
-   "state_ci": [
-    -2.0486050137453105,
-    2.9682271695922195
-   ],
-   "state_share": 0.3686
-  }
- },
- "chain": {
-  "stepA": {
-   "label": "A 县内网格平均后的县—日级单序列（无遥感）",
-   "run_id": "chain-stepA-y2022-s0",
-   "rmse": 24.86846542165233,
-   "delta": 3.6518072077269856,
-   "bias": 0.38373017665023906,
-   "anom_corr": 0.13540796639605365,
-   "pred_sd": 31.21566465008147,
-   "params": 33413417
-  },
-  "stepB": {
-   "label": "B 逐网格 VSN 后县内等权平均（无遥感）",
-   "run_id": "chain-stepB-y2022-s0",
-   "rmse": 30.539226261603435,
-   "delta": 9.32256804767809,
-   "bias": 7.555257720020618,
-   "anom_corr": 0.058179110798745305,
-   "pred_sd": 27.456057875321658,
-   "params": 33414441,
-   "delta_prev": 5.670760839951104,
-   "state_ci_prev": [
-    1.9966255979885157,
-    9.509486350700413
-   ],
-   "state_share_prev": 0.0014
-  },
-  "stepC": {
-   "label": "C 逐网格 VSN 后县内空间注意力（无遥感）",
-   "run_id": "chain-stepC-y2022-s0",
-   "rmse": 29.231584053414906,
-   "delta": 8.01492583948956,
-   "bias": -4.235095928876828,
-   "anom_corr": 0.060902879399574034,
-   "pred_sd": 23.53086443331622,
-   "params": 34202921,
-   "delta_prev": -1.307642208188529,
-   "state_ci_prev": [
-    -5.728546684119565,
-    2.74285989983311
-   ],
-   "state_share_prev": 0.7364
-  },
-  "stepD": {
-   "label": "D 空间注意力 + 按月遥感条件上下文",
-   "run_id": "chain-stepD-y2022-s0",
-   "rmse": 22.612458483935697,
-   "delta": 1.3958002700103513,
-   "bias": 2.4624282924430734,
-   "anom_corr": 0.23026318275257027,
-   "pred_sd": 29.927815033711497,
-   "params": 34208553,
-   "delta_prev": -6.619125569479209,
-   "state_ci_prev": [
-    -9.463130860077138,
-    -3.27210224394937
-   ],
-   "state_share_prev": 1.0
+   "rmse": 24.60361697175216,
+   "delta": 1.9767138462018252,
+   "bias": 0.1026339022575924,
+   "anom_corr": 0.18696422569973828,
+   "pred_sd": 32.66028406332682,
+   "params": 29432437,
+   "state_compare": {
+    "n_states": 29,
+    "n_worse": 18,
+    "n_better": 11,
+    "n_tie": 0,
+    "median_delta": 2.47,
+    "q25": -2.23,
+    "q75": 6.03,
+    "min": -11.91,
+    "max": 22.49,
+    "worst": [
+     {
+      "state": "42",
+      "name": "宾夕法尼亚",
+      "n": 27,
+      "rmse_main": 17.87,
+      "rmse_cfg": 40.36,
+      "delta": 22.49
+     },
+     {
+      "state": "13",
+      "name": "佐治亚",
+      "n": 18,
+      "rmse_main": 19.79,
+      "rmse_cfg": 40.54,
+      "delta": 20.75
+     },
+     {
+      "state": "20",
+      "name": "堪萨斯",
+      "n": 24,
+      "rmse_main": 21.34,
+      "rmse_cfg": 38.27,
+      "delta": 16.93
+     }
+    ],
+    "best": [
+     {
+      "state": "46",
+      "name": "南达科他",
+      "n": 13,
+      "rmse_main": 36.13,
+      "rmse_cfg": 24.22,
+      "delta": -11.91
+     },
+     {
+      "state": "31",
+      "name": "内布拉斯加",
+      "n": 35,
+      "rmse_main": 32.66,
+      "rmse_cfg": 24.54,
+      "delta": -8.12
+     },
+     {
+      "state": "28",
+      "name": "密西西比",
+      "n": 20,
+      "rmse_main": 28.44,
+      "rmse_cfg": 21.67,
+      "delta": -6.76
+     }
+    ],
+    "by_state": [
+     {
+      "state": "42",
+      "name": "宾夕法尼亚",
+      "n": 27,
+      "rmse_main": 17.87,
+      "rmse_cfg": 40.36,
+      "delta": 22.49
+     },
+     {
+      "state": "13",
+      "name": "佐治亚",
+      "n": 18,
+      "rmse_main": 19.79,
+      "rmse_cfg": 40.54,
+      "delta": 20.75
+     },
+     {
+      "state": "20",
+      "name": "堪萨斯",
+      "n": 24,
+      "rmse_main": 21.34,
+      "rmse_cfg": 38.27,
+      "delta": 16.93
+     },
+     {
+      "state": "36",
+      "name": "纽约",
+      "n": 16,
+      "rmse_main": 20.13,
+      "rmse_cfg": 35.32,
+      "delta": 15.19
+     },
+     {
+      "state": "38",
+      "name": "北达科他",
+      "n": 7,
+      "rmse_main": 14.04,
+      "rmse_cfg": 24.17,
+      "delta": 10.13
+     },
+     {
+      "state": "40",
+      "name": "俄克拉何马",
+      "n": 3,
+      "rmse_main": 49.73,
+      "rmse_cfg": 57.22,
+      "delta": 7.5
+     },
+     {
+      "state": "22",
+      "name": "路易斯安那",
+      "n": 13,
+      "rmse_main": 16.06,
+      "rmse_cfg": 22.34,
+      "delta": 6.28
+     },
+     {
+      "state": "10",
+      "name": "特拉华",
+      "n": 3,
+      "rmse_main": 7.11,
+      "rmse_cfg": 13.14,
+      "delta": 6.03
+     },
+     {
+      "state": "47",
+      "name": "田纳西",
+      "n": 30,
+      "rmse_main": 21.96,
+      "rmse_cfg": 27.41,
+      "delta": 5.46
+     },
+     {
+      "state": "21",
+      "name": "肯塔基",
+      "n": 34,
+      "rmse_main": 18.99,
+      "rmse_cfg": 24.28,
+      "delta": 5.29
+     },
+     {
+      "state": "29",
+      "name": "密苏里",
+      "n": 17,
+      "rmse_main": 19.86,
+      "rmse_cfg": 24.94,
+      "delta": 5.08
+     },
+     {
+      "state": "26",
+      "name": "密歇根",
+      "n": 34,
+      "rmse_main": 13.54,
+      "rmse_cfg": 18.32,
+      "delta": 4.78
+     },
+     {
+      "state": "16",
+      "name": "爱达荷",
+      "n": 6,
+      "rmse_main": 19.09,
+      "rmse_cfg": 23.25,
+      "delta": 4.17
+     },
+     {
+      "state": "51",
+      "name": "弗吉尼亚",
+      "n": 22,
+      "rmse_main": 18.24,
+      "rmse_cfg": 22.21,
+      "delta": 3.97
+     },
+     {
+      "state": "24",
+      "name": "马里兰",
+      "n": 12,
+      "rmse_main": 15.13,
+      "rmse_cfg": 17.59,
+      "delta": 2.47
+     },
+     {
+      "state": "18",
+      "name": "印第安纳",
+      "n": 48,
+      "rmse_main": 14.41,
+      "rmse_cfg": 15.99,
+      "delta": 1.58
+     },
+     {
+      "state": "05",
+      "name": "阿肯色",
+      "n": 15,
+      "rmse_main": 18.22,
+      "rmse_cfg": 19.51,
+      "delta": 1.29
+     },
+     {
+      "state": "39",
+      "name": "俄亥俄",
+      "n": 47,
+      "rmse_main": 9.65,
+      "rmse_cfg": 10.85,
+      "delta": 1.2
+     },
+     {
+      "state": "55",
+      "name": "威斯康星",
+      "n": 44,
+      "rmse_main": 10.02,
+      "rmse_cfg": 9.75,
+      "delta": -0.27
+     },
+     {
+      "state": "27",
+      "name": "明尼苏达",
+      "n": 39,
+      "rmse_main": 16.79,
+      "rmse_cfg": 16.22,
+      "delta": -0.57
+     },
+     {
+      "state": "19",
+      "name": "爱荷华",
+      "n": 68,
+      "rmse_main": 14.96,
+      "rmse_cfg": 13.88,
+      "delta": -1.08
+     },
+     {
+      "state": "08",
+      "name": "科罗拉多",
+      "n": 8,
+      "rmse_main": 81.71,
+      "rmse_cfg": 79.48,
+      "delta": -2.23
+     },
+     {
+      "state": "48",
+      "name": "得克萨斯",
+      "n": 26,
+      "rmse_main": 23.02,
+      "rmse_cfg": 20.21,
+      "delta": -2.81
+     },
+     {
+      "state": "37",
+      "name": "北卡罗来纳",
+      "n": 42,
+      "rmse_main": 31.91,
+      "rmse_cfg": 28.59,
+      "delta": -3.33
+     },
+     {
+      "state": "45",
+      "name": "南卡罗来纳",
+      "n": 17,
+      "rmse_main": 36.49,
+      "rmse_cfg": 31.42,
+      "delta": -5.07
+     },
+     {
+      "state": "17",
+      "name": "伊利诺伊",
+      "n": 53,
+      "rmse_main": 23.41,
+      "rmse_cfg": 16.92,
+      "delta": -6.49
+     },
+     {
+      "state": "28",
+      "name": "密西西比",
+      "n": 20,
+      "rmse_main": 28.44,
+      "rmse_cfg": 21.67,
+      "delta": -6.76
+     },
+     {
+      "state": "31",
+      "name": "内布拉斯加",
+      "n": 35,
+      "rmse_main": 32.66,
+      "rmse_cfg": 24.54,
+      "delta": -8.12
+     },
+     {
+      "state": "46",
+      "name": "南达科他",
+      "n": 13,
+      "rmse_main": 36.13,
+      "rmse_cfg": 24.22,
+      "delta": -11.91
+     }
+    ]
+   }
   }
  }
 }

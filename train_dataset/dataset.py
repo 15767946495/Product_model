@@ -658,3 +658,46 @@ class CropNetDataset:
             for handle in handles.values():
                 handle.close()
         return out
+
+
+class SampleSubset:
+    """``CropNetDataset`` 的样本级视图：共享样本字典，只暴露给定下标。
+
+    ``fit_stats`` 读 ``.samples``，``DataLoader`` 读 ``__getitem__``，两者都与完整数据集一致。
+    """
+
+    def __init__(self, dataset: CropNetDataset, indices):
+        self.dataset = dataset
+        self.indices = [int(i) for i in indices]
+        self.samples = [dataset.samples[i] for i in self.indices]
+        self.years = dataset.years
+        self.load_images = dataset.load_images
+        self.data_root = dataset.data_root
+        self.image_size = dataset.image_size
+
+    def __len__(self) -> int:
+        return len(self.indices)
+
+    @property
+    def sample_ids(self) -> list[str]:
+        return [s["sample_id"] for s in self.samples]
+
+    def __getitem__(self, index: int) -> dict:
+        return self.dataset[self.indices[index]]
+
+
+def random_sample_split(dataset: CropNetDataset, fraction: float, seed: int = 0):
+    """按县年样本随机留出 ``fraction`` 做验证，返回 (训练视图, 验证视图)。
+
+    训练年份与留出年份来自同一批县年，验证集与训练集同分布；测试年份完全不参与。
+    """
+    if not 0.0 < fraction < 1.0:
+        raise ValueError(f"valid fraction must be in (0, 1), got {fraction}")
+    n = len(dataset)
+    n_valid = max(1, int(round(n * fraction)))
+    if n_valid >= n - 1:
+        raise ValueError(f"valid fraction {fraction} leaves no training samples (n={n})")
+    order = np.random.default_rng(seed).permutation(n)
+    valid_idx = np.sort(order[:n_valid])
+    train_idx = np.sort(order[n_valid:])
+    return SampleSubset(dataset, train_idx), SampleSubset(dataset, valid_idx)

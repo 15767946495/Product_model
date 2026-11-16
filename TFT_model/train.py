@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import math
 import sys
+import time
 from pathlib import Path
 
 import torch
@@ -21,6 +22,7 @@ from TFT_model import dataset_adapter as adapter
 from TFT_model.model_adapter import build_model
 from TFT_model.pvt import DEFAULT_PVT_PRETRAINED_PATH
 from train_dataset import run_output as ro
+from train_dataset.dataset import random_sample_split
 
 MODEL_NAME = "tft"
 ADAPTATION = "TFT full multimodal CropNet adaptation"
@@ -65,10 +67,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--remote-constant", action="store_true", default=False,
         help="replace PVT remote-sensing features with a trainable constant",
     )
-    parser.add_argument(
-        "--remote-constant-init", choices=("zeros", "pvt_mean"), default="zeros",
-        help="initial value of the remote constant; pvt_mean uses the mean PVT token on a fixed train-year subset",
-    )
     parser.add_argument("--pvt-lr-scale", type=float, default=1.0)
     parser.add_argument(
         "--test-year", type=int, default=2022,
@@ -77,6 +75,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--valid-year", type=int, default=None,
         help="hold-out validation year for early stopping (e.g. 2021); training then uses only years before it",
+    )
+    parser.add_argument(
+        "--valid-frac", type=float, default=0.0,
+        help="从训练县年中随机留出这一比例做早停（默认 0.1；与 --valid-year 互斥）",
+    )
+    parser.add_argument(
+        "--valid-seed", type=int, default=None,
+        help="随机留出验证集的种子（默认等于 --seed）",
     )
     parser.add_argument(
         "--early-stop-patience", type=int, default=10,
@@ -149,8 +155,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="组件消融：mean 用县内等权均值替代空间注意力，查询/键/值投影与位置编码一并删除。",
     )
     parser.add_argument(
-        "--selection-level", choices=("grid_day", "county_month"), default="grid_day",
-        help="组件消融：county_month 先在网格与日上取均值，再做县—月级变量选择，"
+        "--selection-level", choices=("grid_day", "grid_month", "county_month"), default="grid_day",
+        help="组件消融：grid_month 先在每个网格内把日平均到月，再做网格—月级变量选择，"
+             "保留日→月聚合与县内空间注意力；county_month 进一步在网格与日上取均值，"
              "不再有网格—日级选择与县内空间注意力。",
     )
     parser.add_argument(
@@ -168,14 +175,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--rs-aux-weight", type=float, default=0.0,
         help="weight of an auxiliary log-yield loss predicted from pooled remote-sensing tokens only",
-    )
-    parser.add_argument(
-        "--monitor-pvt-every", type=int, default=0,
-        help="log PVT gradient/drift/collapse stats every N optimizer steps (0 disables)",
-    )
-    parser.add_argument(
-        "--monitor-probe-samples", type=int, default=32,
-        help="train-year samples used by the per-epoch shuffle-sensitivity probe",
     )
     parser.add_argument(
         "--eval_checkpoint", default="",
@@ -228,7 +227,7 @@ def _optimizer(model, args):
     )
 
 
-def train_one_epoch(model, loader, optimizer, device, epoch, args, monitor=None) -> dict:
+def train_one_epoch(model, loader, optimizer, device, epoch, args) -> dict:
     model.train()
     total = 0.0
     aux_total = 0.0
@@ -241,8 +240,6 @@ def train_one_epoch(model, loader, optimizer, device, epoch, args, monitor=None)
             group["lr"] = lr * (args.pvt_lr_scale if group["name"].startswith("pvt_") else 1.0)
 
         inputs = adapter.model_inputs(batch, device)
-        if monitor is not None:
-            monitor.before_forward()
         pred, _, aux = model(**inputs)
         valid = aux["sample_valid"]
         if not bool(valid.any()):
@@ -272,11 +269,6 @@ def train_one_epoch(model, loader, optimizer, device, epoch, args, monitor=None)
             torch.nn.utils.clip_grad_norm_(
                 [parameter for parameter in model.parameters() if parameter.grad is not None], args.grad_clip,
             )
-        if monitor is not None:
-            monitor.after_backward(
-                epoch=epoch, lr=lr, loss=loss.item(), aux=aux, inputs=inputs,
-                aux_loss=None if aux_loss is None else aux_loss.item(),
-            )
         optimizer.step()
         optimizer_steps += 1
 
@@ -300,57 +292,45 @@ def train_one_epoch(model, loader, optimizer, device, epoch, args, monitor=None)
 
 
 @torch.no_grad()
-def evaluate_loss(model, loader, device, args) -> float:
-    """验证损失：与训练目标一致（有县均值偏移时减偏移），按有效样本加权。"""
+def evaluate_loss(model, loader, device, args) -> tuple[float, float, float, float]:
+    """验证损失与验证RMSE：损失与训练目标一致（有县均值偏移时减偏移），
+
+    RMSE 在原始单产尺度（bu/ac）上计算，与论文报告口径一致；验证年份的模型选择用后者。
+    同时返回原始尺度上的平均偏差与预测标准差，用于判断验证指标的波动是否来自整体水平漂移。
+    返回 (loss, rmse, bias, pred_sd)。
+    """
     was_training = model.training
     model.eval()
     total = 0.0
+    sq_err = 0.0
+    sum_pred = 0.0
+    sum_pred2 = 0.0
+    sum_err = 0.0
     seen = 0
     for batch in loader:
         pred, _, aux = model(**adapter.model_inputs(batch, device))
         valid = aux["sample_valid"]
         if not bool(valid.any()):
             continue
+        offset = None if batch.get("county_offset") is None else batch["county_offset"].to(device)
         target = torch.log(batch["labels"].to(device))
-        if batch.get("county_offset") is not None:
-            target = target - batch["county_offset"].to(device)
+        if offset is not None:
+            target = target - offset
         total += torch.nn.functional.mse_loss(
             pred[valid, 0], target[valid], reduction="sum").item()
+        pred_bu = torch.exp(pred[valid, 0] + (offset[valid] if offset is not None else 0.0))
+        truth_bu = batch["labels"].to(device)[valid]
+        sq_err += ((pred_bu - truth_bu) ** 2).sum().item()
+        sum_pred += pred_bu.sum().item()
+        sum_pred2 += (pred_bu ** 2).sum().item()
+        sum_err += (pred_bu - truth_bu).sum().item()
         seen += int(valid.sum())
     model.train(was_training)
     if seen == 0:
         raise RuntimeError("validation loader has no valid samples")
-    return total / seen
-
-
-@torch.no_grad()
-def _pvt_mean_token(model, dataset, stats, device, args, samples: int = 64) -> torch.Tensor:
-    """固定训练年份子集上有效 PVT token 的均值：与坍缩后 PVT 同量级、但不含影像内容的常数。"""
-    from TFT_model.pvt_monitor import build_probe_loader
-    from TFT_model.rs_intervention import valid_token_mask
-
-    loader = build_probe_loader(
-        dataset, stats, samples=samples, seed=0,
-        use_constructed=args.use_constructed, batch_size=args.batch_size,
-    )
-    was_training = model.training
-    model.eval()
-    total = torch.zeros(model.hidden_size, dtype=torch.float64, device=device)
-    count = 0
-    try:
-        for batch in loader:
-            inputs = adapter.model_inputs(batch, device)
-            tokens = model._forward_remote_sensing(
-                inputs["ag_images"], inputs["grid_coords"], inputs["grid_mask"], device, inputs["ag_grid_mask"],
-            )
-            valid = valid_token_mask(inputs["grid_mask"], inputs["ag_grid_mask"])
-            total += tokens[valid].double().sum(dim=0)
-            count += int(valid.sum())
-    finally:
-        model.train(was_training)
-    if count == 0:
-        raise RuntimeError("no valid remote-sensing tokens to initialize the remote constant")
-    return (total / count).float()
+    mean_pred = sum_pred / seen
+    pred_sd = max(sum_pred2 / seen - mean_pred ** 2, 0.0) ** 0.5
+    return total / seen, (sq_err / seen) ** 0.5, sum_err / seen, pred_sd
 
 
 def _split(args):
@@ -413,17 +393,19 @@ def main(args) -> Path:
         )
         return run_dir
 
-    if args.remote_constant_init != "zeros" and not args.remote_constant:
-        raise ValueError("--remote-constant-init requires --remote-constant")
-    if args.rs_features and (args.remote_constant or args.rs_aux_weight > 0 or args.monitor_pvt_every > 0):
-        raise ValueError("--rs-features has no PVT: it excludes --remote-constant, --rs-aux-weight and --monitor-pvt-every")
+    if args.rs_features and (args.remote_constant or args.rs_aux_weight > 0):
+        raise ValueError("--rs-features has no PVT: it excludes --remote-constant and --rs-aux-weight")
     if args.demean_rs and not args.rs_features:
         raise ValueError("--demean-rs requires --rs-features")
     if args.rs_within_norm and args.demean_rs and args.rs_features:
         args.rs_within_norm = False
     if not args.rs_features:
         args.rs_within_norm = False
+    if args.valid_frac and args.valid_year is not None:
+        raise ValueError("--valid-frac 与 --valid-year 互斥：随机留出的验证县年已包含在同一批训练年份内")
     train_years, valid_years, test_years = _split(args)
+    # 随机 10% 验证集：训练年份不变（2017—2021），从训练县年中留出，测试年不参与。
+    has_valid = valid_years is not None or args.valid_frac > 0
 
     ro.seed_everything(args.seed)
     device = torch.device(args.device)
@@ -447,10 +429,12 @@ def main(args) -> Path:
         weight_decay=args.weight_decay,
         scheduler=f"linear warmup {args.warmup_epochs} epochs + cosine",
         target="log(yield_bu_ac) - county_mean" if args.county_offset else "log(yield_bu_ac)",
-        checkpoint_policy=("best validation epoch, early stopping" if valid_years is not None
+        checkpoint_policy=("best validation epoch, early stopping" if has_valid
                            else "final epoch only, no validation selection"),
         valid_years=valid_years,
-        early_stop_patience=args.early_stop_patience if valid_years is not None else None,
+        valid_fraction=args.valid_frac or None,
+        valid_seed=(args.seed if args.valid_seed is None else args.valid_seed) if args.valid_frac else None,
+        early_stop_patience=args.early_stop_patience if has_valid else None,
         pvt_pretrained_path=str(Path(args.pvt_pretrained_path).expanduser().resolve()),
         pvt_pretrained_sha256=ro.sha256_file(args.pvt_pretrained_path) if args.vit_pretrained else None,
         remote_constant=bool(args.remote_constant),
@@ -467,6 +451,14 @@ def main(args) -> Path:
         dataset = adapter.build_dataset(
             args.dataset_jsonl, args.data_root, train_years, load_images=need_images,
         )
+        valid_dataset = None
+        if valid_years is not None:
+            valid_dataset = adapter.build_dataset(
+                args.dataset_jsonl, args.data_root, valid_years, load_images=need_images,
+            )
+        elif args.valid_frac:
+            dataset, valid_dataset = random_sample_split(
+                dataset, args.valid_frac, args.seed if args.valid_seed is None else args.valid_seed)
         offset_dataset = None
         if args.offset_jsonl:
             # 空间折：留出县的县均值偏移与遥感县内中心取自偏移面板。
@@ -500,19 +492,17 @@ def main(args) -> Path:
             rs_store=rs_store,
         )
         valid_loader = None
-        if valid_years is not None:
-            valid_dataset = adapter.build_dataset(
-                args.dataset_jsonl, args.data_root, valid_years, load_images=need_images,
-            )
+        if valid_dataset is not None:
             if not len(valid_dataset):
-                raise ValueError(f"validation year {valid_years} has no samples")
+                raise ValueError("validation split has no samples")
             valid_loader = adapter.build_loader(
                 valid_dataset, stats, args.batch_size, False,
                 use_constructed=args.use_constructed,
                 num_workers=args.num_workers,
                 rs_store=rs_store,
                 )
-            ro.update_json(run_dir / "run_metadata.json", valid_samples=len(valid_dataset))
+            ro.update_json(run_dir / "run_metadata.json", valid_samples=len(valid_dataset),
+                           valid_sample_ids=valid_dataset.sample_ids if args.valid_frac else None)
         model_config = {
             "hidden_size": args.hidden_size,
             "num_heads": args.num_heads,
@@ -554,14 +544,6 @@ def main(args) -> Path:
             if not args.no_rs_branch:
                 model_config["rs_feature_dim"] = len(rs_store.names)
         model = build_model(model_config).to(device)
-        if args.remote_constant_init == "pvt_mean":
-            init = _pvt_mean_token(model, dataset, stats, device, args)
-            model.remote_constant.data.copy_(init)
-            ro.update_json(
-                run_dir / "run_metadata.json",
-                remote_constant_init="pvt_mean",
-                remote_constant_init_norm=float(init.norm()),
-            )
         optimizer = _optimizer(model, args)
         ro.update_json(
             run_dir / "run_metadata.json",
@@ -569,31 +551,26 @@ def main(args) -> Path:
             train_samples=len(dataset),
             parameters=ro.count_parameters(model),
         )
-        monitor = None
-        if args.monitor_pvt_every > 0:
-            from TFT_model.pvt_monitor import PVTMonitor, build_probe_loader
-
-            probe_loader = build_probe_loader(
-                dataset, stats, samples=args.monitor_probe_samples, seed=args.seed,
-                use_constructed=args.use_constructed, batch_size=args.batch_size,
-            ) if args.monitor_probe_samples > 0 else None
-            monitor = PVTMonitor(
-                model, run_dir, every=args.monitor_pvt_every, probe_loader=probe_loader, device=device,
-            )
-            monitor.probe(-1)
 
         best_state = None
         best_epoch = -1
         best_valid = float("inf")
+        best_valid_loss = None
         stale = 0
         stopped_early = False
+        train_start = time.time()
         for epoch in range(args.epochs):
-            row = train_one_epoch(model, loader, optimizer, device, epoch, args, monitor)
+            row = train_one_epoch(model, loader, optimizer, device, epoch, args)
             if valid_loader is not None:
-                valid_loss = evaluate_loss(model, valid_loader, device, args)
+                valid_loss, valid_rmse, valid_bias, valid_pred_sd = evaluate_loss(
+                    model, valid_loader, device, args)
                 row["valid_loss"] = valid_loss
-                if valid_loss < best_valid - 1e-9:
-                    best_valid = valid_loss
+                row["valid_rmse"] = valid_rmse
+                row["valid_bias"] = valid_bias
+                row["valid_pred_sd"] = valid_pred_sd
+                if valid_rmse < best_valid - 1e-9:
+                    best_valid_loss = valid_loss
+                    best_valid = valid_rmse
                     best_epoch = epoch
                     stale = 0
                     best_state = {
@@ -604,8 +581,6 @@ def main(args) -> Path:
                     if args.early_stop_patience > 0 and stale >= args.early_stop_patience:
                         stopped_early = True
             ro.append_jsonl(run_dir / "train_metrics.jsonl", {"epoch": epoch, **row})
-            if monitor is not None:
-                monitor.probe(epoch)
             if epoch % args.save_freq == 0 or epoch + 1 == args.epochs:
                 latest = ro.save_checkpoint(
                     run_dir / ro.LATEST_CHECKPOINT,
@@ -618,11 +593,10 @@ def main(args) -> Path:
                     latest_checkpoint_sha256=ro.sha256_file(latest),
                 )
             if stopped_early:
-                print(f"early stop at epoch {epoch}: best valid epoch {best_epoch}, loss {best_valid:.6f}")
+                print(f"early stop at epoch {epoch}: best valid epoch {best_epoch}, "
+                      f"rmse {best_valid:.3f} loss {(best_valid_loss if best_valid_loss is not None else float('nan')):.6f}")
                 break
 
-        if monitor is not None:
-            monitor.close()
         if best_state is not None and args.checkpoint_policy == "best":
             model.load_state_dict(best_state)
             epoch = best_epoch
@@ -636,8 +610,10 @@ def main(args) -> Path:
             run_dir / "run_metadata.json",
             epoch=epoch,
             checkpoint_policy=args.checkpoint_policy,
-            best_valid_loss=None if best_state_for_meta is None else best_valid,
+            best_valid_rmse=None if best_state_for_meta is None else best_valid,
+            best_valid_loss=None if best_state_for_meta is None else best_valid_loss,
             best_valid_epoch=None if best_state_for_meta is None else best_epoch,
+            train_seconds=round(time.time() - train_start, 1),
             stopped_early=stopped_early,
             final_checkpoint=str(final),
             final_checkpoint_sha256=ro.sha256_file(final),

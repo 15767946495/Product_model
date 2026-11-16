@@ -842,7 +842,7 @@ class TFTEncoderForYieldPrediction(nn.Module):
         self.hidden_size = hidden_size
         if spatial_pool not in ("attention", "mean"):
             raise ValueError(f"unknown spatial_pool {spatial_pool!r}")
-        if selection_level not in ("grid_day", "county_month"):
+        if selection_level not in ("grid_day", "grid_month", "county_month"):
             raise ValueError(f"unknown selection_level {selection_level!r}")
         if seq_level not in ("month", "day"):
             raise ValueError(f"unknown seq_level {seq_level!r}")
@@ -873,6 +873,10 @@ class TFTEncoderForYieldPrediction(nn.Module):
                 raise ValueError("input_mode='county_mean' requires seq_level='day'")
             if not self.no_rs_branch:
                 raise ValueError("input_mode='county_mean' requires no_rs_branch=True")
+        if self.selection_level == "grid_month" and self.input_mode != "grid":
+            raise ValueError("selection_level='grid_month' requires input_mode='grid'")
+        if self.selection_level == "grid_month" and self.seq_level != "month":
+            raise ValueError("selection_level='grid_month' requires seq_level='month'")
 
         # 1. 静态：县级连续土壤(Linear 映射,不分桶)+ 上下文 GRN
         self.soil_static_encoder = SoilStaticEncoder(
@@ -1161,6 +1165,73 @@ class TFTEncoderForYieldPrediction(nn.Module):
                 cm_inputs, month_seq_lens, context=cm_context,
             )
             temporal_feat = temporal_feat * month_valid[..., None].to(temporal_feat.dtype)
+            valid_t, seq_len_t, n_tokens = month_valid, month_seq_lens, Te
+        elif self.selection_level == "grid_month":
+            # 单组件消融：保留网格维度、日→月聚合与县内空间注意力，
+            # 只把变量选择从网格—日级移到网格—月级——先在每个网格内把日平均到月，
+            # 再做一次变量选择，之后仍由空间注意力把网格汇总为县级序列。
+            valid_gt = grid_mask[:, :, None] & weather_valid[:, None, :]  # (B,G,T)
+            grid_month = torch.zeros(
+                B, G, Te, grid_feats.shape[-1], device=device, dtype=grid_feats.dtype
+            )
+            rs_grid_month = torch.zeros(
+                B, G, Te, self.hidden_size, device=device, dtype=rs_by_time.dtype
+            )
+            for m_idx, is_month in enumerate(month_day_masks):
+                valid_gt_month = valid_gt & is_month[:, None, :]  # (B,G,T)
+                w = valid_gt_month.to(grid_feats.dtype)
+                denom = w.sum(dim=2).clamp_min(1.0)  # (B,G)
+                grid_month[:, :, m_idx] = (grid_feats * w[..., None]).sum(dim=2) / denom[..., None]
+                valid_rs_month = valid_gt_month
+                if ag_grid_mask is not None:
+                    # 与注意力路径的 token_mask 语义一致：缺少遥感的网格不参与该月均值。
+                    valid_rs_month = valid_rs_month & ag_grid_mask.to(
+                        device=device, dtype=torch.bool
+                    )[:, m_idx, :, None]
+                w_rs = valid_rs_month[..., None].to(rs_by_time.dtype)
+                rs_grid_month[:, :, m_idx] = (
+                    (rs_by_time * w_rs).sum(dim=2) / w_rs.sum(dim=2).clamp_min(1.0)
+                )
+            gm_inputs = {
+                name: self.per_feature_linear[name](grid_month[..., j:j + 1]).reshape(
+                    B * G, Te, self.hidden_size
+                )
+                for j, name in enumerate(self.dynamic_feature_names)
+            }
+            gm_context = self.static_context_grn(
+                rs_grid_month.reshape(B * G, Te, self.hidden_size),
+                context=c_s.repeat_interleave(G, dim=0)[:, None, :].expand(
+                    B * G, Te, self.hidden_size
+                ),
+            )
+            gm_tokens, grid_vsn_weights = self.grid_vsn(
+                gm_inputs, month_seq_lens.repeat_interleave(G), context=gm_context,
+            )
+            gm_tokens = gm_tokens.reshape(B, G, Te, self.hidden_size)
+            gm_tokens = gm_tokens * grid_mask[:, :, None, None].to(gm_tokens.dtype)
+
+            time_indices = torch.arange(
+                Te, device=device, dtype=torch.long
+            ).expand(B, -1)
+            spatial_grid_mask = (
+                ag_grid_mask.to(device=device, dtype=torch.bool)
+                if ag_grid_mask is not None
+                else grid_mask[:, None, :].expand(B, Te, G)
+            )
+            spatial_token_mask = month_valid[:, :, None] & spatial_grid_mask
+            if self.spatial_pool == "attention":
+                temporal_feat, spatial_weights = self.spatial_agg.forward_weights(
+                    gm_tokens.transpose(1, 2),
+                    grid_coords,
+                    grid_mask,
+                    token_mask=spatial_token_mask,
+                    time_indices=time_indices,
+                )
+            else:
+                w = spatial_token_mask.transpose(1, 2).to(gm_tokens.dtype)[..., None]
+                denom = w.sum(dim=1).clamp_min(1.0)
+                pooled = (gm_tokens * w).sum(dim=1) / denom
+                temporal_feat = self.mean_norm(pooled) * month_valid[..., None].to(pooled.dtype)
             valid_t, seq_len_t, n_tokens = month_valid, month_seq_lens, Te
         else:
             grid_seq_lens = seq_lens.repeat_interleave(G)

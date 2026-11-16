@@ -1,4 +1,4 @@
-"""县分组五折空间交叉验证的汇总：PA-TFT 与三个深度基线。
+"""县分组五折空间交叉验证的汇总：PAF-Net 与三个深度基线。
 
 划分：741 个县按州内分层随机分成 5 折。每折留出 1 折县，这些县 2017—2022 年的全部
 县年都不参与训练；训练集是其余 4 折县 2017—2022 年的全部县年，测试集是留出县的
@@ -14,7 +14,7 @@
 再在州—年单元格内去均值后求相关。
 
 用法：python -I TFT_model/spatial_summary.py
-输出：paper_figures/spatial_cv.json、paper_figures/fig5_4_spatial.png
+输出：paper_figures/spatial_cv.json、paper_figures/fig5_5_spatial.png
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ SEED = int(os.environ.get("LOYO_SEEDS", "0").split()[0])
 K = 5
 YEARS = (2017, 2018, 2019, 2020, 2021, 2022)
 GNN_YEARS = (2019, 2020, 2021, 2022)
-MODELS = ("PA-TFT", "UNet-ConvLSTM", "GNN-RNN", "PhenoYieldNet")
+MODELS = ("PAF-Net", "UNet-ConvLSTM", "GNN-RNN", "PhenoYieldNet")
 
 
 def load_labels():
@@ -101,7 +101,7 @@ def read_predictions(run_dir: Path, held: set) -> dict:
 
 
 def load_model(name: str, fold: int, held: set) -> dict:
-    if name == "PA-TFT":
+    if name == "PAF-Net":
         return read_predictions(RUNS / f"{TAG}-main-f{fold}-allyears-s{SEED}", held)
     if name == "UNet-ConvLSTM":
         return read_predictions(BASE / "unet_convlstm" / f"spatial-unet-fold{fold}", held)
@@ -120,9 +120,9 @@ def load_model(name: str, fold: int, held: set) -> dict:
 
 
 def evaluate(rows_by_model: dict, model: str, labels: dict) -> dict:
-    """按年份与汇总统计；PA-TFT 在同一批县年上也给一组指标，便于成对比较。"""
+    """按年份与汇总统计；PAF-Net 在同一批县年上也给一组指标，便于成对比较。"""
     data = rows_by_model[model]
-    patft = rows_by_model["PA-TFT"]
+    patft = rows_by_model["PAF-Net"]
 
     def block(keys):
         keys = sorted(keys)
@@ -132,7 +132,7 @@ def evaluate(rows_by_model: dict, model: str, labels: dict) -> dict:
         base = np.array([county_base(labels, x["fips"], x["year"]) for x in r])
         out = metrics(pred, truth, base, cells_of(r))
         matched = [k for k in keys if k in patft]
-        if model != "PA-TFT" and matched:
+        if model != "PAF-Net" and matched:
             mr = [{"fips": f, "year": y} for f, y in matched]
             mt = np.array([patft[k][0] for k in matched])
             mp = np.array([patft[k][1] for k in matched])
@@ -229,8 +229,8 @@ def plot(report):
     from TFT_model.figures_2022 import BLUE, BLUE_DARK, ORANGE, INK, MUTED, style
 
     _configure_chinese_font()
-    colors = {"PA-TFT": BLUE_DARK, "UNet-ConvLSTM": BLUE, "GNN-RNN": ORANGE, "PhenoYieldNet": MUTED}
-    names = {"PA-TFT": "PAF-Net", "UNet-ConvLSTM": "UNet-ConvLSTM",
+    colors = {"PAF-Net": BLUE_DARK, "UNet-ConvLSTM": BLUE, "GNN-RNN": ORANGE, "PhenoYieldNet": MUTED}
+    names = {"PAF-Net": "PAF-Net", "UNet-ConvLSTM": "UNet-ConvLSTM",
              "GNN-RNN": "GNN-RNN", "PhenoYieldNet": "PhenoYieldNet"}
     years = [str(y) for y in YEARS]
     fig, ax = plt.subplots(figsize=(6.8, 3.5), constrained_layout=True)
@@ -254,7 +254,7 @@ def plot(report):
     style(ax)
     ax.grid(False, axis="x")
     ax.legend(fontsize=8, frameon=False, ncol=4, loc="upper center")
-    fig.savefig(OUT / "fig5_4_spatial.png", dpi=200)
+    fig.savefig(OUT / "fig5_5_spatial.png", dpi=200)
     plt.close(fig)
 
 

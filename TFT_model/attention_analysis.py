@@ -284,7 +284,7 @@ def export_attention_analysis(
     model.load_state_dict(checkpoint["model"])
     model.eval()
     stats = adapter.stats_from_json(checkpoint["stats"])
-    use_constructed = bool(checkpoint.get("use_constructed", True))
+    use_constructed = checkpoint.get("use_constructed", True)
     rs_store = adapter.load_rs_store(checkpoint["model_config"])
     dataset = adapter.build_dataset(dataset_jsonl, data_root, adapter.TEST_YEARS, load_images=rs_store is None)
     loader = adapter.build_loader(

@@ -2,7 +2,7 @@
 
 默认协议：训练窗口 2017--2021 预测 2021，测试窗口 2018--2022 预测 2022。
 统一协议（--valid-year 2021）：训练窗口 2017--2020 预测 2020，验证窗口 2018--2021 预测 2021
-（早停选模，patience 3），测试窗口 2019--2022 预测 2022。
+（早停选模），测试窗口 2019--2022 预测 2022。
 输出：output_root/gnn_rnn/<run_id>/{config.json, checkpoint-latest.pth, checkpoint-final.pth,
 train_metrics.jsonl, test_metrics.json, county_predictions.jsonl, run_metadata.json}。
 """
@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import time
 from pathlib import Path
 
 import torch
@@ -44,9 +45,13 @@ def build_parser():
     parser.add_argument("--dropout", type=float, default=d["dropout"])
     parser.add_argument("--batch_size", type=int, default=d["batch_size"], help="target counties per optimizer step")
     parser.add_argument("--weight_decay", type=float, default=d["weight_decay"])
+    parser.add_argument("--optimizer", choices=("adam", "adamw"), default="adamw",
+                        help="统一配方与其余三个模型一致，用 AdamW 的解耦权重衰减；adam 保留原实现（耦合 L2）")
     parser.add_argument("--T0", type=int, default=d["T0"])
     parser.add_argument("--T_mult", type=int, default=d["T_mult"])
     parser.add_argument("--eta_min", type=float, default=d["eta_min"])
+    parser.add_argument("--warmup-epochs", type=int, default=10,
+                        help="线性 warmup 轮数；统一配方为 10 轮 warmup + 余弦退火")
     parser.add_argument("--eval_checkpoint", default="", help="only run the final 2022 test on this checkpoint-final.pth")
     parser.add_argument("--fold-manifest", default="",
                         help="spatial CV: folds.json from train_dataset/make_spatial_folds.py")
@@ -57,6 +62,10 @@ def build_parser():
                              "enables the GNN-RNN+VI input-parity configuration")
     parser.add_argument("--valid-year", type=int, default=None,
                         help="hold-out validation year for early stopping (e.g. 2021); training window then ends before it")
+    parser.add_argument("--valid-frac", type=float, default=0.0,
+                        help="从训练县中随机留出这一比例做早停（默认 0.1；与 --valid-year 互斥）")
+    parser.add_argument("--valid-seed", type=int, default=None,
+                        help="随机留出验证县的种子（默认等于 --seed）")
     parser.add_argument("--target-year", type=int, default=None,
                         help="spatial CV: train window 2017..year-1, test window ends at this year "
                              "(2022 reproduces the default GNN_WINDOWS)")
@@ -115,15 +124,25 @@ def std_target(batch, stats, device):
 
 
 @torch.no_grad()
-def evaluate_loss(model, batch, stats, device) -> float:
-    """验证窗口上的逐县 MSE（标准化目标，与训练目标同口径）。"""
+def evaluate_loss(model, batch, stats, device, index=None) -> tuple[float, float]:
+    """验证窗口上的逐县 MSE（标准化目标）与原始尺度 RMSE（bu/ac）；模型选择用后者。
+
+    ``index`` 随机留出验证县时只在这些县上统计。
+    """
     was_training = model.training
     model.eval()
     inputs = {k: v.to(device) for k, v in model_inputs(batch, stats).items()}
+    target_std = std_target(batch, stats, device)
     pred = model(**inputs)[:, -1]
-    loss = torch.nn.functional.mse_loss(pred, std_target(batch, stats, device)).item()
+    if index is not None:
+        pred = pred[index]
+        target_std = target_std[index]
+    loss = torch.nn.functional.mse_loss(pred, target_std).item()
+    pred_bu = torch.exp(pred * stats["y_std"] + stats["y_mean"])
+    truth_bu = torch.exp(target_std * stats["y_std"] + stats["y_mean"])
+    rmse = torch.sqrt(torch.mean((pred_bu - truth_bu) ** 2)).item()
     model.train(was_training)
-    return loss
+    return loss, rmse
 
 
 @torch.no_grad()
@@ -132,7 +151,7 @@ def predict(model, batch, stats, device) -> torch.Tensor:
     model.eval()
     inputs = {k: v.to(device) for k, v in model_inputs(batch, stats).items()}
     pred_std = model(**inputs)[:, -1].cpu()
-    return pred_std * stats["y_std"] + stats["y_mean"]
+    return torch.exp(pred_std * stats["y_std"] + stats["y_mean"])
 
 
 def evaluate_final_checkpoint(checkpoint_path, dataset_jsonl, data_root, output_dir, *, device="cuda",
@@ -175,7 +194,7 @@ def evaluate_final_checkpoint(checkpoint_path, dataset_jsonl, data_root, output_
     pred = predict(model, test, stats, device)
     keep = list(range(len(test["fips"]))) if test_index is None else test_index.tolist()
     rows = [{"sample_id": test["target_sample_ids"][i], "fips": test["fips"][i], "year": target_test_year,
-             "y_true": float(test["targets"][i]), "y_pred": float(pred[i])} for i in keep]
+             "y_true": float(test["labels_bu"][i]), "y_pred": float(pred[i])} for i in keep]
     expected = [test["target_sample_ids"][i] for i in keep]
     return ro.finish_test(output_dir, rows, expected, checkpoint_path=checkpoint_path,
                           years=(target_test_year,))
@@ -206,6 +225,20 @@ def main(args) -> Path:
         test_index = torch.tensor([i for i, f in enumerate(train["fips"]) if f in heldout])
     else:
         train_index = test_index = None
+    if args.valid_frac and valid is not None:
+        raise ValueError("--valid-frac 与 --valid-year 互斥：随机留出的验证县已来自同一训练窗口")
+    valid_index = None
+    if args.valid_frac:
+        base = train_index if train_index is not None else torch.arange(len(train["fips"]))
+        order = base[torch.randperm(len(base), generator=torch.Generator().manual_seed(
+            args.seed if args.valid_seed is None else args.valid_seed))]
+        n_valid = max(1, int(round(len(base) * args.valid_frac)))
+        valid_index = order[:n_valid].sort().values.to(device)
+        held = set(valid_index.cpu().tolist())
+        train_index = torch.tensor([i for i in base.tolist() if i not in held])
+    valid_batch = valid if valid is not None else (train if valid_index is not None else None)
+    valid_eval_index = None if valid is not None else valid_index
+    has_valid = valid_batch is not None
     stats = fit_stats(train, mask=train_index)
     inputs = {k: v.to(device) for k, v in model_inputs(train, stats).items()}
     y_std_target = std_target(train, stats, device)
@@ -221,9 +254,19 @@ def main(args) -> Path:
         model_config=model_config,
     )
     model = build_model(model_config).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=args.T0, T_mult=args.T_mult,
-                                                                     eta_min=args.eta_min)
+    opt_cls = torch.optim.AdamW if args.optimizer == "adamw" else torch.optim.Adam
+    optimizer = opt_cls(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    warmup = max(int(args.warmup_epochs), 0)
+    eta_ratio = args.eta_min / args.lr if args.lr > 0 else 0.0
+
+    def _lr_lambda(epoch_float):
+        if warmup and epoch_float < warmup:
+            return (epoch_float + 1.0) / warmup
+        progress = (epoch_float - warmup) / max(args.epochs - warmup, 1)
+        progress = min(max(progress, 0.0), 1.0)
+        return eta_ratio + (1.0 - eta_ratio) * 0.5 * (1.0 + math.cos(math.pi * progress))
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, _lr_lambda)
     ro.write_json(run_dir / "run_metadata.json", ro.base_metadata(
         model=cfg.MODEL_NAME, adaptation=cfg.ADAPTATION, run_id=args.run_id, dataset_jsonl=args.dataset_jsonl,
         seed=args.seed, train_years=windows["train"]["years"].tolist(),
@@ -231,36 +274,44 @@ def main(args) -> Path:
         inputs=cfg.INPUTS + (("vegetation_indices",) if args.rs_features else ()),
         rs_features=args.rs_features or None,
         target_train_year=target_train_year, target_test_year=target_test_year,
-        epochs=args.epochs, optimizer="Adam", lr=args.lr, weight_decay=args.weight_decay,
-        scheduler=f"CosineAnnealingWarmRestarts(T0={args.T0}, T_mult={args.T_mult}, eta_min={args.eta_min})",
+        epochs=args.epochs, optimizer="AdamW" if args.optimizer == "adamw" else "Adam",
+        lr=args.lr, weight_decay=args.weight_decay,
+        scheduler=f"linear warmup {warmup} epochs + cosine (T={args.epochs}, eta_min={args.eta_min})",
         aggregator=args.aggregator, main_aggregator=cfg.MAIN_AGGREGATOR,
         parameters=ro.count_parameters(model), edges=int(train["edge_index"].shape[1]),
+        target="standardized log(yield_bu_ac)",
         checkpoint_policy=("final epoch only, fixed budget" if args.checkpoint_policy == "final"
-                           else ("best validation epoch, early stopping" if valid is not None
+                           else ("best validation epoch, early stopping" if has_valid
                                  else "final epoch only, no validation selection")),
         valid_years=None if valid is None else valid["years"].tolist(),
-        valid_samples=None if valid is None else len(valid["fips"]),
-        early_stop_patience=args.early_stop_patience if valid is not None else None,
+        valid_fraction=args.valid_frac or None,
+        valid_seed=(args.seed if args.valid_seed is None else args.valid_seed) if args.valid_frac else None,
+        valid_samples=len(valid["fips"]) if valid is not None else (len(valid_index) if valid_index is not None else None),
+        valid_counties=None if valid_index is None else [train["fips"][i] for i in valid_index.cpu().tolist()],
+        early_stop_patience=args.early_stop_patience if has_valid else None,
     ))
 
     generator = torch.Generator().manual_seed(args.seed)
     best_state, best_epoch, best_valid, stale = None, None, math.inf, 0
+    best_valid_loss = None
     stopped_early = False
     epoch = -1
+    train_start = time.time()
     for epoch in range(args.epochs):
         row = train_one_epoch(model, inputs, y_std_target, optimizer, scheduler, epoch, args, generator,
                               train_index=train_index)
-        if valid is not None:
-            valid_loss = evaluate_loss(model, valid, stats, device)
+        if valid_batch is not None:
+            valid_loss, valid_rmse = evaluate_loss(model, valid_batch, stats, device, index=valid_eval_index)
             row["valid_loss"] = valid_loss
-            if valid_loss < best_valid:
-                best_valid, best_epoch, stale = valid_loss, epoch, 0
+            row["valid_rmse"] = valid_rmse
+            if valid_rmse < best_valid:
+                best_valid, best_valid_loss, best_epoch, stale = valid_rmse, valid_loss, epoch, 0
                 best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
             else:
                 stale += 1
         ro.append_jsonl(run_dir / "train_metrics.jsonl", {"epoch": epoch, **row})
         print(f"Epoch {epoch}: loss {row['train_loss']:.4f}  lr {row['lr']:.2e}"
-              + (f"  valid {row['valid_loss']:.6f}" if valid is not None else ""))
+              + (f"  valid {row['valid_loss']:.6f} rmse {row['valid_rmse']:.3f}" if valid_batch is not None else ""))
         if epoch % args.save_freq == 0 or epoch + 1 == args.epochs:
             latest = ro.save_checkpoint(run_dir / ro.LATEST_CHECKPOINT, {
                 **checkpoint_metadata,
@@ -270,9 +321,10 @@ def main(args) -> Path:
                 run_dir / "run_metadata.json", epoch=epoch, latest_checkpoint=str(latest),
                 latest_checkpoint_sha256=ro.sha256_file(latest),
             )
-        if valid is not None and args.early_stop_patience >= 0 and stale >= args.early_stop_patience:
+        if valid_batch is not None and args.early_stop_patience >= 0 and stale >= args.early_stop_patience:
             stopped_early = True
-            print(f"Early stopping at epoch {epoch} (best epoch {best_epoch}, valid loss {best_valid:.6f})")
+            print(f"Early stopping at epoch {epoch} (best epoch {best_epoch}, "
+                  f"valid rmse {best_valid:.3f}, loss {best_valid_loss:.6f})")
             break
 
     if best_state is not None and args.checkpoint_policy == "best":
@@ -285,8 +337,10 @@ def main(args) -> Path:
         run_dir / "run_metadata.json", epoch=epoch, final_checkpoint=str(final),
         final_checkpoint_sha256=ro.sha256_file(final), trained=ro.now(),
         stopped_early=stopped_early,
-        best_valid_loss=None if best_epoch is None else best_valid,
+        best_valid_rmse=None if best_epoch is None else best_valid,
+        best_valid_loss=None if best_epoch is None else best_valid_loss,
         best_valid_epoch=best_epoch,
+        train_seconds=round(time.time() - train_start, 1),
     )
     evaluate_final_checkpoint(final, args.dataset_jsonl, args.data_root, run_dir, device=args.device,
                               windows=windows, test_index=test_index)

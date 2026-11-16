@@ -1,7 +1,9 @@
-"""2022 单折口径：各配置的预测、RMSE，以及与主模型 PA-TFT 的 RMSE 差的按县/按州聚类自助区间（5000 次）。
+"""2022 单折口径：各配置的预测、RMSE，以及与主模型 PAF-Net 的逐州配对比较。
 
+逐州比较直接以州为单位计算两个模型的 RMSE 与差，报告改善/变差的州数与州内差的中位数，
+不复采样州（单折只有 29 个州，按州自助重采样的区间不稳定）。
 论文只保留 2022 折、每个配置只保留种子 0 的单次运行（LOYO_SEEDS=0），不再作集成。
-输出 paper_figures/single_fold_2022.json，供 docs/make_tables_tft.py 与正文引用。
+输出 paper_figures/single_fold_2022.json，供 fig5_3 与正文引用。
 用法：LOYO_SEEDS=0 python TFT_model/single_fold_report.py
 """
 
@@ -9,11 +11,17 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 from pathlib import Path
 
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from TFT_model.paper_report import STATE_NAMES  # noqa: E402
+
 RUNS = Path("/data/raid0/hqx/TFT_out/tft")
 OUT = ROOT / "paper_figures"
 TAG = __import__("os").environ.get("LOYO_TAG", "paper-")
@@ -22,24 +30,16 @@ TRAIN_LAST_YEAR = 2021
 # 种子列表可用 LOYO_SEEDS 覆盖（单种子复核时 LOYO_SEEDS=0）
 SEEDS = tuple(int(s) for s in __import__("os").environ.get("LOYO_SEEDS", "0").split())
 MAIN = "main"
-CONFIGS = {"main": "PA-TFT（主模型）"}
+CONFIGS = {"main": "PAF-Net（主模型）"}
 # 移除式消融：把整条支路从结构中删掉后重新训练，运行名见 run_removal_ablation.sh
 REMOVAL_CONFIGS = {
     "norsbranch": "删除遥感支路",
     "nosoilbranch": "删除土壤静态支路",
-    "noconstructed": "去掉4个构造气象变量",
+    "nocumgdd": "去掉累积生长度日",
 }
-# 组件消融：删除 PA-TFT 在原始 TFT 之上增加的组件（县内空间注意力、网格—日级变量选择）
+# 单组件消融：每个配置只删除 PAF-Net 相对 TFT 补充的一处设计，其余结构与训练设置不变。
 COMPONENT_CONFIGS = {
-    "spatialmean": "县内空间注意力→等权均值",
-    "countymonth": "网格—日级变量选择→县—月级变量选择",
-}
-# 逐级改造链：日粒度、不做日→月聚合，每一步只加入一项改动，运行名见 run_loyo.sh 的 stepA—stepD。
-CHAIN_CONFIGS = {
-    "stepA": "A 县内网格平均后的县—日级单序列（无遥感）",
-    "stepB": "B 逐网格 VSN 后县内等权平均（无遥感）",
-    "stepC": "C 逐网格 VSN 后县内空间注意力（无遥感）",
-    "stepD": "D 空间注意力 + 按月遥感条件上下文",
+    "spatialmean": ("县内空间注意力→等权均值", "ablate-spatialmean-y2022-s0"),
 }
 
 
@@ -85,24 +85,42 @@ def anomaly_corr(pred, truth, base_log, fips, states):
     return float(np.corrcoef(demean(ah, states), demean(a, states))[0, 1])
 
 
-def cluster_bootstrap(e_main, e_ref, clusters, reps=5000, seed=0):
-    """RMSE_主 − RMSE_对照 的聚类自助区间。"""
-    rng = np.random.default_rng(seed)
-    uniq = np.unique(clusters)
-    idx = {c: np.flatnonzero(clusters == c) for c in uniq}
-    diffs = np.empty(reps)
-    for i in range(reps):
-        pick = rng.choice(uniq, len(uniq), replace=True)
-        rows = np.concatenate([idx[c] for c in pick])
-        diffs[i] = (np.sqrt((e_main[rows] ** 2).mean()) - np.sqrt((e_ref[rows] ** 2).mean()))
-    return [float(np.percentile(diffs, 2.5)), float(np.percentile(diffs, 97.5))], float((diffs < 0).mean())
+def state_compare(e_main, e_ref, states, names):
+    """逐州配对比较：对照配置减主模型的州内 RMSE 差（正值=对照更差）。
+
+    州内 RMSE 只在该州的县上计算；不对州做重采样，也不给区间。
+    """
+    rows = []
+    for s in np.unique(states):
+        idx = np.flatnonzero(states == s)
+        rm_main = float(np.sqrt((e_main[idx] ** 2).mean()))
+        rm_ref = float(np.sqrt((e_ref[idx] ** 2).mean()))
+        rows.append({"state": s, "name": names.get(s, s), "n": int(len(idx)),
+                     "rmse_main": round(rm_main, 2), "rmse_cfg": round(rm_ref, 2),
+                     "delta": round(rm_ref - rm_main, 2)})
+    d = np.array([r["delta"] for r in rows])
+    order = np.argsort(d)
+    return {
+        "n_states": int(len(rows)),
+        "n_worse": int((d > 0).sum()),
+        "n_better": int((d < 0).sum()),
+        "n_tie": int((d == 0).sum()),
+        "median_delta": round(float(np.median(d)), 2),
+        "q25": round(float(np.percentile(d, 25)), 2),
+        "q75": round(float(np.percentile(d, 75)), 2),
+        "min": round(float(d.min()), 2),
+        "max": round(float(d.max()), 2),
+        "worst": [rows[i] for i in order[::-1][:3]],
+        "best": [rows[i] for i in order[:3]],
+        "by_state": [rows[i] for i in order[::-1]],
+    }
 
 
 def main():
     labels = load_labels()
     mains = [load_pred(f"{TAG}{MAIN}-y{YEAR}-s{s}") for s in SEEDS]
     mains = [p for p in mains if p]
-    assert mains, "缺少 PA-TFT 主模型的 2022 折预测"
+    assert mains, "缺少 PAF-Net 主模型的 2022 折预测"
     fips, truth = mains[0][1], mains[0][2]
     ens_main = np.mean([np.array([p[0][f] for f in fips]) for p in mains], axis=0)
     base_log = np.array([np.mean([np.log(labels[(c, u)]) for u in range(2017, TRAIN_LAST_YEAR + 1)]) for c in fips])
@@ -128,17 +146,18 @@ def main():
                "pred_sd": float(ens.std()),
                "delta": rmse - out["main"]["rmse"]}
         if key != MAIN:
-            row["county_ci"], row["county_share"] = cluster_bootstrap(e_main, e, np.arange(len(fips)))
-            row["state_ci"], row["state_share"] = cluster_bootstrap(e_main, e, states)
+            row["state_compare"] = state_compare(e_main, e, states, STATE_NAMES)
         out["configs"][key] = row
         print(f"{label:28s} rmse {rmse:6.2f}  delta {row['delta']:+.2f}  anom {row['anom_corr']:.3f}")
 
-    # 移除式消融：整条支路从结构中删除后重新训练（2022 折、种子 0）
-    for group, configs in (("removal_ablation", REMOVAL_CONFIGS),
-                           ("component_ablation", COMPONENT_CONFIGS)):
+    # 移除式消融 / 单组件消融（2022 折、种子 0）
+    groups = (
+        ("removal_ablation", {k: (v, f"ablate-{k}-y{YEAR}-s0") for k, v in REMOVAL_CONFIGS.items()}),
+        ("component_ablation", COMPONENT_CONFIGS),
+    )
+    for group, configs in groups:
         out[group] = {}
-        for key, label in configs.items():
-            run_id = f"ablate-{key}-y{YEAR}-s0"
+        for key, (label, run_id) in configs.items():
             loaded = load_pred(run_id)
             if loaded is None:
                 print(f"跳过 {label}：缺少 {run_id}")
@@ -153,40 +172,14 @@ def main():
                    "anom_corr": anomaly_corr(ens, truth, base_log, fips, states),
                    "pred_sd": float(ens.std()),
                    "params": param_count(run_id)}
-            row["state_ci"], row["state_share"] = cluster_bootstrap(e_main, e, states)
+            row["state_compare"] = state_compare(e_main, e, states, STATE_NAMES)
             out[group][key] = row
+            sc = row["state_compare"]
             print(f"{label:34s} rmse {rmse:6.2f}  delta {row['delta']:+.2f}  anom {row['anom_corr']:.3f}  "
-                  f"params {row['params']:,}  CI [{row['state_ci'][0]:+.2f},{row['state_ci'][1]:+.2f}]")
+                  f"params {row['params']:,}  州: 变差 {sc['n_worse']}/{sc['n_states']}, "
+                  f"中位 {sc['median_delta']:+.2f}")
 
     out["main"]["params"] = param_count(f"{TAG}{MAIN}-y{YEAR}-s0")
-
-    # 逐级改造链：每一步与上一步的同州聚类区间，回答"这一项改动是否值得采纳"
-    out["chain"] = {}
-    prev_e, prev_row = None, None
-    for key, label in CHAIN_CONFIGS.items():
-        run_id = f"chain-{key}-y{YEAR}-s0"
-        loaded = load_pred(run_id)
-        if loaded is None:
-            print(f"跳过 {label}：缺少 {run_id}")
-            continue
-        pred_map = loaded[0]
-        ens = np.array([pred_map[f] for f in fips])
-        e = ens - truth
-        rmse = float(np.sqrt((e ** 2).mean()))
-        row = {"label": label, "run_id": run_id, "rmse": rmse,
-               "delta": rmse - out["main"]["rmse"],
-               "bias": float(e.mean()),
-               "anom_corr": anomaly_corr(ens, truth, base_log, fips, states),
-               "pred_sd": float(ens.std()),
-               "params": param_count(run_id)}
-        if prev_e is not None:
-            row["delta_prev"] = rmse - prev_row["rmse"]
-            row["state_ci_prev"], row["state_share_prev"] = cluster_bootstrap(e, prev_e, states)
-        out["chain"][key] = row
-        print(f"{label:40s} rmse {rmse:6.2f}  Δ主 {row['delta']:+.2f}"
-              + (f"  Δ上步 {row['delta_prev']:+.2f}  CI [{row['state_ci_prev'][0]:+.2f},{row['state_ci_prev'][1]:+.2f}]"
-                 if "delta_prev" in row else ""))
-        prev_e, prev_row = e, row
 
     (OUT / "single_fold_2022.json").write_text(json.dumps(out, ensure_ascii=False, indent=1), encoding="utf-8")
 

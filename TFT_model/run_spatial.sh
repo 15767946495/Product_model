@@ -18,14 +18,30 @@ TAG="${TAG:-spatial}"
 read -r -a GPUS <<< "${GPU_IDS:-0 1 2 3 4}"
 K="${K:-5}"
 SEED="${SEED:-0}"
+# 统一配方（第5.1节）：学习率 1e-5、权重衰减 0.05、10 轮 warmup + 余弦、最多 100 轮；
+# 每折从训练县年中随机留出 10% 做早停（VALID_FRAC），留出县的全部县年仍只用于测试。
+EPOCHS="${EPOCHS:-100}"
+LR="${LR:-1e-5}"
+WD="${WD:-0.05}"
+VALID_FRAC="${VALID_FRAC:-0.1}"
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
 export MKL_NUM_THREADS="${MKL_NUM_THREADS:-1}"
 
-COMMON=(--data-root "$DATA_ROOT" --output_root "$OUT" --device cuda:0 --epochs 20
+COMMON=(--data-root "$DATA_ROOT" --output_root "$OUT" --device cuda:0 --epochs "$EPOCHS"
         --num_workers "${NUM_WORKERS:-4}" --batch_size 4 --hidden_size 512 --num_heads 4
-        --num_lstm_layers 1 --dropout 0.1 --warmup_epochs 5 --use-constructed
-        --rs-features "$RS" --grad-clip 1.0 --lr 1e-4
-        --no-rs-within-norm --no-weather-within-norm --seed "$SEED" --all-years)
+        --num_lstm_layers 1 --dropout 0.1 --warmup_epochs 10
+        --seq-level day --rs-features "$RS" --grad-clip 1.0 --lr "$LR" --weight_decay "$WD"
+        --no-rs-within-norm --no-weather-within-norm --seed "$SEED" --all-years
+        --valid-frac "$VALID_FRAC" --early-stop-patience 10 --checkpoint-policy best)
+# 主模型为 12 个动态变量（11 个原始日气象 + 累积生长度日，USE_CONSTRUCTED=0，默认）；
+# USE_CONSTRUCTED=1 加入全部 4 个构造气象变量，=none 一个都不加（去掉 CumGDD 的对照）。
+USE_CONSTRUCTED="${USE_CONSTRUCTED:-0}"
+case "$USE_CONSTRUCTED" in
+  1) COMMON+=(--use-constructed) ;;
+  0) COMMON+=(--no-use-constructed) ;;
+  none) COMMON+=(--no-constructed-weather) ;;
+  *) echo "USE_CONSTRUCTED 只取 1/0/none" >&2; exit 2 ;;
+esac
 
 run_fold() {   # gpu fold
   local gpu=$1 fold=$2

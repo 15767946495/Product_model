@@ -84,6 +84,11 @@ def load_windows(jsonl_path, data_root=DATA_ROOT, windows=None, rs_features=None
     items = [dataset[i] for i in range(len(dataset))]
     built = build_gnn_windows(items, windows)
     batches = {split: collate_gnn_window(built[split]) for split in windows}
+    # 统一预测目标：四个模型都对对数单产水平建模。collate 给出原始单产（bu/ac），
+    # 这里换成对数单产，并保留原始值供最终指标使用。
+    for batch in batches.values():
+        batch["labels_bu"] = batch["targets"].clone()
+        batch["targets"] = torch.log(batch["targets"])
     reference = next(iter(batches.values()))
     for split, batch in batches.items():
         if split != next(iter(batches)):

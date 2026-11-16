@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import time
 import sys
 from pathlib import Path
 
@@ -31,6 +32,7 @@ from backbone import build_backbone, build_model, load_pretrained_state
 from common import add_args, adjust_learning_rate, param_groups, per_image, resolve_lr, stage2_transform
 from dataset_adapter import build_dataset, build_loader, require_unpadded
 from train_dataset import run_output as ro
+from train_dataset.dataset import random_sample_split
 
 STAGE1_MODEL_NAME = "phenoyieldnet_stage1"
 STAGE1_ADAPTATION = "PhenoYieldNet-unified contrastive adaptation"
@@ -48,6 +50,10 @@ def build_parser():
                         help="spatial CV: JSONL holding only the held-out counties for the final test")
     parser.add_argument("--valid-year", type=int, default=None,
                         help="hold-out validation year for early stopping (e.g. 2021); finetuning then uses only the year before it")
+    parser.add_argument("--valid-frac", type=float, default=0.0,
+                        help="从微调县年中随机留出这一比例做早停（默认 0.1；与 --valid-year、--valid-county-frac 互斥）")
+    parser.add_argument("--valid-seed", type=int, default=None,
+                        help="随机留出验证集的种子（默认等于 --seed）")
     parser.add_argument("--early-stop-patience", type=int, default=10,
                         help="stop after N epochs without validation improvement (default 3); -1 disables early stopping")
     parser.add_argument("--checkpoint-policy", choices=("best", "final"), default="best",
@@ -142,22 +148,25 @@ def train_one_epoch(model, loader, optimizer, device, epoch, args) -> dict:
 
 
 @torch.no_grad()
-def evaluate_loss(model, loader, device) -> float:
-    """验证年上的逐县 MSE(log yield)，与微调损失同口径。"""
+def evaluate_loss(model, loader, device) -> tuple[float, float]:
+    """验证年上的逐县 MSE(log yield) 与原始尺度 RMSE（bu/ac）；模型选择用后者。"""
     was_training = model.training
     model.eval()
     transform = stage2_transform(train=False)
-    total, seen = 0.0, 0
+    total, seen, sq_err = 0.0, 0, 0.0
     for batch in loader:
         x, ys, crop_idx = model_inputs(batch, device, transform)
-        z = torch.log(batch["labels"]).unsqueeze(-1).to(device)
-        loss = torch.nn.functional.mse_loss(model(x, ys=ys, crop_idx=crop_idx), z, reduction="sum").item()
+        y = batch["labels"].to(device)
+        z = torch.log(y).unsqueeze(-1).to(device)
+        pred = model(x, ys=ys, crop_idx=crop_idx)
+        loss = torch.nn.functional.mse_loss(pred, z, reduction="sum").item()
         total += loss
+        sq_err += ((torch.exp(pred[:, -1].float()) - y) ** 2).sum().item()
         seen += z.numel()
     model.train(was_training)
     if seen == 0:
         raise RuntimeError("validation loader has no samples")
-    return total / seen
+    return total / seen, (sq_err / seen) ** 0.5
 
 
 @torch.no_grad()
@@ -248,9 +257,18 @@ def main(args) -> Path:
         ro.write_json(run_dir / "stage1_load_report.json", load_report)
     model.to(device)
 
+    if args.valid_frac and (args.valid_year is not None or args.valid_county_frac):
+        raise ValueError("--valid-frac 与 --valid-year、--valid-county-frac 互斥")
     finetune_years, valid_years, test_years = _split(args)
     dataset = build_dataset(args.dataset_jsonl, args.data_root, finetune_years)
     train_set, valid_set, valid_counties = dataset, None, None
+    if valid_years is not None:
+        valid_set = build_dataset(args.dataset_jsonl, args.data_root, valid_years)
+        if not len(valid_set):
+            raise ValueError(f"validation years {valid_years} have no samples")
+    elif args.valid_frac:
+        train_set, valid_set = random_sample_split(
+            dataset, args.valid_frac, args.seed if args.valid_seed is None else args.valid_seed)
     if args.valid_county_frac:
         if valid_years is not None:
             raise ValueError("--valid-county-frac 与 --valid-year 互斥")
@@ -268,10 +286,6 @@ def main(args) -> Path:
     loader = build_loader(train_set, True, num_workers=args.num_workers,
                           generator=torch.Generator().manual_seed(args.seed))
     valid_loader = None
-    if valid_years is not None:
-        valid_set = build_dataset(args.dataset_jsonl, args.data_root, valid_years)
-        if not len(valid_set):
-            raise ValueError(f"validation years {valid_years} have no samples")
     if valid_set is not None:
         valid_loader = build_loader(valid_set, False, num_workers=args.num_workers)
     optimizer = torch.optim.AdamW(param_groups(model, args.weight_decay), lr=args.lr, betas=(0.9, 0.95))
@@ -290,21 +304,27 @@ def main(args) -> Path:
                            else ("best validation epoch, early stopping" if valid_loader is not None
                                  else "final epoch only, no validation selection")),
         valid_years=list(valid_years) if valid_years is not None else None,
+        valid_fraction=args.valid_frac or None,
+        valid_seed=(args.seed if args.valid_seed is None else args.valid_seed) if args.valid_frac else None,
         valid_samples=len(valid_set) if valid_set is not None else None,
+        valid_sample_ids=list(valid_set.sample_ids) if (valid_set is not None and args.valid_frac) else None,
         valid_counties=list(valid_counties) if valid_counties else None,
         early_stop_patience=args.early_stop_patience if valid_loader is not None else None,
     ))
 
     best_state, best_epoch, best_valid, stale = None, None, math.inf, 0
+    best_valid_loss = None
     stopped_early = False
     epoch = -1
+    train_start = time.time()
     for epoch in range(args.epochs):
         row = train_one_epoch(model, loader, optimizer, device, epoch, args)
         if valid_loader is not None:
-            valid_loss = evaluate_loss(model, valid_loader, device)
+            valid_loss, valid_rmse = evaluate_loss(model, valid_loader, device)
             row["valid_loss"] = valid_loss
-            if valid_loss < best_valid:
-                best_valid, best_epoch, stale = valid_loss, epoch, 0
+            row["valid_rmse"] = valid_rmse
+            if valid_rmse < best_valid:
+                best_valid, best_valid_loss, best_epoch, stale = valid_rmse, valid_loss, epoch, 0
                 best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
             else:
                 stale += 1
@@ -320,7 +340,8 @@ def main(args) -> Path:
             )
         if valid_loader is not None and args.early_stop_patience >= 0 and stale >= args.early_stop_patience:
             stopped_early = True
-            print(f"Early stopping at epoch {epoch} (best epoch {best_epoch}, valid loss {best_valid:.6f})")
+            print(f"Early stopping at epoch {epoch} (best epoch {best_epoch}, "
+                  f"valid rmse {best_valid:.3f}, loss {(best_valid_loss if best_valid_loss is not None else float('nan')):.6f})")
             break
 
     if best_state is not None and args.checkpoint_policy == "best":
@@ -334,8 +355,10 @@ def main(args) -> Path:
         run_dir / "run_metadata.json", epoch=epoch, final_checkpoint=str(final),
         final_checkpoint_sha256=ro.sha256_file(final), trained=ro.now(),
         stopped_early=stopped_early,
-        best_valid_loss=None if best_epoch is None else best_valid,
+        best_valid_rmse=None if best_epoch is None else best_valid,
+        best_valid_loss=None if best_epoch is None else best_valid_loss,
         best_valid_epoch=best_epoch,
+        train_seconds=round(time.time() - train_start, 1),
     )
     evaluate_final_checkpoint(final, args.dataset_jsonl, args.data_root, run_dir, device=args.device,
                               num_workers=args.num_workers, eval_jsonl=args.eval_jsonl or None)
