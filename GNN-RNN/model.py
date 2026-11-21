@@ -4,7 +4,7 @@
     每年县级天气 (N,168,11) -> 单年 1D CNN；县级土壤 (N,7) -> 线性编码；
     可选：县—月植被指数 (N,60) -> 线性编码并拼入（输入对等配置，见 use_vi）
     -> 县年环境表示 -> 同年县图 GraphSAGE（n_layers 层）-> 县年空间表示
-    五个年度空间表示 -> LSTM -> 回归头 -> 末年单产（标准化尺度）
+    五个年度空间表示 -> LSTM -> 回归头 -> 末年对数单产（标签不标准化）
 上游每层 SAGEConv 后都做 ReLU + dropout（含最后一层），此处保持一致；上游 forward 中的
 y_pad 未进入网络，本实现完全不接收标签输入。
 """
@@ -93,10 +93,19 @@ class GNNRNN(nn.Module):
         self.lstm = nn.LSTM(input_size=z_dim, hidden_size=z_dim, num_layers=1, batch_first=True)
         self.regressor = nn.Sequential(nn.Linear(z_dim, z_dim // 2), nn.ReLU(), nn.Linear(z_dim // 2, 1))
 
+    def init_output_bias(self, value: float) -> None:
+        """把回归头输出偏置置为训练集对数单产均值。
+
+        标签不标准化时，输出层零初始化意味着初始预测为 exp(0)=1 bu/ac，远离约 5.1 的水平；
+        学习率只有 1e-5、GNN 每轮约 20 步，训练预算不足以让输出走到均值水平。
+        初始化到均值等价于标准化标签下"输出≈0 即平均单产"的起点，只影响初始化，不改变损失。
+        """
+        nn.init.constant_(self.regressor[-1].bias, float(value))
+
     def forward(self, weather: torch.Tensor, soil: torch.Tensor, edge_index: torch.Tensor,
                 vi: torch.Tensor | None = None) -> torch.Tensor:
         """weather (N,Y,T,F) 已标准化、soil (N,S)、edge_index (2,E)、vi (N,Y,60) 可选
-        -> 每年预测 (N,Y)（标准化尺度）。
+        -> 每年对数单产预测 (N,Y)。
 
         图在全部 N 个县上运行（固定县集合很小），不做邻居采样。
         """

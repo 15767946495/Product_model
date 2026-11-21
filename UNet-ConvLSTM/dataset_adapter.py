@@ -65,7 +65,8 @@ def fit_stats(train_dataset: CropNetDataset, train_years=TRAIN_YEARS) -> dict:
     return {
         "weather_mean": torch.tensor(mean, dtype=torch.float32),
         "weather_std": torch.tensor(std, dtype=torch.float32).clamp_min(EPS),
-        "y_mean": torch.tensor(float(log_y.mean())), "y_std": torch.tensor(max(float(log_y.std()), EPS)),
+        # 标签不标准化；y_mean 只用于初始化回归头的输出偏置。
+        "y_mean": torch.tensor(float(log_y.mean())),
     }
 
 
@@ -81,7 +82,8 @@ def model_inputs(batch: dict, stats: dict, device) -> dict:
 
 
 def target(batch: dict, stats: dict) -> torch.Tensor:
-    return (torch.log(batch["labels"]) - stats["y_mean"]) / stats["y_std"]
+    """标签为对数单产本身（不标准化），与 PAF-Net 及其他基线一致。"""
+    return torch.log(batch["labels"])
 
 
 def stats_to_json(stats: dict) -> dict:

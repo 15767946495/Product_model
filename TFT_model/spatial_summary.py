@@ -104,13 +104,13 @@ def load_model(name: str, fold: int, held: set) -> dict:
     if name == "PAF-Net":
         return read_predictions(RUNS / f"{TAG}-main-f{fold}-allyears-s{SEED}", held)
     if name == "UNet-ConvLSTM":
-        return read_predictions(BASE / "unet_convlstm" / f"spatial-unet-fold{fold}", held)
+        return read_predictions(BASE / "unet_convlstm" / f"spatial-unet-rawloss-fold{fold}", held)
     if name == "PhenoYieldNet":
         return read_predictions(BASE / "phenoyieldnet" / f"spatial-pheno-allyears-f{fold}", held)
     if name == "GNN-RNN":
         pooled = {}
         for year in GNN_YEARS:
-            run = BASE / "gnn_rnn" / f"spatial-gnn-y{year}-f{fold}"
+            run = BASE / "gnn_rnn" / f"spatial-gnn-rawloss-y{year}-f{fold}"
             if not run.exists():
                 print(f"  note: {run.name} missing, GNN skips {year}")
                 continue

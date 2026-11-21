@@ -27,7 +27,7 @@ from TFT_model.paper_report import STATE_NAMES, metrics  # noqa: E402
 
 OUT = ROOT / "paper_figures"
 RUN = Path(os.environ.get("LOYO_RUN", "/data/raid0/hqx/TFT_out/tft/paper-main-y2022-s0"))
-BASELINE_RUN = Path(os.environ.get("LOYO_BASELINE_RUN", "/data/raid0/hqx/baselines/gnn_rnn/vsplit-gnn-y2022-s0"))
+BASELINE_RUN = Path(os.environ.get("LOYO_BASELINE_RUN", "/data/raid0/hqx/baselines/gnn_rnn/rawloss-gnn-y2022-s0"))
 BASELINE_LABEL = "GNN-RNN"
 
 # 分类色板（dataviz 校验通过：蓝 #2a78d6 / 橙 #eb6834）

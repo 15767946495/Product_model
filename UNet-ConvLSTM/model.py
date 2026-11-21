@@ -4,7 +4,7 @@
     每月每网格 Sentinel-2 (3,S,S) -> 共享 U-Net encoder（只用编码器，多尺度特征池化到最深层分辨率后拼接）
     同月每网格 28 天 x 11 维天气 -> 天气编码器 -> 广播到特征图
     视觉与天气 1x1 卷积融合 -> 六个月特征图序列 -> ConvLSTM（逐网格，跨月）
-    -> 末月隐状态空间平均 -> 有效网格 masked pooling -> 县级当年单产（标准化尺度）
+    -> 末月隐状态空间均值 -> 有效网格 masked pooling -> 县级当年对数单产（标签不标准化）
 不使用长期气象、其他年份隐藏状态或历史产量。只对有效网格运行编码器，padding 网格不进入任何计算。
 """
 
@@ -96,6 +96,10 @@ class UNetConvLSTM(nn.Module):
         self.head = nn.Sequential(nn.LayerNorm(hidden_channels), nn.Dropout(dropout),
                                   nn.Linear(hidden_channels, hidden_channels), nn.ReLU(inplace=True),
                                   nn.Linear(hidden_channels, 1))
+
+    def init_output_bias(self, value: float) -> None:
+        """把回归头输出偏置置为训练集对数单产均值（标签不标准化，零初始化=1 bu/ac，远离约 5.1 的水平）。"""
+        nn.init.constant_(self.head[-1].bias, float(value))
 
     def _encode(self, images: torch.Tensor, weather: torch.Tensor) -> torch.Tensor:
         """images (N,3,S,S)、weather (N,28,F) -> 融合特征图 (N,C,h,w)，按 grid_chunk 分块。"""

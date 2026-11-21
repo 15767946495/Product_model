@@ -35,8 +35,8 @@ TRAIN_LAST_YEAR = 2021
 
 # 比较模型的 2022 折运行目录（随机 10% 验证协议；不存在的自动跳过）
 BASELINES = {
-    "UNet-ConvLSTM": Path("/data/raid0/hqx/baselines/unet_convlstm/vsplit-unet-y2022-s0"),
-    "GNN-RNN": Path("/data/raid0/hqx/baselines/gnn_rnn/vsplit-gnn-y2022-s0"),
+    "UNet-ConvLSTM": Path("/data/raid0/hqx/baselines/unet_convlstm/rawloss-unet-y2022-s0"),
+    "GNN-RNN": Path("/data/raid0/hqx/baselines/gnn_rnn/rawloss-gnn-y2022-s0"),
     "PhenoYieldNet": Path("/data/raid0/hqx/baselines/phenoyieldnet/vsplit-pheno-y2022-s0"),
 }
 

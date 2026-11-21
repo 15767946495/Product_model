@@ -86,7 +86,7 @@ def _run_windows(run_config: dict) -> dict:
 
 
 def logcosh(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    """上游 loss_fn(mode="logcosh")，在标准化尺度上计算。"""
+    """上游 loss_fn(mode="logcosh")，直接作用于对数单产（标签不标准化）。"""
     return torch.mean(torch.log(torch.cosh(target - pred + 1e-12)))
 
 
@@ -95,19 +95,19 @@ def build_model(model_config: dict) -> GNNRNN:
                   use_vi=bool(model_config.get("use_vi", False)))
 
 
-def train_one_epoch(model, inputs, y_std_target, optimizer, scheduler, epoch, args, generator,
+def train_one_epoch(model, inputs, y_target, optimizer, scheduler, epoch, args, generator,
                     train_index=None) -> dict:
     model.train()
-    pool = torch.arange(y_std_target.shape[0]) if train_index is None else train_index
+    pool = torch.arange(y_target.shape[0]) if train_index is None else train_index
     n = pool.numel()
     order = pool[torch.randperm(n, generator=generator)]
     steps = math.ceil(n / args.batch_size)
     total = 0.0
     for step in range(steps):
-        idx = order[step * args.batch_size:(step + 1) * args.batch_size].to(y_std_target.device)
+        idx = order[step * args.batch_size:(step + 1) * args.batch_size].to(y_target.device)
         # 全图前向；损失只作用于本步目标县的最后一年（上游 c1=0, c2=1）
         pred = model(**inputs)[:, -1]
-        loss = logcosh(pred[idx], y_std_target[idx])
+        loss = logcosh(pred[idx], y_target[idx])
         if not torch.isfinite(loss):
             raise FloatingPointError(f"epoch {epoch} step {step}: loss is {loss.item()}")
         optimizer.zero_grad()
@@ -119,27 +119,28 @@ def train_one_epoch(model, inputs, y_std_target, optimizer, scheduler, epoch, ar
             "optimizer_steps": steps}
 
 
-def std_target(batch, stats, device):
-    return ((batch["targets"] - stats["y_mean"]) / stats["y_std"]).to(device)
+def log_target(batch, stats, device):
+    """对数单产标签本身（不标准化），与其他模型一致。"""
+    return batch["targets"].to(device)
 
 
 @torch.no_grad()
 def evaluate_loss(model, batch, stats, device, index=None) -> tuple[float, float]:
-    """验证窗口上的逐县 MSE（标准化目标）与原始尺度 RMSE（bu/ac）；模型选择用后者。
+    """验证窗口上的逐县 MSE（对数单产目标）与原始尺度 RMSE（bu/ac）；模型选择用后者。
 
     ``index`` 随机留出验证县时只在这些县上统计。
     """
     was_training = model.training
     model.eval()
     inputs = {k: v.to(device) for k, v in model_inputs(batch, stats).items()}
-    target_std = std_target(batch, stats, device)
+    target_log = log_target(batch, stats, device)
     pred = model(**inputs)[:, -1]
     if index is not None:
         pred = pred[index]
-        target_std = target_std[index]
-    loss = torch.nn.functional.mse_loss(pred, target_std).item()
-    pred_bu = torch.exp(pred * stats["y_std"] + stats["y_mean"])
-    truth_bu = torch.exp(target_std * stats["y_std"] + stats["y_mean"])
+        target_log = target_log[index]
+    loss = torch.nn.functional.mse_loss(pred, target_log).item()
+    pred_bu = torch.exp(pred)
+    truth_bu = torch.exp(target_log)
     rmse = torch.sqrt(torch.mean((pred_bu - truth_bu) ** 2)).item()
     model.train(was_training)
     return loss, rmse
@@ -150,8 +151,7 @@ def predict(model, batch, stats, device) -> torch.Tensor:
     """返回末年预测（bu/ac），按窗口节点（fips）顺序。"""
     model.eval()
     inputs = {k: v.to(device) for k, v in model_inputs(batch, stats).items()}
-    pred_std = model(**inputs)[:, -1].cpu()
-    return torch.exp(pred_std * stats["y_std"] + stats["y_mean"])
+    return torch.exp(model(**inputs)[:, -1].cpu())
 
 
 def evaluate_final_checkpoint(checkpoint_path, dataset_jsonl, data_root, output_dir, *, device="cuda",
@@ -177,7 +177,7 @@ def evaluate_final_checkpoint(checkpoint_path, dataset_jsonl, data_root, output_
         test_years=test_years,
         required_fields=tuple(f"model_config.{key}" for key in MODEL_KEYS) + tuple(
             f"stats.{key}" for key in (
-                "weather_mean", "weather_std", "soil_mean", "soil_std", "y_mean", "y_std",
+                "weather_mean", "weather_std", "soil_mean", "soil_std", "y_mean",
             )
         ),
     )
@@ -241,7 +241,7 @@ def main(args) -> Path:
     has_valid = valid_batch is not None
     stats = fit_stats(train, mask=train_index)
     inputs = {k: v.to(device) for k, v in model_inputs(train, stats).items()}
-    y_std_target = std_target(train, stats, device)
+    y_target = log_target(train, stats, device)
 
     model_config = {k: getattr(args, k) for k in MODEL_KEYS}
     model_config["use_vi"] = bool(args.rs_features)
@@ -254,6 +254,7 @@ def main(args) -> Path:
         model_config=model_config,
     )
     model = build_model(model_config).to(device)
+    model.init_output_bias(float(stats["y_mean"]))
     opt_cls = torch.optim.AdamW if args.optimizer == "adamw" else torch.optim.Adam
     optimizer = opt_cls(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     warmup = max(int(args.warmup_epochs), 0)
@@ -279,7 +280,7 @@ def main(args) -> Path:
         scheduler=f"linear warmup {warmup} epochs + cosine (T={args.epochs}, eta_min={args.eta_min})",
         aggregator=args.aggregator, main_aggregator=cfg.MAIN_AGGREGATOR,
         parameters=ro.count_parameters(model), edges=int(train["edge_index"].shape[1]),
-        target="standardized log(yield_bu_ac)",
+        target="log(yield_bu_ac)",
         checkpoint_policy=("final epoch only, fixed budget" if args.checkpoint_policy == "final"
                            else ("best validation epoch, early stopping" if has_valid
                                  else "final epoch only, no validation selection")),
@@ -298,7 +299,7 @@ def main(args) -> Path:
     epoch = -1
     train_start = time.time()
     for epoch in range(args.epochs):
-        row = train_one_epoch(model, inputs, y_std_target, optimizer, scheduler, epoch, args, generator,
+        row = train_one_epoch(model, inputs, y_target, optimizer, scheduler, epoch, args, generator,
                               train_index=train_index)
         if valid_batch is not None:
             valid_loss, valid_rmse = evaluate_loss(model, valid_batch, stats, device, index=valid_eval_index)

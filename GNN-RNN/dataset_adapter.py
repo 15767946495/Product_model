@@ -117,7 +117,8 @@ def fit_stats(train: dict, mask=None) -> dict:
     stats = {
         "weather_mean": weather.mean(dim=(0, 1, 2)), "weather_std": weather.std(dim=(0, 1, 2)).clamp_min(EPS),
         "soil_mean": soil.mean(dim=0), "soil_std": soil.std(dim=0).clamp_min(EPS),
-        "y_mean": targets.mean(), "y_std": targets.std().clamp_min(EPS),
+        # 标签不标准化；y_mean 只用于初始化回归头的输出偏置。
+        "y_mean": targets.mean(),
     }
     if "vi" in train:
         vi = train["vi"] if mask is None else train["vi"][mask]

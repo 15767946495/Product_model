@@ -2,7 +2,7 @@
 
 协议（与 TFT 一致）：--valid-year 2021 时只用 2017--2020 训练，2021 早停选模（patience 3），
 最后在 2022 测试；不传 --valid-year 则退回原来的 2017--2021 固定 epoch 训练。
-目标为 log(yield) 的训练集标准化值。
+目标为对数单产本身（不标准化）。
 输出：output_root/unet_convlstm/<run_id>/{config.json, checkpoint-latest.pth, checkpoint-final.pth,
 train_metrics.jsonl, test_metrics.json, county_predictions.jsonl, run_metadata.json}。
 """
@@ -115,8 +115,8 @@ def evaluate_loss(model, loader, stats, device) -> tuple[float, float]:
         pred = model(**model_inputs(batch, stats, device))
         target_value = target(batch, stats).to(device)
         total += torch.nn.functional.mse_loss(pred, target_value, reduction="sum").item()
-        pred_bu = torch.exp(pred * stats["y_std"] + stats["y_mean"])
-        truth_bu = torch.exp(target_value * stats["y_std"] + stats["y_mean"])
+        pred_bu = torch.exp(pred)
+        truth_bu = torch.exp(target_value)
         sq_err += ((pred_bu - truth_bu) ** 2).sum().item()
         seen += pred.numel()
     model.train(was_training)
@@ -130,8 +130,7 @@ def predict(model, loader, stats, device) -> list[dict]:
     model.eval()
     rows = []
     for batch in loader:
-        pred_std = model(**model_inputs(batch, stats, device)).float().cpu()
-        pred = torch.exp(pred_std * stats["y_std"] + stats["y_mean"])
+        pred = torch.exp(model(**model_inputs(batch, stats, device)).float().cpu())
         for sid, fips, year, y, p in zip(batch["sample_id"], batch["fips"], batch["year"].tolist(),
                                          batch["labels"].tolist(), pred.tolist()):
             rows.append({"sample_id": sid, "fips": fips, "year": year, "y_true": y, "y_pred": p})
@@ -164,7 +163,7 @@ def evaluate_final_checkpoint(checkpoint_path, dataset_jsonl, data_root, output_
         train_years=train_years,
         test_years=test_years,
         required_fields=tuple(f"model_config.{key}" for key in (*MODEL_KEYS, "image_size")) + tuple(
-            f"stats.{key}" for key in ("weather_mean", "weather_std", "y_mean", "y_std")
+            f"stats.{key}" for key in ("weather_mean", "weather_std", "y_mean")
         ),
         log_loaded=False,
     )
@@ -226,6 +225,7 @@ def main(args) -> Path:
         model_config=model_config,
     )
     model = build_model(model_config).to(device)
+    model.init_output_bias(float(stats["y_mean"]))
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     ro.write_json(run_dir / "run_metadata.json", ro.base_metadata(
         model=cfg.MODEL_NAME, adaptation=cfg.ADAPTATION, run_id=args.run_id, dataset_jsonl=args.dataset_jsonl,
@@ -233,7 +233,7 @@ def main(args) -> Path:
         counties=len({s["fips"] for s in dataset.samples}), inputs=cfg.INPUTS, train_samples=len(dataset),
         epochs=args.epochs, optimizer="AdamW", lr=args.lr, weight_decay=args.weight_decay,
         scheduler=f"linear warmup {args.warmup_epochs} epochs + cosine", image_size=args.image_size,
-        target="standardized log(yield_bu_ac)", parameters=ro.count_parameters(model),
+        target="log(yield_bu_ac)", parameters=ro.count_parameters(model),
         checkpoint_policy=("final epoch only, fixed budget" if args.checkpoint_policy == "final"
                            else ("best validation epoch, early stopping" if valid_loader is not None
                                  else "final epoch only, no validation selection")),
