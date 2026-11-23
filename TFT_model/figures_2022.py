@@ -67,7 +67,7 @@ def fig_scatter(plt, fips, pred, truth, base):
         ax.set_aspect("equal")
         ax.set_title(f"{title}（RMSE = {m['rmse']:.2f}）", fontsize=11, color=INK)
         ax.set_xlabel("观测单产（bu/ac）", fontsize=10, color=INK)
-        ax.text(0.05, 0.95, f"RMSE {m['rmse']:.2f}\nMAE {m['mae']:.2f}\n$R^2$ {m['r2']:.3f}\n$r$ {m['corr']:.3f}",
+        ax.text(0.05, 0.95, f"RMSE {m['rmse']:.2f}\n$R^2$ {m['r2']:.3f}\n$r$ {m['corr']:.3f}",
                 transform=ax.transAxes, va="top", ha="left", fontsize=8.5, color=INK,
                 bbox={"boxstyle": "round,pad=0.35", "fc": "white", "ec": GRID, "lw": 0.8})
         style(ax)
@@ -155,7 +155,7 @@ def main():
     ablation = fig_ablation(plt, scores["（a）PAF-Net"]["rmse"])
 
     for name, m in scores.items():
-        print(f"{name}: RMSE {m['rmse']:.2f} MAE {m['mae']:.2f} R2 {m['r2']:.3f} r {m['corr']:.3f}")
+        print(f"{name}: RMSE {m['rmse']:.2f} R2 {m['r2']:.3f} r {m['corr']:.3f}")
     gains = [r["base"] - r["tft"] for r in states]
     print(f"states: {int(sum(g > 0 for g in gains))}/{len(gains)} better, "
           f"median gain {np.median([g for g in gains if g > 0]):.2f}")
